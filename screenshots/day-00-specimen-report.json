@@ -1,0 +1,46 @@
+{
+  "day": 0,
+  "slug": "00-specimen",
+  "expectedHeader": "Day 00 - Specimen",
+  "domAudit": {
+    "headerText": "Day 00 - Specimen",
+    "bodyBg": "rgb(33, 37, 41)",
+    "drawerCount": 31
+  },
+  "telemetry": {
+    "frameCount": 376,
+    "avgFrameMs": 8.29,
+    "p95FrameMs": 9.3,
+    "sceneState": {
+      "day": 0,
+      "slug": "00-specimen",
+      "headerLabel": "Day 00 - Specimen",
+      "frameCount": 376,
+      "cameraPos": [
+        -2.0916991889500482,
+        4.3293181891834065,
+        -0.6665572141624727
+      ],
+      "pointerWorld": [
+        -0.3542256970622013,
+        -0.1297850736475965,
+        0.2686231870555993
+      ],
+      "pointerSpeed": 0.0409,
+      "pointerDwellSec": 1.8439,
+      "pointerImpulse": 0.001
+    }
+  },
+  "metrics": {
+    "specimenCoverageRatio": 0.3221,
+    "interactionMad": 14.274
+  },
+  "gpuErrors": [],
+  "gateFailures": [],
+  "artifacts": {
+    "contactSheet": "screenshots/day-00-specimen-contact-sheet.png",
+    "initial": "screenshots/day-00-specimen-initial.png",
+    "drawer": "screenshots/day-00-specimen-drawer.png"
+  },
+  "passed": true
+}
