@@ -6,3 +6,5 @@ dist/
 .agents/*
 !.agents/skills/
 !.agents/skills/**
+.vercel
+.env*

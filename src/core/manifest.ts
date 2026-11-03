@@ -80,12 +80,12 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
   createDay(
     2,
     'Shatter',
-    'upcoming',
+    'complete',
     'rapier',
     'azuritePrussian',
     'realgarAmber',
-    'Suspended obsidian-azurite monolith fracturing along 3D Voronoi cleavage planes in slow time',
-    'Click or flick to inject radial fracture impulses; hold to suspend and levitate shards with amber seam glow'
+    'Suspended Azurite-slate Kintsugi monolith fracturing along two-tier 3D Voronoi cleavage planes held in tension by golden-ochre resin threads',
+    'Click to shatter the monolith into primary shards, then click any individual shard to trigger a second-tier fracture; drag inward or click empty space to mend'
   ),
   createDay(
     3,
