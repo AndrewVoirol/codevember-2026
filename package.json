@@ -9,6 +9,7 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview --port 4173",
     "day:new": "node scripts/new-day.mjs",
+    "domains:sync": "node scripts/sync-domains.mjs",
     "bench:optical": "node scripts/optical-bench.mjs",
     "lint:wgsl": "node \"$HOME/.gemini/config/skills/gpu-project-modernizer/scripts/lint-wgsl-and-layout.mjs\" .",
     "map:symbols": "node \"$HOME/.gemini/config/skills/gpu-project-modernizer/scripts/map-symbols.mjs\"",
