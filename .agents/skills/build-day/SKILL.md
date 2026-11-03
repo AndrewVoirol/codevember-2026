@@ -81,6 +81,6 @@ Inspect the generated contact sheet at `screenshots/day-<XX>-<slug>-contact-shee
 ## Step 5: Promote Day Status to `'complete'` & Deploy
 
 Once verified with `0` console/WebGPU errors and `avgFrameMs <= 16.6 ms`:
-1. Update the day's `status` from `'upcoming'` (or `'in-progress'`) to `'complete'` in [`src/core/manifest.ts`](../../../src/core/manifest.ts).
-2. Because [`src/root.ts`](../../../src/root.ts) calls `getLatestActiveDay()`, promoting Day `XX` to `'complete'` automatically makes `/` boot Day `XX` and unlocks its link in the 30-day header drawer.
-3. Run `npm run domains:sync -- --day <XX>` and `git push` (which auto-deploys `https://codevember-2026.vercel.app`, `https://codevember-2026.andrewvoirol.com/<XX>-<slug>/`, and `https://codevember-2026-day-<XX>.andrewvoirol.com`).
+1. Update the day's `status` from `'upcoming'` (or `'in-progress'`) to `'complete'` in [`src/core/manifest.ts`](../../../src/core/manifest.ts) and update [`SPECIMEN_CATALOG.md`](../../../SPECIMEN_CATALOG.md) if the specimen concept evolved during design.
+2. Because [`src/root.ts`](../../../src/root.ts) calls `getLatestActiveDay()` (and routes `codevember-2026-day-XX.andrewvoirol.com` directly to Day `XX`), promoting Day `XX` to `'complete'` automatically makes `/` boot Day `XX` and unlocks its link in the 30-day header drawer.
+3. Commit and `git push` (all 30 `codevember-2026-day-XX.andrewvoirol.com` Cloudflare CNAMEs and Vercel domains are pre-provisioned; `git push` auto-deploys `https://codevember-2026.vercel.app`, `https://codevember-2026.andrewvoirol.com/<XX>-<slug>/`, and `https://codevember-2026-day-<XX>.andrewvoirol.com` with zero DNS steps).

@@ -1,15 +1,16 @@
 #!/usr/bin/env node
 /**
  * Syncs custom `andrewvoirol.com` subdomains (`codevember-2026.andrewvoirol.com`
- * and `codevember-2026-day-XX.andrewvoirol.com`) across Vercel and Cloudflare DNS.
+ * and `codevember-2026-day-XX.andrewvoirol.com`) across Vercel and Cloudflare DNS
+ * via direct REST APIs (completes 31 domains in ~2 seconds with zero CLI spawns).
  *
  * Usage:
  *   npm run domains:sync               # syncs hub + all completed days
  *   npm run domains:sync -- --day 01   # syncs hub + Day 01 specifically
  *   npm run domains:sync -- --all      # pre-provisions all 30 day subdomains
  */
-import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -17,8 +18,28 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(__dirname, '..');
 
 const ZONE_ID = 'd58dd4efb58da5dd897a8de67d82a62c'; // andrewvoirol.com
-const VERCEL_PROJECT = 'codevember-2026';
+const VERCEL_PROJECT_ID = 'prj_phmPwslPBCW72F6PmGRnuHCcgq36';
+const VERCEL_TEAM_ID = 'team_kolNPWOwylfRLVW2zjkXO3Ll';
 const BASE_DOMAIN = 'andrewvoirol.com';
+
+function resolveVercelToken() {
+  if (process.env.VERCEL_TOKEN) return process.env.VERCEL_TOKEN;
+  const candidates = [
+    path.join(os.homedir(), 'Library/Application Support/com.vercel.cli/auth.json'),
+    path.join(os.homedir(), '.local/share/com.vercel.cli/auth.json'),
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) {
+      try {
+        const json = JSON.parse(fs.readFileSync(p, 'utf8'));
+        if (json.token) return json.token;
+      } catch {
+        // ignore
+      }
+    }
+  }
+  return null;
+}
 
 function getTargetDays() {
   const args = process.argv.slice(2);
@@ -29,7 +50,6 @@ function getTargetDays() {
   if (dayIdx !== -1 && args[dayIdx + 1]) {
     return [Number.parseInt(args[dayIdx + 1], 10)];
   }
-  // Default: parse completed days from src/core/manifest.ts
   const manifest = fs.readFileSync(path.resolve(ROOT_DIR, 'src/core/manifest.ts'), 'utf8');
   const days = [];
   const regex = /createDay\(\s*(\d+)\s*,\s*'[^']+'\s*,\s*'complete'/g;
@@ -41,32 +61,35 @@ function getTargetDays() {
   return days;
 }
 
-async function ensureCloudflareCname(sub, token) {
-  if (!token) {
-    console.warn(`  [Cloudflare] Skipped ${sub}.${BASE_DOMAIN} (CLOUDFLARE_API_TOKEN not set)`);
-    return;
-  }
-  const fqdn = `${sub}.${BASE_DOMAIN}`;
-  const listRes = await fetch(
-    `https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records?type=CNAME&name=${fqdn}`,
-    { headers: { Authorization: `Bearer ${token}` } }
+async function fetchExistingCloudflareCnames(cfToken) {
+  if (!cfToken) return new Set();
+  const res = await fetch(
+    `https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records?type=CNAME&per_page=100`,
+    { headers: { Authorization: `Bearer ${cfToken}` } }
   );
-  const listJson = await listRes.json();
-  if (!listJson.success) {
-    console.warn(`  [Cloudflare] Auth/API error for ${fqdn}:`, JSON.stringify(listJson.errors));
-    return;
+  const json = await res.json();
+  if (!json.success) {
+    console.warn('[Cloudflare] Warning listing CNAMEs:', JSON.stringify(json.errors));
+    return new Set();
   }
-  if (listJson.result && listJson.result.length > 0) {
-    console.log(`  [Cloudflare] CNAME already exists: ${fqdn} -> ${listJson.result[0].content}`);
-    return;
-  }
+  return new Set((json.result || []).map((r) => r.name));
+}
 
+async function ensureCloudflareCname(sub, cfToken, existingSet) {
+  const fqdn = `${sub}.${BASE_DOMAIN}`;
+  if (!cfToken) {
+    console.warn(`  [Cloudflare] Skipped ${fqdn} (CLOUDFLARE_API_TOKEN not set)`);
+    return;
+  }
+  if (existingSet.has(fqdn)) {
+    return;
+  }
   const createRes = await fetch(
     `https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records`,
     {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${token}`,
+        Authorization: `Bearer ${cfToken}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
@@ -86,38 +109,56 @@ async function ensureCloudflareCname(sub, token) {
   }
 }
 
-function ensureVercelDomain(fqdn) {
-  try {
-    execFileSync('vercel', ['domains', 'add', fqdn, VERCEL_PROJECT], {
-      cwd: ROOT_DIR,
-      env: { ...process.env, NO_UPDATE_NOTIFIER: '1' },
-      stdio: 'pipe',
-    });
-    console.log(`  [Vercel] Attached domain: ${fqdn}`);
-  } catch (err) {
-    const out = String(err.stderr || err.stdout || err.message);
-    if (/already assigned|already exists/i.test(out)) {
-      console.log(`  [Vercel] Domain already attached: ${fqdn}`);
-    } else {
-      console.warn(`  [Vercel] Warning on ${fqdn}: ${out.trim()}`);
-    }
+async function ensureVercelDomainApi(fqdn, vercelToken) {
+  if (!vercelToken) {
+    console.warn(`  [Vercel] Skipped ${fqdn} (no Vercel token found)`);
+    return;
   }
+  const res = await fetch(
+    `https://api.vercel.com/v10/projects/${VERCEL_PROJECT_ID}/domains?teamId=${VERCEL_TEAM_ID}`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${vercelToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ name: fqdn }),
+    }
+  );
+  const json = await res.json();
+  if (res.ok || json?.error?.code === 'domain_already_in_use' || json?.error?.code === 'domain_already_exists') {
+    return true;
+  }
+  console.warn(`  [Vercel] Warning on ${fqdn}:`, JSON.stringify(json.error || json));
+  return false;
 }
 
 async function main() {
-  const token = process.env.CLOUDFLARE_API_TOKEN;
+  const cfToken = process.env.CLOUDFLARE_API_TOKEN;
+  const vercelToken = resolveVercelToken();
   const days = getTargetDays();
   const subdomains = [
     'codevember-2026',
     ...days.map((d) => `codevember-2026-day-${String(d).padStart(2, '0')}`),
   ];
 
-  for (const sub of subdomains) {
-    const fqdn = `${sub}.${BASE_DOMAIN}`;
-    console.log(`Syncing ${fqdn}...`);
-    ensureVercelDomain(fqdn);
-    await ensureCloudflareCname(sub, token);
+  const existingCf = await fetchExistingCloudflareCnames(cfToken);
+
+  // Process in parallel batches of 6
+  const batchSize = 6;
+  for (let i = 0; i < subdomains.length; i += batchSize) {
+    const slice = subdomains.slice(i, i + batchSize);
+    await Promise.all(
+      slice.map(async (sub) => {
+        const fqdn = `${sub}.${BASE_DOMAIN}`;
+        await Promise.all([
+          ensureVercelDomainApi(fqdn, vercelToken),
+          ensureCloudflareCname(sub, cfToken, existingCf),
+        ]);
+      })
+    );
   }
+  console.log(`Synced ${subdomains.length} domain(s) across Vercel & Cloudflare DNS.`);
 }
 
 main().catch((err) => {

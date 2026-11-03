@@ -50,3 +50,17 @@
    - Never hardcode `(0, 0)` world-origin shading vectors for pointer interactions; always evaluate distances relative to `stage.uPointerWorld`.
 5. **Hardware Metal Verification Before Marking Complete**:
    - Before setting a day's `status: 'complete'` in `src/core/manifest.ts`, run `npm run bench:optical -- --day <XX>` and visually inspect `screenshots/day-<XX>-<slug>-contact-sheet.png` to confirm `0` WebGPU/console errors, `avgFrameMs <= 16.6 ms`, and clear tactile pointer response.
+
+---
+
+## 3. Tactile Physics Ergonomics & Zero-Stall Command Hygiene
+
+1. **Continuous Pointer Drag & Release Ergonomics (Never Fight the Cursor)**:
+   - **Zero Quadrant Angle Jumps**: Never use discrete `if / else if` quadrant branches (`px > 0`, `py > 0`) to snap target orientation angles or flip anchor ends during an active pointer drag—doing so inverts the projection axis mid-gesture and fights the user's hand. Use smooth, monotonic functions (`Math.tanh(px * k)`) and track relative drag deltas (`curProj - dragStartProj`) anchored at `pointerdown`.
+   - **Honor Drag Direction on Release**: When the user drags a specimen toward an open/unfolded state and releases, complete the transition in the direction of their drag rather than snapping back to a collapsed default unless a narrow threshold is met.
+2. **Gravitational Acceleration vs. `smoothstep` Braking**:
+   - Never use `smoothstep` (`t²(3 - 2t)`) for gravity-driven falls, pendulums, or sequential hinge cascades—`smoothstep` brakes velocity to `0` right before contact (`t = 1`), creating robotic start-stop pauses.
+   - Use gravitational acceleration curves ($\theta(t) = \pi \, t^\gamma$ with $\gamma \in [1.4, 1.7]$) that accelerate all the way into impact, paired with cascade overlap (`CASCADE_OVERLAP > 1.0`) and damped contact rebound so momentum transfers continuously across segments.
+3. **Zero Runaway Background Tasks**:
+   - Only the local Vite dev server (`npm run dev`, `IsDaemon: true`) should remain running in the background. If any synchronous command (`git`, `curl`, `grep`, `bench:optical`) exceeds `WaitMsBeforeAsync` and backgrounds unexpectedly, immediately inspect or `kill` it via `manage_task` on the next turn.
+   - Always pass `--exclude-dir={node_modules,.git,dist}` to recursive `grep`, and verify HTTP/DNS endpoints with `curl -sI --max-time 5` or `dig +short` rather than interactive `npx vercel` inspect commands.
