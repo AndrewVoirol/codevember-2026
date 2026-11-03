@@ -80,6 +80,7 @@ async function main() {
   );
 
   let browser;
+  let exitCode = 0;
   try {
     const baseUrl = `http://localhost:${port}`;
     await waitForServer(`${baseUrl}/`);
@@ -321,14 +322,15 @@ async function main() {
     console.log(JSON.stringify(report, null, 2));
 
     if (gateFailures.length > 0) {
-      process.exitCode = 1;
+      exitCode = 1;
     }
   } finally {
     if (browser) {
       await browser.close();
     }
-    viteProc.kill('SIGTERM');
+    viteProc.kill('SIGKILL');
   }
+  process.exit(exitCode);
 }
 
 main().catch((err) => {
