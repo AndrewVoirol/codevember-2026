@@ -1,0 +1,46 @@
+{
+  "day": 1,
+  "slug": "01-fold",
+  "expectedHeader": "Day 01 - Fold",
+  "domAudit": {
+    "headerText": "Day 01 - Fold",
+    "bodyBg": "rgb(33, 37, 41)",
+    "drawerCount": 30
+  },
+  "telemetry": {
+    "frameCount": 382,
+    "avgFrameMs": 8.28,
+    "p95FrameMs": 9.3,
+    "sceneState": {
+      "day": 1,
+      "slug": "01-fold",
+      "headerLabel": "Day 01 - Fold",
+      "frameCount": 382,
+      "cameraPos": [
+        0,
+        0.12,
+        4.65
+      ],
+      "pointerWorld": [
+        0.34832402925687483,
+        -0.2749011315538631,
+        0.007094222749777224
+      ],
+      "pointerSpeed": 0,
+      "pointerDwellSec": 1.7893,
+      "pointerImpulse": 0.0011
+    }
+  },
+  "metrics": {
+    "specimenCoverageRatio": 0.2532,
+    "interactionMad": 14.251
+  },
+  "gpuErrors": [],
+  "gateFailures": [],
+  "artifacts": {
+    "contactSheet": "screenshots/day-01-fold-contact-sheet.png",
+    "initial": "screenshots/day-01-fold-initial.png",
+    "drawer": "screenshots/day-01-fold-drawer.png"
+  },
+  "passed": true
+}

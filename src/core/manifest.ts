@@ -70,12 +70,12 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
   createDay(
     1,
     'Fold',
-    'upcoming',
+    'complete',
     'tsl',
     'boneCalcite',
     'rawUmber',
-    'Miura-ori & chevron-pleated limestone/washi geological lamina suspended in tension',
-    'Drag across crease lines to compress and unfurl tectonic pleats with elastic hinge recoil'
+    'Diagonal articulated Bone Calcite & Raw Umber rigid-slat panel that hinges 180° over on itself under gravity',
+    'Click to release the gravity fold cascade; drag toward any corner or the top edge to unroll back into planar mode'
   ),
   createDay(
     2,
