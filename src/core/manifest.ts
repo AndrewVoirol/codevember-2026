@@ -90,12 +90,12 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
   createDay(
     3,
     'Melt',
-    'upcoming',
-    'tsl-compute',
+    'complete',
+    'tsl',
     'realgarAmber',
     'burntSienna',
-    'Thermal wax & amber resin column undergoing Stefan-problem phase slump and pendant droplet pinch-off',
-    'Pointer acts as a radiant thermal filament, locally melting solid strata into viscous dripping threads'
+    'Diagonal-cut Warm Bone Calcite & Burnt Sienna sandwich block oozing and stretching a curtain of molten Realgar-Amber & Cinnabar strings across the 45° gap',
+    'Drag to squeeze molten amber out the diagonal seam or pull the wedges apart to stretch and neck viscoelastic strings; click any taut strand to snap it'
   ),
   createDay(
     4,

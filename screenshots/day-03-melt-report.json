@@ -1,0 +1,46 @@
+{
+  "day": 3,
+  "slug": "03-melt",
+  "expectedHeader": "Day 03 - Melt",
+  "domAudit": {
+    "headerText": "Day 03 - Melt",
+    "bodyBg": "rgb(33, 37, 41)",
+    "drawerCount": 30
+  },
+  "telemetry": {
+    "frameCount": 371,
+    "avgFrameMs": 8.33,
+    "p95FrameMs": 8.9,
+    "sceneState": {
+      "day": 3,
+      "slug": "03-melt",
+      "headerLabel": "Day 03 - Melt",
+      "frameCount": 371,
+      "cameraPos": [
+        0,
+        0.050000000000000204,
+        4.65
+      ],
+      "pointerWorld": [
+        0.3482282293494022,
+        -0.2749011315538633,
+        0.002955926145740584
+      ],
+      "pointerSpeed": 0,
+      "pointerDwellSec": 2.2498,
+      "pointerImpulse": 0.0006
+    }
+  },
+  "metrics": {
+    "specimenCoverageRatio": 0.2474,
+    "interactionMad": 20.476
+  },
+  "gpuErrors": [],
+  "gateFailures": [],
+  "artifacts": {
+    "contactSheet": "screenshots/day-03-melt-contact-sheet.png",
+    "initial": "screenshots/day-03-melt-initial.png",
+    "drawer": "screenshots/day-03-melt-drawer.png"
+  },
+  "passed": true
+}
