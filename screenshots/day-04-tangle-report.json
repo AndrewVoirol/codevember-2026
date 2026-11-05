@@ -1,0 +1,57 @@
+{
+  "day": 4,
+  "slug": "04-tangle",
+  "expectedHeader": "Day 04 - Tangle",
+  "domAudit": {
+    "headerText": "Day 04 - Tangle",
+    "bodyBg": "rgb(33, 37, 41)",
+    "drawerCount": 30
+  },
+  "telemetry": {
+    "frameCount": 361,
+    "avgFrameMs": 9.51,
+    "p95FrameMs": 19.9,
+    "sceneState": {
+      "day": 4,
+      "slug": "04-tangle",
+      "headerLabel": "Day 04 - Tangle",
+      "frameCount": 361,
+      "cameraPos": [
+        0,
+        0.020000000000000483,
+        4.7
+      ],
+      "pointerWorld": [
+        0.36269489466800436,
+        -0.28633548230524913,
+        0.0012184488608735222
+      ],
+      "pointerSpeed": 0,
+      "pointerDwellSec": 2.1591,
+      "pointerImpulse": 0.0007,
+      "specimen": "TangledCassetteAndPencil",
+      "unspoolRatio": 1,
+      "knotSeverity": 1,
+      "isRewinding": false,
+      "isJammed": false,
+      "pencilAzimuth": 0.94,
+      "totalCreaseEnergy": 0.31,
+      "leftReelAngle": -1.69,
+      "rightReelAngle": 0.874,
+      "finiteGeometry": true,
+      "frontFaceClipCount": 0
+    }
+  },
+  "metrics": {
+    "specimenCoverageRatio": 0.2486,
+    "interactionMad": 5.114
+  },
+  "gpuErrors": [],
+  "gateFailures": [],
+  "artifacts": {
+    "contactSheet": "screenshots/day-04-tangle-contact-sheet.png",
+    "initial": "screenshots/day-04-tangle-initial.png",
+    "drawer": "screenshots/day-04-tangle-drawer.png"
+  },
+  "passed": true
+}

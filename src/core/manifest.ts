@@ -100,12 +100,12 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
   createDay(
     4,
     'Tangle',
-    'upcoming',
-    'tsl-compute',
-    'burntSienna',
-    'boneCalcite',
-    'Self-avoiding Cosserat elastic root-and-wire knot bundle writhing under torsional stress',
-    'Stirring the pointer braids and tightens the suspended filaments; releasing snaps them back'
+    'complete',
+    'tsl',
+    'rawUmber',
+    'realgarAmber',
+    'Smoky polycarbonate MIXTAPE Compact Cassette specimen with a hexagonal yellow-ochre #2 pencil wedged in the right 6-toothed drive hub and a multi-loop bird’s-nest tangle of glossy ferric-oxide tape cascading down the left flank and bottom',
+    'Grab and crank the hexagonal pencil around the right drive hub (or click) to wind the tangled tape back into the cassette; drag or sweep through the spilled ribbon loops to pull more slack and tangle it further'
   ),
   createDay(
     5,
