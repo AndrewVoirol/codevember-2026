@@ -110,12 +110,12 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
   createDay(
     5,
     'Moss',
-    'upcoming',
+    'complete',
     'tsl',
     'mossUmbrous',
     'yellowOchre',
-    'Weathered basalt core colonized by thousands of instanced bryophyte gametophytes and spore capsules',
-    'Pointer moisture trail blooms dry dormant moss tufts into lush hydrated emerald-ochre cushions'
+    'Seven-pillar stepped polished veined-marble and dark-rock cluster where poured translucent green liquid naturally pools and cascades, subtly shifts color into an olive-ochre mold biofilm, and blooms into high-precision bryophyte moss',
+    'Click any pillar to pour translucent green liquid (click repeatedly or hold to pour more and cascade across lower tiers); drag to rotate and scroll/pinch to zoom in and explore the mossing'
   ),
   createDay(
     6,
