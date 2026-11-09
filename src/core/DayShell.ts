@@ -130,6 +130,7 @@ export function mountDayShell(dayNumberOrEntry: number | DayEntry): MountedDaySh
       closeDrawer();
       return;
     }
+    if (ev.defaultPrevented || ev.target instanceof HTMLInputElement) return;
     if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
     if (ev.key === 'ArrowLeft' || ev.key === 'ArrowRight') {
       const { prev, next } = getAdjacentCompletedDays(day.day);

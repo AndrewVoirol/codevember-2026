@@ -120,12 +120,12 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
   createDay(
     6,
     'Orrery',
-    'upcoming',
-    'tsl',
+    'complete',
+    'wgsl',
     'yellowOchre',
     'lapisUltramarine',
-    'Precision oxidized-brass & lapis planetary escapement mechanism with eccentric epicyclic rings',
-    'Pointer drag winds the mainspring differential, accelerating orbital harmonics and eclipse alignments'
+    'Grand 6-planet coaxial brass planetarium uniting an 18th-century stepped gear pyramid, Da Vinci Codex Madrid conical fusee & verge-foliot regulator, and Antikythera Hipparchus pin-and-slot lunar anomaly + 4-turn Saros dial',
+    'Drag the left handwheel to crank manually or drag to orbit across 6 camera presets; hover/click any of 16 mechanical groups to inspect live telemetry or press [C] for X-Ray cutaway and [E] to explode coaxial decks'
   ),
   createDay(
     7,

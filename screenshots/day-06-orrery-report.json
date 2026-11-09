@@ -1,0 +1,39 @@
+{
+  "day": 6,
+  "slug": "06-orrery",
+  "expectedHeader": "Day 06 - Orrery",
+  "domAudit": {
+    "headerText": "Day 06 - Orrery",
+    "bodyBg": "rgb(33, 37, 41)",
+    "drawerCount": 30
+  },
+  "telemetry": {
+    "frameCount": 343,
+    "avgFrameMs": 8.34,
+    "p95FrameMs": 9.1,
+    "sceneState": {
+      "day": 95.63728779307235,
+      "preset": "overview",
+      "az": -77.00537691465355,
+      "el": 32.735371641389484,
+      "dist": 495,
+      "cutaway": 0,
+      "explode": 0,
+      "activeDraws": 1122,
+      "hoveredGroup": 0,
+      "selectedGroup": 0
+    }
+  },
+  "metrics": {
+    "specimenCoverageRatio": 0.3688,
+    "interactionMad": 20.938
+  },
+  "gpuErrors": [],
+  "gateFailures": [],
+  "artifacts": {
+    "contactSheet": "screenshots/day-06-orrery-contact-sheet.png",
+    "initial": "screenshots/day-06-orrery-initial.png",
+    "drawer": "screenshots/day-06-orrery-drawer.png"
+  },
+  "passed": true
+}
