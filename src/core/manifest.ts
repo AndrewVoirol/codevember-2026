@@ -130,7 +130,7 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
   createDay(
     7,
     'Hollow',
-    'upcoming',
+    'complete',
     'tsl',
     'warmKaolin',
     'cinnabarVermilion',

@@ -1,0 +1,46 @@
+{
+  "day": 7,
+  "slug": "07-hollow",
+  "expectedHeader": "Day 07 - Hollow",
+  "domAudit": {
+    "headerText": "Day 07 - Hollow",
+    "bodyBg": "rgb(33, 37, 41)",
+    "drawerCount": 30
+  },
+  "telemetry": {
+    "frameCount": 371,
+    "avgFrameMs": 8.28,
+    "p95FrameMs": 10.1,
+    "sceneState": {
+      "day": 7,
+      "slug": "07-hollow",
+      "headerLabel": "Day 07 - Hollow",
+      "frameCount": 371,
+      "cameraPos": [
+        0,
+        0.03000000000000232,
+        4.35000000000033
+      ],
+      "pointerWorld": [
+        0.31586552167925935,
+        -0.24936158706473935,
+        0.0017197350832045544
+      ],
+      "pointerSpeed": 0,
+      "pointerDwellSec": 1.8293,
+      "pointerImpulse": 0.0009
+    }
+  },
+  "metrics": {
+    "specimenCoverageRatio": 0.3628,
+    "interactionMad": 19.985
+  },
+  "gpuErrors": [],
+  "gateFailures": [],
+  "artifacts": {
+    "contactSheet": "screenshots/day-07-hollow-contact-sheet.png",
+    "initial": "screenshots/day-07-hollow-initial.png",
+    "drawer": "screenshots/day-07-hollow-drawer.png"
+  },
+  "passed": true
+}
