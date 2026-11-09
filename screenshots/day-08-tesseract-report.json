@@ -1,0 +1,52 @@
+{
+  "day": 8,
+  "slug": "08-tesseract",
+  "expectedHeader": "Day 08 - Tesseract",
+  "domAudit": {
+    "headerText": "Day 08 - Tesseract",
+    "bodyBg": "rgb(33, 37, 41)",
+    "drawerCount": 30
+  },
+  "telemetry": {
+    "frameCount": 387,
+    "avgFrameMs": 8.27,
+    "p95FrameMs": 9.4,
+    "sceneState": {
+      "day": 8,
+      "slug": "08-tesseract",
+      "headerLabel": "Day 08 - Tesseract",
+      "frameCount": 387,
+      "cameraPos": [
+        0,
+        0.22000000000000056,
+        4.950000000000006
+      ],
+      "pointerWorld": [
+        0.35977944455164573,
+        -0.2837562887288191,
+        0.01261139061017058
+      ],
+      "pointerSpeed": 0,
+      "pointerDwellSec": 1.8877,
+      "pointerImpulse": 0.0008,
+      "concept": "8C-slicer-tomograph",
+      "symmetryPreset": "vertex-first-1111",
+      "sliceW0": 0.145,
+      "activeCrystalVerts": 102,
+      "activePiercedEdges": 12,
+      "activeContourSegments": 180
+    }
+  },
+  "metrics": {
+    "specimenCoverageRatio": 0.2402,
+    "interactionMad": 11.728
+  },
+  "gpuErrors": [],
+  "gateFailures": [],
+  "artifacts": {
+    "contactSheet": "screenshots/day-08-tesseract-contact-sheet.png",
+    "initial": "screenshots/day-08-tesseract-initial.png",
+    "drawer": "screenshots/day-08-tesseract-drawer.png"
+  },
+  "passed": true
+}

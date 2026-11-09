@@ -134,18 +134,18 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
     'tsl',
     'warmKaolin',
     'cinnabarVermilion',
-    'Calcified trabecular bone & karst geodesic cavern cross-section revealing cinnabar inner chambers',
-    'Pointer carves a moving clinical/geological clip-sphere through the outer shell into the hollow core'
+    'Seven-shell carved Canton mineral-ivory puzzle ball (Guigongqiu) with concentric counter-rotating rose-window spheres enclosing a glowing cinnabar-and-amber filigree lantern core',
+    'Drag to spin the counter-rotating concentric shell differential; click or dwell to align the pierced circular windows in syzygy down the sightline to the hollow core'
   ),
   createDay(
     8,
     'Tesseract',
-    'upcoming',
+    'complete',
     'tsl',
     'lapisUltramarine',
     'boneCalcite',
-    'Stereographic 4D polychoron (hypercube/24-cell) cast in ground calcite struts and lapis soap-film membranes',
-    'Pointer X/Y drives XW and YW 4D Givens rotations, turning the inner cell inside-out through R3'
+    '4D hyperplane crystallographic tomograph slicing a rotating tesseract into a multi-mineral Euclidean fortification-agate polyhedron pinned to 32 tubular 4D struts with cinnabar piercing calipers',
+    'Vertical drag sweeps the w = w0 slicing hyperplane along the 4D struts; horizontal drag orbits and tilts the 4D crystal; click cycles canonical 4D symmetry axes'
   ),
   createDay(
     9,
