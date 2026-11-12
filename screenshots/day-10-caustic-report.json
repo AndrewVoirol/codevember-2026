@@ -1,0 +1,46 @@
+{
+  "day": 10,
+  "slug": "10-caustic",
+  "expectedHeader": "Day 10 - Caustic",
+  "domAudit": {
+    "headerText": "Day 10 - Caustic",
+    "bodyBg": "rgb(33, 37, 41)",
+    "drawerCount": 30
+  },
+  "telemetry": {
+    "frameCount": 316,
+    "avgFrameMs": 8.32,
+    "p95FrameMs": 10.2,
+    "sceneState": {
+      "day": 10,
+      "slug": "10-caustic",
+      "headerLabel": "Day 10 - Caustic",
+      "frameCount": 316,
+      "cameraPos": [
+        0.22,
+        2.38,
+        3.8200000000000007
+      ],
+      "pointerWorld": [
+        0.41403581518293275,
+        -0.35711591397128384,
+        0.2265216205399141
+      ],
+      "pointerSpeed": 0,
+      "pointerDwellSec": 1.6373,
+      "pointerImpulse": 0.0017
+    }
+  },
+  "metrics": {
+    "specimenCoverageRatio": 0.5055,
+    "interactionMad": 10.969
+  },
+  "gpuErrors": [],
+  "gateFailures": [],
+  "artifacts": {
+    "contactSheet": "screenshots/day-10-caustic-contact-sheet.png",
+    "initial": "screenshots/day-10-caustic-initial.png",
+    "drawer": "screenshots/day-10-caustic-drawer.png"
+  },
+  "passed": true
+}

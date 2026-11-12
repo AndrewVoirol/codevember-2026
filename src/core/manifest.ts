@@ -160,12 +160,12 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
   createDay(
     10,
     'Caustic',
-    'upcoming',
-    'wgsl',
+    'complete',
+    'tsl',
     'celadonGlauconite',
     'realgarAmber',
-    'Suspended optical glass lens & water cuvette projecting spectral photon caustics onto a calcite receiver plate',
-    'Pointer perturbs the free meniscus and tilts the glass element, focusing razor-sharp caustic cusps'
+    'Blown Venetian celadon-crystal goblet half-filled with botanical-mineral elixir casting forward-traced nephroid, cardioid, and rippling meniscus caustics onto a beveled Bone Calcite slab',
+    'Drag the stone slab or brass condenser lamp to orbit and tilt the incident beam; sweep or tap the goblet to slosh the liquid and ripple the caustic web'
   ),
   createDay(
     11,
