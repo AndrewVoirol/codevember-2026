@@ -1,0 +1,46 @@
+{
+  "day": 9,
+  "slug": "09-membrane",
+  "expectedHeader": "Day 09 - Membrane",
+  "domAudit": {
+    "headerText": "Day 09 - Membrane",
+    "bodyBg": "rgb(33, 37, 41)",
+    "drawerCount": 30
+  },
+  "telemetry": {
+    "frameCount": 333,
+    "avgFrameMs": 8.34,
+    "p95FrameMs": 9,
+    "sceneState": {
+      "day": 9,
+      "slug": "09-membrane",
+      "headerLabel": "Day 09 - Membrane",
+      "frameCount": 333,
+      "cameraPos": [
+        0,
+        2.42,
+        3.76
+      ],
+      "pointerWorld": [
+        0.3245974234498833,
+        -0.29474745117153356,
+        0.19911131009991978
+      ],
+      "pointerSpeed": 0,
+      "pointerDwellSec": 2.1093,
+      "pointerImpulse": 0.0011
+    }
+  },
+  "metrics": {
+    "specimenCoverageRatio": 0.4284,
+    "interactionMad": 4.198
+  },
+  "gpuErrors": [],
+  "gateFailures": [],
+  "artifacts": {
+    "contactSheet": "screenshots/day-09-membrane-contact-sheet.png",
+    "initial": "screenshots/day-09-membrane-initial.png",
+    "drawer": "screenshots/day-09-membrane-drawer.png"
+  },
+  "passed": true
+}

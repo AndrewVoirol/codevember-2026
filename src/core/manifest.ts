@@ -150,12 +150,12 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
   createDay(
     9,
     'Membrane',
-    'upcoming',
+    'complete',
     'tsl-compute',
-    'celadonGlauconite',
-    'cinnabarVermilion',
-    'Bilayer lipid & soap-film minimal surface stretched across a warped wire loop with thin-film interference',
-    'Pointer pressure indents the elastic membrane and advects Kubelka-Munk swirl thickness bands'
+    'boneCalcite',
+    'yellowOchre',
+    'Horizontal brass-and-walnut tension hoop stretching a translucent natural vellum/latex membrane where dropped polished mineral spheres bounce, deform deep gravity-well funnels, and coalesce into a sagging central pocket',
+    'Click (or hold to charge size and flick laterally to launch orbits) to drop polished mineral marbles onto the membrane; drag any resting stone to pull its tension funnel across the skin, or double-click / press Space to snap the drumhead upward'
   ),
   createDay(
     10,
