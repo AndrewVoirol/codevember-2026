@@ -170,12 +170,12 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
   createDay(
     11,
     'Rust',
-    'upcoming',
-    'tsl-compute',
+    'complete',
+    'tsl',
     'hematiteRust',
-    'verdigrisMalachite',
-    'Galvanic iron-and-copper mechanical plate undergoing live reaction-diffusion oxidation and flaking scale',
-    'Pointer scrubs away loose ferric scale or deposits electrolyte droplets that nucleate fresh rust blooms'
+    'yellowOchre',
+    'Hand-forged wrought-iron shipwreck spike suspended in a beveled soda-lime glass brine cube with porous goethite rusticle stalactites, gossamer ferric wisps, and delaminating oxide bark',
+    'Hover across the submerged nail to pry up and scrape brittle rust scabs down to dark forged iron; click or drag to gouge heavier flake bursts and slosh the tank'
   ),
   createDay(
     12,

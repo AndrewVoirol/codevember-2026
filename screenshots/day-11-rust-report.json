@@ -1,0 +1,46 @@
+{
+  "day": 11,
+  "slug": "11-rust",
+  "expectedHeader": "Day 11 - Rust",
+  "domAudit": {
+    "headerText": "Day 11 - Rust",
+    "bodyBg": "rgb(33, 37, 41)",
+    "drawerCount": 30
+  },
+  "telemetry": {
+    "frameCount": 391,
+    "avgFrameMs": 9.68,
+    "p95FrameMs": 13.4,
+    "sceneState": {
+      "day": 11,
+      "slug": "11-rust",
+      "headerLabel": "Day 11 - Rust",
+      "frameCount": 391,
+      "cameraPos": [
+        -2.869405938908768,
+        2.4703911970825136,
+        1.9270862054534628
+      ],
+      "pointerWorld": [
+        0.04425370437845322,
+        -0.20461082818111054,
+        0.33031363396764135
+      ],
+      "pointerSpeed": 0,
+      "pointerDwellSec": 2.1156,
+      "pointerImpulse": 0.0004
+    }
+  },
+  "metrics": {
+    "specimenCoverageRatio": 0.2483,
+    "interactionMad": 14.528
+  },
+  "gpuErrors": [],
+  "gateFailures": [],
+  "artifacts": {
+    "contactSheet": "screenshots/day-11-rust-contact-sheet.png",
+    "initial": "screenshots/day-11-rust-initial.png",
+    "drawer": "screenshots/day-11-rust-drawer.png"
+  },
+  "passed": true
+}
