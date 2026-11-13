@@ -48,7 +48,10 @@
 4. **Zero Synthetic Mathematical Tell-Tales**:
    - Never use polar star harmonics $\cos(m\theta)$ or $\sin(n\theta)$ ($m \ge 3$) on radial droplets, ripples, or blooms. Use irrational-angle rotated 3D FBM (`mineralToothFbm`) and physical wave/shear kinematics.
    - Never hardcode `(0, 0)` world-origin shading vectors for pointer interactions; always evaluate distances relative to `stage.uPointerWorld`.
-5. **Hardware Metal Verification Before Marking Complete**:
+5. **Physical Delamination, Hover Affordance & Overhang Shadow Hygiene**:
+   - For exfoliating or eroding materials (rust scale, bark, mineral crust, paint, ice), never use uniform small discs/triangles tumbling in midair ("confetti") or smooth Gaussian wear ovals clamped to rectangular UV bounds. Combine **surface-adhering irregular polygonal scabs** that visibly pry upward on mouseover (`cursor: 'crosshair'` / clear hover affordance) with multi-tier stepped chips + downward-settling grit, and gate substrate wear by **per-texel spall-plate ceilings** so scars fracture along irregular plate seams.
+   - Disable `receiveShadow` on porous hanging drapery/stalactites directly beneath overhanging bars when directional shadow maps would stamp a hard horizontal cutoff shelf across the organic form.
+6. **Hardware Metal Verification Before Marking Complete**:
    - Before setting a day's `status: 'complete'` in `src/core/manifest.ts`, run `npm run bench:optical -- --day <XX>` and visually inspect `screenshots/day-<XX>-<slug>-contact-sheet.png` to confirm `0` WebGPU/console errors, `avgFrameMs <= 16.6 ms`, and clear tactile pointer response.
 
 ---

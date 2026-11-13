@@ -22,6 +22,8 @@ Always read `/Users/andrewvoirol/.gemini/config/skills/webgpu-interactive-simula
 2. **Rapid 1-Question Alignment (Only If Needed)**:
    - If the user already specified what they want to build, proceed directly to **Step 2**.
    - If the user only said `"Let's do Day 01 - Fold"`, present the pre-seeded concept from `SPECIMEN_CATALOG.md` alongside 1–2 tactile variations using `ask_question` (unbiased framing, no `(Recommended)` prefix, max 3 options).
+3. **Concept-Render Pivot Gate (Before Full Rewrites or Crowded Tropes)**:
+   - When a theme risks a cliché trope (e.g., rusty gears) or a first build doesn't land aesthetically, **do not jump straight into another 1,500-line 3D build**. Spawn 3–5 parallel `image-generator` concept renders framed on the `#212529` Chalky Slate studio stage and present them in a markdown carousel artifact first; once one resonates, treat that render as the locked anatomical/silhouette reference for the 3D specimen.
 
 ---
 
@@ -84,3 +86,6 @@ Once verified with `0` console/WebGPU errors and `avgFrameMs <= 16.6 ms`:
 1. Update the day's `status` from `'upcoming'` (or `'in-progress'`) to `'complete'` in [`src/core/manifest.ts`](../../../src/core/manifest.ts) and update [`SPECIMEN_CATALOG.md`](../../../SPECIMEN_CATALOG.md) if the specimen concept evolved during design.
 2. Because [`src/root.ts`](../../../src/root.ts) calls `getLatestActiveDay()` (and routes `codevember-2026-day-XX.andrewvoirol.com` directly to Day `XX`), promoting Day `XX` to `'complete'` automatically makes `/` boot Day `XX` and unlocks its link in the 30-day header drawer.
 3. Commit and `git push` (all 30 `codevember-2026-day-XX.andrewvoirol.com` Cloudflare CNAMEs and Vercel domains are pre-provisioned; `git push` auto-deploys `https://codevember-2026.vercel.app`, `https://codevember-2026.andrewvoirol.com/<XX>-<slug>/`, and `https://codevember-2026-day-<XX>.andrewvoirol.com` with zero DNS steps).
+4. **Concurrent Multi-Day Shared-Checkout Safety**:
+   - Before running `bench:optical` or committing Day `<XX>`, check `git status -s` and `git diff src/core/manifest.ts SPECIMEN_CATALOG.md` for concurrent uncommitted sibling days.
+   - Never run `git add -A` or stage another uncommitted day's `'complete'` hunk in `manifest.ts` (which breaks production `/` `getLatestActiveDay()` when its `src/days/` module is untracked, and bakes an unlocked future day into `day-<XX>-drawer.png`). Save sibling-day hunks to `<ArtifactDir>/scratch/` during `bench:optical` + explicit-path `git add` + `git commit`, then immediately re-apply the sibling day's working-tree patch.
