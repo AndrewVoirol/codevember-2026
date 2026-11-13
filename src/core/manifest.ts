@@ -180,12 +180,12 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
   createDay(
     12,
     'Feather',
-    'upcoming',
+    'complete',
     'tsl',
-    'boneCalcite',
     'azuritePrussian',
-    'Single macro avian flight feather specimen with interlocking barbules and structural interference sheen',
-    'Pointer breeze parts and unzips adjacent barbs; smoothing along the rachis zips the vane back together'
+    'realgarAmber',
+    'Seven layered 3D peacock train feathers articulated in a stepped dark-bronze and Bone Calcite clasp with thin-film photonic-crystal barbs and concentric cordate ocelli',
+    'Hover sweeps the goniometric studio beam and parts localized barb wakes; drag blades/clasp to fold or unfurl, click a blade to pluck cantilever flex, or drag space to orbit'
   ),
   createDay(
     13,

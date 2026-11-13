@@ -1,0 +1,46 @@
+{
+  "day": 12,
+  "slug": "12-feather",
+  "expectedHeader": "Day 12 - Feather",
+  "domAudit": {
+    "headerText": "Day 12 - Feather",
+    "bodyBg": "rgb(33, 37, 41)",
+    "drawerCount": 30
+  },
+  "telemetry": {
+    "frameCount": 372,
+    "avgFrameMs": 8.33,
+    "p95FrameMs": 9.2,
+    "sceneState": {
+      "day": 12,
+      "slug": "12-feather",
+      "headerLabel": "Day 12 - Feather",
+      "frameCount": 372,
+      "cameraPos": [
+        0,
+        0.2399999999999992,
+        4.95
+      ],
+      "pointerWorld": [
+        0.359424632389837,
+        -0.04375628872881862,
+        0
+      ],
+      "pointerSpeed": 0,
+      "pointerDwellSec": 2.0095,
+      "pointerImpulse": 0.0006
+    }
+  },
+  "metrics": {
+    "specimenCoverageRatio": 0.2939,
+    "interactionMad": 9.236
+  },
+  "gpuErrors": [],
+  "gateFailures": [],
+  "artifacts": {
+    "contactSheet": "screenshots/day-12-feather-contact-sheet.png",
+    "initial": "screenshots/day-12-feather-initial.png",
+    "drawer": "screenshots/day-12-feather-drawer.png"
+  },
+  "passed": true
+}
