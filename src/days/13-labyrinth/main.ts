@@ -103,20 +103,24 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
   stage.camera.lookAt(0, 0, 0);
   stage.camera.updateMatrixWorld();
 
-  // Tighten shadow frustum & shift key softbox forward-left to illuminate +Z ridges and +Y sanctum
+  // Tighten shadow frustum, shift key light toward +Z/+Y, and boost +Z/-X fill light so bead & trail read brightly
   stage.scene.traverse((obj) => {
-    if (obj instanceof THREE.DirectionalLight && obj.castShadow) {
-      obj.position.set(1.6, 4.4, 3.8);
-      obj.shadow.mapSize.set(2048, 2048);
-      const halfSpan = 1.48;
-      obj.shadow.camera.left = -halfSpan;
-      obj.shadow.camera.right = halfSpan;
-      obj.shadow.camera.top = halfSpan;
-      obj.shadow.camera.bottom = -halfSpan;
-      obj.shadow.bias = -0.0003;
-      obj.shadow.normalBias = 0.006;
-      obj.shadow.camera.updateProjectionMatrix();
-      obj.shadow.needsUpdate = true;
+    if (obj instanceof THREE.DirectionalLight) {
+      if (obj.castShadow) {
+        obj.position.set(0.6, 4.4, 4.2);
+        obj.shadow.mapSize.set(2048, 2048);
+        const halfSpan = 1.48;
+        obj.shadow.camera.left = -halfSpan;
+        obj.shadow.camera.right = halfSpan;
+        obj.shadow.camera.top = halfSpan;
+        obj.shadow.camera.bottom = -halfSpan;
+        obj.shadow.bias = -0.0003;
+        obj.shadow.normalBias = 0.006;
+        obj.shadow.camera.updateProjectionMatrix();
+        obj.shadow.needsUpdate = true;
+      } else if (obj.position.z > 0) {
+        obj.intensity = 1.15;
+      }
     }
   });
 

@@ -191,6 +191,8 @@ interface SocketRecess {
   ny: number;
   nz: number;
   radius: number;
+  flareStartH: number;
+  coneSlope: number;
   depthOffset: number;
   minX: number;
   minY: number;
@@ -1082,7 +1084,7 @@ function evalExactLocalFiltered(
     const dz = z - s.cz;
     const h = dx * s.nx + dy * s.ny + dz * s.nz;
     const r = Math.sqrt(Math.max(0, dx * dx + dy * dy + dz * dz - h * h));
-    const air = Math.min(s.radius + Math.max(0, h) * 0.08 - r, h - s.depthOffset);
+    const air = Math.min(s.radius + Math.max(0, h - s.flareStartH) * s.coneSlope - r, h - s.depthOffset);
     if (air > sdf) sdf = air;
   }
 
@@ -1231,7 +1233,7 @@ function bakeMonolithSdf(
           const dz = z - s.cz;
           const h = dx * s.nx + dy * s.ny + dz * s.nz;
           const r = Math.sqrt(Math.max(0, dx * dx + dy * dy + dz * dz - h * h));
-          const air = Math.min(s.radius + Math.max(0, h) * 0.08 - r, h - s.depthOffset);
+          const air = Math.min(s.radius + Math.max(0, h - s.flareStartH) * s.coneSlope - r, h - s.depthOffset);
           if (air > sdfGrid[idx]) sdfGrid[idx] = air;
         }
       }
@@ -1929,14 +1931,16 @@ function buildMonolithGeometry(topology: LabyrinthTopology): THREE.BufferGeometr
       nx: goalNode.localNormal[0],
       ny: goalNode.localNormal[1],
       nz: goalNode.localNormal[2],
-      radius: 0.110,
+      radius: 0.106,
+      flareStartH: 0.025,
+      coneSlope: 0.41,
       depthOffset: -0.024,
-      minX: goalNode.localPos[0] - 0.135,
-      minY: goalNode.localPos[1] - 0.135,
-      minZ: goalNode.localPos[2] - 0.135,
-      maxX: goalNode.localPos[0] + 0.135,
-      maxY: goalNode.localPos[1] + 0.135,
-      maxZ: goalNode.localPos[2] + 0.135,
+      minX: goalNode.localPos[0] - 0.180,
+      minY: goalNode.localPos[1] - 0.180,
+      minZ: goalNode.localPos[2] - 0.180,
+      maxX: goalNode.localPos[0] + 0.180,
+      maxY: goalNode.localPos[1] + 0.180,
+      maxZ: goalNode.localPos[2] + 0.180,
     },
     {
       cx: startNode.localPos[0],
@@ -1946,13 +1950,15 @@ function buildMonolithGeometry(topology: LabyrinthTopology): THREE.BufferGeometr
       ny: startNode.localNormal[1],
       nz: startNode.localNormal[2],
       radius: 0.094,
+      flareStartH: 0.0,
+      coneSlope: 0.08,
       depthOffset: -0.020,
-      minX: startNode.localPos[0] - 0.115,
-      minY: startNode.localPos[1] - 0.115,
-      minZ: startNode.localPos[2] - 0.115,
-      maxX: startNode.localPos[0] + 0.115,
-      maxY: startNode.localPos[1] + 0.115,
-      maxZ: startNode.localPos[2] + 0.115,
+      minX: startNode.localPos[0] - 0.120,
+      minY: startNode.localPos[1] - 0.120,
+      minZ: startNode.localPos[2] - 0.120,
+      maxX: startNode.localPos[0] + 0.120,
+      maxY: startNode.localPos[1] + 0.120,
+      maxZ: startNode.localPos[2] + 0.120,
     },
   ];
 
@@ -2072,17 +2078,17 @@ function buildSanctumInlayGeometry(topology: LabyrinthTopology): THREE.BufferGeo
   }
 
   const profile: Array<readonly [number, number, number, number]> = [
-    [0.0, -0.002, 0.0, 1.0],
-    [0.016, 0.001, 0.0, 1.0],
-    [0.032, 0.009, 0.0, 1.0],
-    [0.044, 0.020, 0.0, 1.0],
-    [0.050, 0.026, 0.15, 0.85],
-    [0.054, 0.030, 1.0, 0.0],
-    [0.064, 0.032, 1.0, 0.0],
-    [0.076, 0.031, 1.0, 0.0],
-    [0.085, 0.020, 1.0, 0.0],
-    [0.089, 0.004, 1.0, 0.0],
-    [0.090, -0.028, 1.0, 0.0],
+    [0.0, 0.010, 0.0, 1.0],
+    [0.016, 0.013, 0.0, 1.0],
+    [0.032, 0.022, 0.0, 1.0],
+    [0.044, 0.036, 0.0, 1.0],
+    [0.050, 0.044, 0.15, 0.85],
+    [0.055, 0.049, 1.0, 0.0],
+    [0.066, 0.052, 1.0, 0.0],
+    [0.078, 0.050, 1.0, 0.0],
+    [0.087, 0.035, 1.0, 0.0],
+    [0.091, 0.012, 1.0, 0.0],
+    [0.092, -0.028, 1.0, 0.0],
     [0.0, -0.028, 0.0, 1.0],
   ];
 
@@ -2110,7 +2116,7 @@ function buildSanctumInlayGeometry(topology: LabyrinthTopology): THREE.BufferGeo
 
     for (let j = 0; j < pCount; j++) {
       const [r, baseH, calW, cinW] = profile[j];
-      const h = j >= 5 && j <= 9 ? baseH - notchFactor * 0.020 : baseH;
+      const h = j >= 5 && j <= 9 ? baseH - notchFactor * 0.036 : baseH;
       const vi = i * pCount + j;
       const lx = r * ct;
       const ly = r * st;

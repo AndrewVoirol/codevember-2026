@@ -230,7 +230,7 @@ export function createLabyrinthOptics(
     );
 
     // Dark vesicular basalt: rawUmber heavily absorbing over deep Chalky Slate backing
-    const vesicleMacro = valueNoise3DTsl(p.mul(32.0).add(vec3(4.9, 2.3, 7.6)));
+    const vesicleMacro = valueNoise3DTsl(p.mul(34.0).add(vec3(4.9, 2.3, 7.6)));
     const vesicleMicro = valueNoise3DTsl(p.mul(85.0));
     const vesiclePit = max(
       smoothstep(float(0.39), float(0.18), vesicleMacro),
@@ -250,7 +250,7 @@ export function createLabyrinthOptics(
     const basaltSeptaRim = smoothstep(float(0.62), float(0.88), vesicleMacro).mul(
       float(1.0).sub(vesiclePit)
     );
-    const basaltFinal = basaltBody.add(warmKaolin.rInf.mul(basaltSeptaRim.mul(0.032)));
+    const basaltFinal = basaltBody.add(warmKaolin.rInf.mul(basaltSeptaRim.mul(0.085)));
 
     // Blend limestone & basalt zones + apply carved crevice & underpass soffit AO
     const stoneBase = mix(basaltFinal, limestoneFinal, limestoneW);
@@ -292,7 +292,7 @@ export function createLabyrinthOptics(
 
     stoneMaterial.colorNode = clamp(finalStoneRgb, 0.0, 1.0);
 
-    // Matte porous stone (0.78-0.92) -> glossy wet Yellow Ochre meniscus (0.06)
+    // Matte porous stone (0.78-0.92) -> glossy wet Yellow Ochre meniscus (0.11)
     const dryRoughness = clamp(
       mix(float(0.78), float(0.90), basaltW)
         .add(patinaFinal.mul(0.08))
@@ -302,14 +302,14 @@ export function createLabyrinthOptics(
     );
     const wetGlossFactor = clamp(wetness.mul(1.20).add(freshSheen.mul(0.32)), 0.0, 1.0);
     stoneMaterial.roughnessNode = clamp(
-      mix(dryRoughness, float(0.06), wetGlossFactor),
-      0.06,
+      mix(dryRoughness, float(0.11), wetGlossFactor),
+      0.10,
       0.96
     );
     stoneMaterial.metalnessNode = mix(float(0.02), float(0.08), wetGlossFactor);
 
-    // Fine 3D mineral tooth bump damped smoothly inside wet liquid pools
-    const bumpAmp = mix(float(0.095), float(0.165), basaltW)
+    // Fine 3D mineral tooth bump (deepened vesicle pores on basalt) damped inside wet pools
+    const bumpAmp = mix(float(0.095), float(0.20), basaltW)
       .add(patinaFinal.mul(0.032))
       .mul(float(1.0).sub(wetGlossFactor.mul(0.88)));
     const perturbedLocalNorm = perturbStoneNormalLocal(
@@ -320,15 +320,15 @@ export function createLabyrinthOptics(
     );
     stoneMaterial.normalNode = transformNormalToView(perturbedLocalNorm);
 
-    // Crisp studio softbox sheen along wet ochre meniscus pools
+    // Soft lustrous studio sheen along wet ochre meniscus pools without white facet blowout
     const viewDirW = normalize(cameraPosition.sub(positionWorld));
     const nW = normalize(normalWorld);
-    const keySoftboxDir = normalize(vec3(1.6, 4.4, 3.8));
+    const keySoftboxDir = normalize(vec3(0.6, 4.4, 4.2));
     const halfVec = normalize(keySoftboxDir.add(viewDirW));
-    const meniscusSpec = pow(max(float(0.0), dot(nW, halfVec)), float(52.0));
+    const meniscusSpec = pow(max(float(0.0), dot(nW, halfVec)), float(24.0));
     const meniscusFresnel = pow(abs(float(1.0).sub(clamp(dot(nW, viewDirW), 0.0, 1.0))), float(3.2));
-    stoneMaterial.emissiveNode = mix(yellowOchre.rInf, boneCalcite.rInf, float(0.55))
-      .mul(meniscusSpec.mul(0.48).add(meniscusFresnel.mul(0.16)))
+    stoneMaterial.emissiveNode = mix(yellowOchre.rInf, warmKaolin.rInf, float(0.28))
+      .mul(meniscusSpec.mul(0.22).add(meniscusFresnel.mul(0.10)))
       .mul(wetGlossFactor)
       .mul(float(0.55).add(freshSheen.mul(0.45)));
   }
@@ -541,8 +541,8 @@ export function createLabyrinthOptics(
       smoothstep(float(-0.18), float(0.16), R.y)
     );
 
-    // Primary rectangular studio overhead softbox aligned toward key light (1.6, 4.4, 3.8)
-    const keyDir = normalize(vec3(1.6, 4.4, 3.8));
+    // Primary rectangular studio overhead softbox aligned toward key light (0.6, 4.4, 4.2)
+    const keyDir = normalize(vec3(0.6, 4.4, 4.2));
     const keyRight = normalize(cross(vec3(0.0, 1.0, 0.0), keyDir));
     const keyUp = cross(keyDir, keyRight);
     const rx = dot(R, keyRight);
