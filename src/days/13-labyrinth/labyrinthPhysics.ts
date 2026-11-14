@@ -19,13 +19,16 @@ export const DEAD_END_RESTITUTION = 0.28;
 export const MAX_SUBSTEP_DT = 1 / 180;
 export const SOLVER_GRAVITY_MAGNITUDE = 9.81;
 
-const ROLLING_LINEAR_DRAG = 0.22;
-const ROLLING_QUAD_DRAG = 2.15;
+const ROLLING_LINEAR_DRAG = 0.34;
+const ROLLING_QUAD_DRAG = 2.35;
+const WALL_RUB_FRICTION = 0.14;
 const CORNER_RETENTION_BASE = 0.82;
 const BRUSH_TEXEL_RADIUS = 6.0;
 const RAMP_CLIMB_RESISTANCE_ATTEN = 0.46;
 const JUNCTION_AXIAL_STEER_DT = 0.045;
-const JUNCTION_LATERAL_STEER_DT = 0.30;
+const JUNCTION_MOUTH_CAPTURE_NUM = 0.50;
+const JUNCTION_LATERAL_STEER_MIN_DT = 0.30;
+const JUNCTION_LATERAL_STEER_MAX_DT = 1.05;
 const IGNITE_SUBSAMPLES_PER_EDGE = 8;
 
 function clamp(v: number, min: number, max: number): number {
@@ -692,6 +695,15 @@ export class LabyrinthBeadSimulator {
       const ty = this.state.localTangent[1];
       const tz = this.state.localTangent[2];
       let gTangential = gx * tx + gy * ty + gz * tz;
+      const nx = this.state.localNormal[0];
+      const ny = this.state.localNormal[1];
+      const nz = this.state.localNormal[2];
+      const gNormal = gx * nx + gy * ny + gz * nz;
+      const gLat = Math.hypot(
+        gx - gNormal * nx - gTangential * tx,
+        gy - gNormal * ny - gTangential * ty,
+        gz - gNormal * nz - gTangential * tz
+      );
 
       // Underpass exit ramp climb ergonomics: attenuate upward face-normal resistance so
       // a comfortable 24°-35° camera tilt exits stone underpasses while keeping 0° flat rollback
@@ -708,11 +720,20 @@ export class LabyrinthBeadSimulator {
         }
       }
 
-      // Static threshold prevents micro-creep when cube is virtually level
+      // Static threshold prevents micro-creep when cube is virtually level;
+      // tangent-plane side-wall load adds Coulomb rubbing grip when banking laterally into a turn
       let accel = 0;
       if (Math.abs(speed) >= 0.008 || Math.abs(gTangential) >= 0.03) {
+        const drive = ROLLING_GRAVITY_FACTOR * gTangential;
+        const wallRubDecel = WALL_RUB_FRICTION * gLat;
+        let netDrive = drive;
+        if (speed > 0.02) {
+          netDrive -= wallRubDecel;
+        } else if (Math.abs(drive) > wallRubDecel * 0.30) {
+          netDrive -= Math.sign(drive) * wallRubDecel * 0.30;
+        }
         accel =
-          ROLLING_GRAVITY_FACTOR * gTangential -
+          netDrive -
           ROLLING_LINEAR_DRAG * speed -
           ROLLING_QUAD_DRAG * speed * Math.abs(speed);
       }
@@ -841,25 +862,39 @@ export class LabyrinthBeadSimulator {
             tNext = overshootDist / edgeLen;
           }
         } else {
-          // Junction routing: decompose gravity into axial (along inDir) & lateral components.
-          // Strong lateral gravity (> 2.2 m/s^2) models physical channel-wall capture before
-          // side mouths so players catch 90° turns smoothly without hyper-delicate pre-braking.
-          const gAxial = gx * inDirX + gy * inDirY + gz * inDirZ;
-          const gPerpX = gx - gAxial * inDirX;
-          const gPerpY = gy - gAxial * inDirY;
-          const gPerpZ = gz - gAxial * inDirZ;
-          const gPerp = Math.hypot(gPerpX, gPerpY, gPerpZ);
+          // Junction routing: project gravity onto corridor face tangent plane (excluding floor normal).
+          // Intentional diagonal banking scales lateral mouth capture inversely with approach speed
+          // while high-speed forward sprints and shallow axial tilts roll cleanly past 90° mouths.
+          const faceN = this.topology.nodes[arrivedNode].localNormal;
+          const gDotFaceN = gx * faceN[0] + gy * faceN[1] + gz * faceN[2];
+          const gPlaneX = gx - gDotFaceN * faceN[0];
+          const gPlaneY = gy - gDotFaceN * faceN[1];
+          const gPlaneZ = gz - gDotFaceN * faceN[2];
+          const gAxial = gPlaneX * inDirX + gPlaneY * inDirY + gPlaneZ * inDirZ;
+          const gLatX = gPlaneX - gAxial * inDirX;
+          const gLatY = gPlaneY - gAxial * inDirY;
+          const gLatZ = gPlaneZ - gAxial * inDirZ;
+          const gLatMag = Math.hypot(gLatX, gLatY, gLatZ);
 
           const axialSteerDt = Math.max(dtSub, JUNCTION_AXIAL_STEER_DT);
+          const intentionalBank = gLatMag >= Math.max(0.38, gAxial * 0.52);
+          const fastForwardFlyby =
+            (newSpeed > 1.12 && gAxial > gLatMag) ||
+            (gDotFaceN > 0.5 && gAxial > gLatMag);
+          const vEff = Math.max(0.26, newSpeed);
           const lateralSteerDt =
-            gPerp > 2.2 && gAxial < gPerp * 0.85
-              ? Math.max(dtSub, JUNCTION_LATERAL_STEER_DT)
+            intentionalBank && !fastForwardFlyby
+              ? clamp(
+                  JUNCTION_MOUTH_CAPTURE_NUM / vEff,
+                  JUNCTION_LATERAL_STEER_MIN_DT,
+                  JUNCTION_LATERAL_STEER_MAX_DT
+                )
               : axialSteerDt;
 
-          const axialMag = newSpeed + axialSteerDt * gAxial;
-          const momX = axialMag * inDirX + lateralSteerDt * gPerpX;
-          const momY = axialMag * inDirY + lateralSteerDt * gPerpY;
-          const momZ = axialMag * inDirZ + lateralSteerDt * gPerpZ;
+          const axialMag = Math.max(0, newSpeed + axialSteerDt * gAxial);
+          const momX = axialMag * inDirX + lateralSteerDt * gLatX;
+          const momY = axialMag * inDirY + lateralSteerDt * gLatY;
+          const momZ = axialMag * inDirZ + lateralSteerDt * gLatZ;
 
           let bestOutId = -1;
           let bestScore = -Infinity;
@@ -871,6 +906,19 @@ export class LabyrinthBeadSimulator {
             const uy = this.edgeStartTan[cOff + 1];
             const uz = this.edgeStartTan[cOff + 2];
             let score = ux * momX + uy * momY + uz * momZ;
+            const candEdge = edges[candId];
+            if (
+              candEdge.kind === 'ramp' &&
+              this.topology.nodes[candEdge.to].tier >
+                this.topology.nodes[candEdge.from].tier &&
+              gDotFaceN < -2.0 &&
+              gAxial > 0.15
+            ) {
+              const alignIn = inDirX * ux + inDirY * uy + inDirZ * uz;
+              if (alignIn > 0.7) {
+                score += -gDotFaceN * 0.22;
+              }
+            }
             if (this.isEdgeBlocked(candId)) {
               if (score > bestBlockedScore) bestBlockedScore = score;
               continue;

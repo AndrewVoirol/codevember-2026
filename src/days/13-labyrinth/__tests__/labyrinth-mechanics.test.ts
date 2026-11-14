@@ -687,4 +687,56 @@ describe('Day 13 — Labyrinth: Physics, Spline Integration & Automated Solve', 
       expect(sim.wetAtlasData[i]).toBe(0);
     }
   });
+
+  it('captures intentional diagonal camera-facing tilts into 90-degree pass-through channels while rolling straight on shallow tilts', () => {
+    const tiltRad = (24 * Math.PI) / 180;
+    const gMag = 9.81 * Math.sin(tiltRad);
+    const gZ = -9.81 * Math.cos(tiltRad);
+
+    // 1. Shallow 18° forward-down tilt from Start rolls straight past pz[3,5] to pz[4,5]
+    const simShallow = new LabyrinthBeadSimulator(topology);
+    const r18 = (18 * Math.PI) / 180;
+    for (let i = 0; i < 180; i++) {
+      simShallow.step(1 / 60, [gMag * Math.cos(r18), -gMag * Math.sin(r18), gZ]);
+    }
+    const shallowTo = topology.nodes[topology.edges[simShallow.state.edgeId].to];
+    expect(shallowTo.face).toBe('pz');
+    expect(shallowTo.u).toBe(4);
+    expect(shallowTo.v).toBe(5);
+
+    // 2. Intentional 32° and 40° diagonal tilts from Start enter the pz[3,5]->pz[3,4]->pz[3,3] pass-through underpass
+    for (const angDeg of [32, 40]) {
+      const simDiag = new LabyrinthBeadSimulator(topology);
+      const rad = (angDeg * Math.PI) / 180;
+      let enteredPassThrough = false;
+      for (let i = 0; i < 180; i++) {
+        simDiag.step(1 / 60, [gMag * Math.cos(rad), -gMag * Math.sin(rad), gZ]);
+        const nTo = topology.nodes[topology.edges[simDiag.state.edgeId].to];
+        if (nTo.face === 'pz' && nTo.u === 3 && nTo.v <= 3 && nTo.tier === 1) {
+          enteredPassThrough = true;
+        }
+      }
+      expect(enteredPassThrough).toBe(true);
+    }
+
+    // 3. Backing out from pz[4,5] at 36° down-left enters the center pass-through channel instead of stalling or jumping past
+    const simBack = new LabyrinthBeadSimulator(topology);
+    const n28 = topology.nodes.find((n) => n.face === 'pz' && n.u === 4 && n.v === 5 && n.tier === 0)!;
+    const n22 = topology.nodes.find((n) => n.face === 'pz' && n.u === 3 && n.v === 5 && n.tier === 0)!;
+    const backEdgeId = topology.adjacency[n28.id].find((id) => topology.edges[id].to === n22.id)!;
+    simBack.state.edgeId = backEdgeId;
+    simBack.state.t = 0;
+    simBack.state.speed = 0;
+
+    const r36 = (36 * Math.PI) / 180;
+    let enteredFromBack = false;
+    for (let i = 0; i < 180; i++) {
+      simBack.step(1 / 60, [-gMag * Math.cos(r36), -gMag * Math.sin(r36), gZ]);
+      const nTo = topology.nodes[topology.edges[simBack.state.edgeId].to];
+      if (nTo.face === 'pz' && nTo.u === 3 && nTo.v <= 3 && nTo.tier === 1) {
+        enteredFromBack = true;
+      }
+    }
+    expect(enteredFromBack).toBe(true);
+  });
 });
