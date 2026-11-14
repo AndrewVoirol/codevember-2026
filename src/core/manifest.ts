@@ -190,12 +190,12 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
   createDay(
     13,
     'Labyrinth',
-    'upcoming',
+    'in-progress',
     'tsl',
     'rawUmber',
     'yellowOchre',
-    'Carved monolithic limestone maze core with liquid mercury-ochre streams finding shortest geodesic paths',
-    'Tilting the specimen with the pointer tips the gravity vector, sloshing the stream through new corridors'
+    'Suspended chamfered limestone and dark vesicular basalt labyrinth cube with verdigris copper-carbonate seams, vaulted stone underpasses, and a rolling liquid quicksilver bead painting a glossy yellow-ochre trail toward the bone-calcite and cinnabar sanctum',
+    'Drag to tilt and roll the 6-face labyrinth via gimbal-free SO(3) trackball rotation with momentum carry; hover imparts subtle ±6° gravity bias; scroll to zoom and double-click to reset'
   ),
   createDay(
     14,
