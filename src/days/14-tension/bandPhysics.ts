@@ -7,8 +7,8 @@ import {
   SEGMENTS_PER_BAND,
 } from './types';
 
-const TOTAL_BANDS = 120;
-const NUM_LAYERS = 10;
+const TOTAL_BANDS = 180;
+const NUM_LAYERS = 12;
 const CORE_RADIUS = 0.28;
 const OUTER_RADIUS = 0.95;
 const MAX_DUST_PUFFS = 64;
@@ -72,8 +72,10 @@ export class RubberBandBallSim {
   private rng = createRng(20261114);
   private readonly seed: number;
 
-  // Pre-allocated scratch for zero-GC raycast & vector ops
+  // Pre-allocated scratch for zero-GC raycast & pull tracking
   private readonly scratchPoint: [number, number, number] = [0, 0, 0];
+  private readonly pullBaseNormal: [number, number, number] = [0, 0, 1];
+  private readonly pullDragVec: [number, number, number] = [0, 0, 0];
 
   constructor(seed = 20261114) {
     this.seed = seed;
@@ -168,7 +170,7 @@ export class RubberBandBallSim {
 
       const baseRadius =
         CORE_RADIUS + 0.018 + t * (OUTER_RADIUS - CORE_RADIUS - 0.018) + (this.rng() - 0.5) * 0.008;
-      const width = 0.034 + this.rng() * 0.036;
+      const width = (0.034 + this.rng() * 0.036) * 1.22;
       const thickness = 0.009 + this.rng() * 0.009;
 
       // Stratified pigment selection
@@ -350,6 +352,12 @@ export class RubberBandBallSim {
     rt.pullDir[0] = dx;
     rt.pullDir[1] = dy;
     rt.pullDir[2] = dz;
+    this.pullBaseNormal[0] = dx;
+    this.pullBaseNormal[1] = dy;
+    this.pullBaseNormal[2] = dz;
+    this.pullDragVec[0] = 0;
+    this.pullDragVec[1] = 0;
+    this.pullDragVec[2] = 0;
     rt.twangAmp = 0;
     this.activePullBandId = bandId;
   }
@@ -364,13 +372,33 @@ export class RubberBandBallSim {
       return false;
     }
 
-    const proj =
-      worldDelta[0] * rt.pullDir[0] +
-      worldDelta[1] * rt.pullDir[1] +
-      worldDelta[2] * rt.pullDir[2];
+    this.pullDragVec[0] += worldDelta[0];
+    this.pullDragVec[1] += worldDelta[1];
+    this.pullDragVec[2] += worldDelta[2];
 
-    rt.pullAmount = Math.max(0, rt.pullAmount + proj);
+    const vx = this.pullDragVec[0];
+    const vy = this.pullDragVec[1];
+    const vz = this.pullDragVec[2];
+    const dragLen = Math.hypot(vx, vy, vz);
+
+    const nx = this.pullBaseNormal[0];
+    const ny = this.pullBaseNormal[1];
+    const nz = this.pullBaseNormal[2];
+    const radialProj = vx * nx + vy * ny + vz * nz;
+
+    rt.pullAmount = Math.max(0, Math.max(radialProj, dragLen * 0.85));
     rt.currentStrain = spec.restStrain + rt.pullAmount * STRAIN_PER_UNIT_PULL;
+
+    if (dragLen > 1e-4) {
+      const invLen = 1 / dragLen;
+      let px = nx * 0.55 + vx * invLen * 0.85;
+      let py = ny * 0.55 + vy * invLen * 0.85;
+      let pz = nz * 0.55 + vz * invLen * 0.85;
+      const pLen = Math.hypot(px, py, pz) || 1;
+      rt.pullDir[0] = px / pLen;
+      rt.pullDir[1] = py / pLen;
+      rt.pullDir[2] = pz / pLen;
+    }
 
     if (rt.currentStrain >= spec.breakStrain) {
       this.activePullBandId = null;

@@ -13,16 +13,16 @@ const ALLOWED_PIGMENTS = new Set<PigmentKey>([
 ]);
 
 describe('RubberBandBallSim', () => {
-  it('generates ~120 layered great-circle bands with orthonormal frames and mineral pigments', () => {
+  it('generates ~180 layered great-circle bands with orthonormal frames and mineral pigments', () => {
     const sim = new RubberBandBallSim();
     const specs = sim.getBandSpecs();
     const runtimes = sim.getBandRuntimes();
     const diag = sim.getDiagnostics();
 
-    expect(specs.length).toBe(120);
-    expect(runtimes.length).toBe(120);
-    expect(diag.totalBands).toBe(120);
-    expect(diag.intactCount).toBe(120);
+    expect(specs.length).toBe(180);
+    expect(runtimes.length).toBe(180);
+    expect(diag.totalBands).toBe(180);
+    expect(diag.intactCount).toBe(180);
     expect(diag.ballRadius).toBeGreaterThan(0.9);
     expect(diag.ballRadius).toBeLessThan(1.0);
 
@@ -54,7 +54,7 @@ describe('RubberBandBallSim', () => {
     expect(hit).not.toBeNull();
     if (hit) {
       expect(hit.bandId).toBeGreaterThanOrEqual(0);
-      expect(hit.bandId).toBeLessThan(120);
+      expect(hit.bandId).toBeLessThan(180);
       expect(hit.uHit).toBeGreaterThanOrEqual(0);
       expect(hit.uHit).toBeLessThan(1);
       const hitR = Math.hypot(...hit.hitPoint);
@@ -65,10 +65,29 @@ describe('RubberBandBallSim', () => {
     expect(miss).toBeNull();
   });
 
+  it('pulls and snaps on tangential/XY drag from a front-face [0, 0, 1] hit point', () => {
+    const sim = new RubberBandBallSim();
+    const bandId = 179;
+    const spec = sim.getBandSpecs()[bandId];
+    const rt = sim.getBandRuntimes()[bandId];
+
+    sim.startPull(bandId, 0.1, [0, 0, 1]);
+    const snappedEarly = sim.updatePull([0.12, 0.04, 0]);
+    expect(snappedEarly).toBe(false);
+    expect(rt.pullAmount).toBeGreaterThan(0.1);
+    expect(rt.currentStrain).toBeGreaterThan(spec.restStrain);
+
+    // Drag further in XY until it snaps
+    const snappedFar = sim.updatePull([0.5, 0.2, 0]);
+    expect(snappedFar).toBe(true);
+    expect(rt.status).toBe('snapping');
+    expect(sim.getDiagnostics().snapCount).toBe(1);
+  });
+
   it('supports pull -> release damped harmonic twang without snapping', () => {
     const sim = new RubberBandBallSim();
     const specs = sim.getBandSpecs();
-    const bandId = 119;
+    const bandId = 179;
     const spec = specs[bandId];
 
     // Outward direction at u = 0 is tangentU
@@ -167,8 +186,8 @@ describe('RubberBandBallSim', () => {
     sim.sampleBandCenterline(innerBandId, posBuf, strainBuf);
     const initialInnerRadius = Math.hypot(posBuf[0], posBuf[1], posBuf[2]);
 
-    // Nick top 40 outer bands
-    for (let id = 119; id >= 80; id--) {
+    // Nick top 50 outer bands
+    for (let id = 179; id >= 130; id--) {
       sim.nickBand(id, 0.1);
     }
 
@@ -181,13 +200,13 @@ describe('RubberBandBallSim', () => {
     const relaxedInnerRadius = Math.hypot(posBuf[0], posBuf[1], posBuf[2]);
     expect(relaxedInnerRadius).toBeGreaterThan(initialInnerRadius + 0.005);
 
-    // Sympathetic cascade test: boost a neighbor of band 110 near breakStrain and nick 110
+    // Sympathetic cascade test: boost a neighbor of band 170 near breakStrain and nick 170
     const specs = sim.getBandSpecs();
     const runtimes = sim.getBandRuntimes();
-    const target = specs[110];
+    const target = specs[170];
     let neighborId = -1;
-    for (let i = 95; i < 120; i++) {
-      if (i === 110 || runtimes[i].status !== 'intact') continue;
+    for (let i = 150; i < 180; i++) {
+      if (i === 170 || runtimes[i].status !== 'intact') continue;
       const align = Math.abs(
         specs[i].normal[0] * target.normal[0] +
           specs[i].normal[1] * target.normal[1] +
@@ -202,7 +221,7 @@ describe('RubberBandBallSim', () => {
       // Over-strain neighbor right below break threshold
       (runtimes[neighborId] as { currentStrain: number }).currentStrain =
         specs[neighborId].breakStrain * 0.95;
-      sim.nickBand(110, 0.2);
+      sim.nickBand(170, 0.2);
       for (let i = 0; i < 15; i++) {
         sim.step(0.02);
       }
@@ -212,16 +231,16 @@ describe('RubberBandBallSim', () => {
     }
   });
 
-  it('reset() re-wraps a fresh 120-band ball', () => {
+  it('reset() re-wraps a fresh 180-band ball', () => {
     const sim = new RubberBandBallSim();
-    sim.nickBand(119, 0.5);
-    sim.nickBand(118, 0.2);
+    sim.nickBand(179, 0.5);
+    sim.nickBand(178, 0.2);
     sim.step(0.05);
     expect(sim.getDiagnostics().snapCount).toBeGreaterThanOrEqual(2);
 
     sim.reset();
     const diag = sim.getDiagnostics();
-    expect(diag.intactCount).toBe(120);
+    expect(diag.intactCount).toBe(180);
     expect(diag.snappingCount).toBe(0);
     expect(diag.goneCount).toBe(0);
     expect(diag.snapCount).toBe(0);
