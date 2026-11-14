@@ -23,6 +23,8 @@ const _deltaTuple: [number, number, number] = [0, 0, 0];
 const _dragPlane = new THREE.Plane();
 const _camDir = new THREE.Vector3();
 const _hitPoint = new THREE.Vector3();
+const _hitNormal = new THREE.Vector3();
+const _startPlaneHit = new THREE.Vector3();
 const _prevPlaneHit = new THREE.Vector3();
 const _currPlaneHit = new THREE.Vector3();
 const _planeDelta = new THREE.Vector3();
@@ -98,10 +100,19 @@ export async function bootDay14Tension(): Promise<SpecimenStage> {
       if (!computeRay(e.clientX, e.clientY)) return;
       if (_raycaster.ray.intersectPlane(_dragPlane, _currPlaneHit)) {
         _planeDelta.subVectors(_currPlaneHit, _prevPlaneHit);
+        const curDist = _currPlaneHit.distanceTo(_startPlaneHit);
+        const prevDist = _prevPlaneHit.distanceTo(_startPlaneHit);
         _prevPlaneHit.copy(_currPlaneHit);
-        _deltaTuple[0] = _planeDelta.x;
-        _deltaTuple[1] = _planeDelta.y;
-        _deltaTuple[2] = _planeDelta.z;
+
+        // Combine direct radial projection (strong at limb) with camera-plane pull distance
+        // (essential on front-facing center hits where _hitNormal is nearly parallel to _camDir).
+        const radialProj = _planeDelta.dot(_hitNormal);
+        const facing = Math.abs(_hitNormal.dot(_camDir));
+        const desiredPullDelta = radialProj + facing * facing * (curDist - prevDist);
+
+        _deltaTuple[0] = _hitNormal.x * desiredPullDelta;
+        _deltaTuple[1] = _hitNormal.y * desiredPullDelta;
+        _deltaTuple[2] = _hitNormal.z * desiredPullDelta;
 
         const snapped = sim.updatePull(_deltaTuple);
         if (snapped) {
@@ -134,13 +145,15 @@ export async function bootDay14Tension(): Promise<SpecimenStage> {
       dragMoved = false;
 
       _hitPoint.set(hit.hitPoint[0], hit.hitPoint[1], hit.hitPoint[2]);
-      const rLen = _hitPoint.length() || 1;
-      _pullDirTuple[0] = _hitPoint.x / rLen;
-      _pullDirTuple[1] = _hitPoint.y / rLen;
-      _pullDirTuple[2] = _hitPoint.z / rLen;
+      _hitNormal.copy(_hitPoint).normalize();
+      if (_hitNormal.lengthSq() < 0.5) _hitNormal.set(0, 0, 1);
+      _pullDirTuple[0] = _hitNormal.x;
+      _pullDirTuple[1] = _hitNormal.y;
+      _pullDirTuple[2] = _hitNormal.z;
 
       stage.camera.getWorldDirection(_camDir);
       _dragPlane.setFromNormalAndCoplanarPoint(_camDir, _hitPoint);
+      _startPlaneHit.copy(_hitPoint);
       _prevPlaneHit.copy(_hitPoint);
 
       sim.startPull(hit.bandId, hit.uHit, _pullDirTuple);
