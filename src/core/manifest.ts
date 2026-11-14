@@ -200,12 +200,12 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
   createDay(
     14,
     'Tension',
-    'upcoming',
-    'tsl-compute',
+    'in-progress',
+    'tsl',
     'cinnabarVermilion',
-    'boneCalcite',
-    'Tensegrity prism of taut cinnabar silk cables and floating calcite compression struts near buckling threshold',
-    'Plucking individual tension cables excites standing transverse string harmonics across the whole rig'
+    'rawUmber',
+    'Multi-layer mineral-dyed natural rubber band ball wrapped in 120 stratified great-circle straps around a knotted Raw Umber and Bone Calcite starter core, with stress-whitening stretch, compressive breathing, sympathetic cascade pops, and talcum bloom',
+    'Drag any rubber band outward to stretch and whiten it until it snaps or release to twang back; click a band to nick and whip-curl it away in a burst of talcum dust; double-click or click the bare core to re-wrap'
   ),
   createDay(
     15,
