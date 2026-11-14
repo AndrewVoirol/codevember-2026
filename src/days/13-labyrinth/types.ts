@@ -7,6 +7,7 @@ export const WET_ATLAS_WIDTH = WET_ATLAS_FACE_SIZE * CUBE_FACES.length; // 1536
 export const WET_ATLAS_HEIGHT = WET_ATLAS_FACE_SIZE; // 256
 export const EDGE_SAMPLE_COUNT = 9;
 export const GRID_PITCH = 0.215;
+export const CHECKPOINT_SOL_INDICES = [15, 31, 45] as const;
 
 export interface LabyrinthNode {
   id: number;
@@ -64,4 +65,6 @@ export interface BeadState {
   impactImpulse: number;
   solved: boolean;
   solveProgress01: number;
+  checkpointsUnlocked: number;
+  dowsingHint01: number;
 }

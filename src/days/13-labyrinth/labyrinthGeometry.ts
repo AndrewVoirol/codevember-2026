@@ -1,5 +1,6 @@
 import * as THREE from 'three/webgpu';
 import {
+  CHECKPOINT_SOL_INDICES,
   CUBE_FACES,
   WET_ATLAS_FACE_SIZE,
   type CubeFaceId,
@@ -25,10 +26,17 @@ import {
  *   and single-pass shifted-octant Dual Contouring for solid-walled 8-piece vault separation.
  */
 
+export interface WaystoneOctantSpec {
+  octantIndex: number;
+  geometry: THREE.BufferGeometry;
+}
+
 export interface LabyrinthMeshesResult {
   monolithGeometry: THREE.BufferGeometry;
   sanctumInlayGeometry: THREE.BufferGeometry;
   startSpringGeometry: THREE.BufferGeometry;
+  waystoneInlayGeometry: THREE.BufferGeometry;
+  waystoneOctantSpecs: readonly WaystoneOctantSpec[];
   beadGeometry: THREE.BufferGeometry;
 }
 
@@ -2770,6 +2778,169 @@ function buildStartSpringGeometry(topology: LabyrinthTopology): THREE.BufferGeom
   return geom;
 }
 
+function buildSingleWaystoneGeometry(
+  topology: LabyrinthTopology,
+  checkpointIndex: 0 | 1 | 2
+): WaystoneOctantSpec {
+  const solNodeId = topology.solutionNodePath[CHECKPOINT_SOL_INDICES[checkpointIndex]];
+  const cpNode = topology.nodes[solNodeId];
+  const { t1, t2, n } = buildNodeTangentFrame(cpNode, topology.edges);
+  const origin = new THREE.Vector3(cpNode.localPos[0], cpNode.localPos[1], cpNode.localPos[2]);
+
+  const octantIndex =
+    (cpNode.localPos[0] >= 0 ? 4 : 0) |
+    (cpNode.localPos[1] >= 0 ? 2 : 0) |
+    (cpNode.localPos[2] >= 0 ? 1 : 0);
+
+  const exitAngles: number[] = [];
+  const tmpDir = new THREE.Vector3();
+  for (let i = 0; i < topology.edges.length; i++) {
+    const e = topology.edges[i];
+    if (e.from !== cpNode.id && e.to !== cpNode.id) continue;
+    const kCount = Math.floor(e.samplesPos.length / 3);
+    if (kCount < 2) continue;
+    if (e.from === cpNode.id) {
+      tmpDir.set(
+        e.samplesPos[3] - e.samplesPos[0],
+        e.samplesPos[4] - e.samplesPos[1],
+        e.samplesPos[5] - e.samplesPos[2]
+      );
+    } else {
+      const i0 = (kCount - 1) * 3;
+      const i1 = (kCount - 2) * 3;
+      tmpDir.set(
+        e.samplesPos[i1] - e.samplesPos[i0],
+        e.samplesPos[i1 + 1] - e.samplesPos[i0 + 1],
+        e.samplesPos[i1 + 2] - e.samplesPos[i0 + 2]
+      );
+    }
+    tmpDir.addScaledVector(n, -tmpDir.dot(n));
+    if (tmpDir.lengthSq() > 1e-6) {
+      tmpDir.normalize();
+      exitAngles.push(Math.atan2(tmpDir.dot(t2), tmpDir.dot(t1)));
+    }
+  }
+
+  // [radius, baseHeight, rimBronzeWeight, malachiteBasinWeight]
+  // Sized cleanly inside the 0.135 corridor width (outer r=0.039 -> >=0.025 wall clearance at L-bends)
+  const profile: Array<readonly [number, number, number, number]> = [
+    [0.0, 0.0022, 0.0, 1.0],
+    [0.016, 0.0028, 0.0, 1.0],
+    [0.024, 0.0042, 0.15, 0.85],
+    [0.027, 0.0068, 1.0, 0.0],
+    [0.034, 0.0072, 1.0, 0.0],
+    [0.038, 0.0032, 1.0, 0.0],
+    [0.039, -0.011, 1.0, 0.0],
+    [0.0, -0.011, 1.0, 0.0],
+  ];
+
+  const radialSegs = 40;
+  const pCount = profile.length;
+  const vertCount = radialSegs * pCount;
+  const positions = new Float32Array(vertCount * 3);
+  const waystoneZone = new Float32Array(vertCount * 3);
+  const indices: number[] = [];
+
+  for (let i = 0; i < radialSegs; i++) {
+    const theta = (i / radialSegs) * Math.PI * 2;
+    const ct = Math.cos(theta);
+    const st = Math.sin(theta);
+
+    let notchFactor = 0;
+    for (let si = 0; si < exitAngles.length; si++) {
+      let dAng = Math.abs(theta - exitAngles[si]);
+      if (dAng > Math.PI) dAng = Math.PI * 2 - dAng;
+      if (dAng < 0.44) {
+        const u = 1 - dAng / 0.44;
+        notchFactor = Math.max(notchFactor, u * u * (3 - 2 * u));
+      }
+    }
+
+    for (let j = 0; j < pCount; j++) {
+      const [r, baseH, rimW, basinW] = profile[j];
+      const h = j >= 3 && j <= 5 ? baseH - notchFactor * 0.0036 : baseH;
+      const vi = i * pCount + j;
+      const lx = r * ct;
+      const ly = r * st;
+      positions[vi * 3] = origin.x + t1.x * lx + t2.x * ly + n.x * h;
+      positions[vi * 3 + 1] = origin.y + t1.y * lx + t2.y * ly + n.y * h;
+      positions[vi * 3 + 2] = origin.z + t1.z * lx + t2.z * ly + n.z * h;
+      waystoneZone[vi * 3 + 0] = rimW;
+      waystoneZone[vi * 3 + 1] = basinW;
+      waystoneZone[vi * 3 + 2] = checkpointIndex;
+    }
+  }
+
+  for (let i = 0; i < radialSegs; i++) {
+    const iNext = (i + 1) % radialSegs;
+    for (let j = 0; j < pCount - 1; j++) {
+      const a = i * pCount + j;
+      const b = iNext * pCount + j;
+      const c = iNext * pCount + (j + 1);
+      const d = i * pCount + (j + 1);
+      if (j === 0) {
+        indices.push(a, d, c);
+      } else if (j === pCount - 2) {
+        indices.push(a, c, b);
+      } else {
+        indices.push(a, c, b);
+        indices.push(a, d, c);
+      }
+    }
+  }
+
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geom.setAttribute('aWaystoneZone', new THREE.BufferAttribute(waystoneZone, 3));
+  geom.setIndex(indices);
+  geom.computeVertexNormals();
+  geom.computeBoundingSphere();
+  return { octantIndex, geometry: geom };
+}
+
+function buildMergedWaystonesGeometry(
+  specs: readonly WaystoneOctantSpec[]
+): THREE.BufferGeometry {
+  let totalVerts = 0;
+  let totalIdx = 0;
+  for (let s = 0; s < specs.length; s++) {
+    totalVerts += (specs[s].geometry.getAttribute('position') as THREE.BufferAttribute).count;
+    totalIdx += specs[s].geometry.getIndex()!.count;
+  }
+
+  const positions = new Float32Array(totalVerts * 3);
+  const normals = new Float32Array(totalVerts * 3);
+  const waystoneZone = new Float32Array(totalVerts * 3);
+  const indices = new Uint32Array(totalIdx);
+
+  let vOffset = 0;
+  let iOffset = 0;
+  for (let s = 0; s < specs.length; s++) {
+    const g = specs[s].geometry;
+    const p = g.getAttribute('position') as THREE.BufferAttribute;
+    const n = g.getAttribute('normal') as THREE.BufferAttribute;
+    const z = g.getAttribute('aWaystoneZone') as THREE.BufferAttribute;
+    const idx = g.getIndex()!;
+
+    positions.set(p.array as Float32Array, vOffset * 3);
+    normals.set(n.array as Float32Array, vOffset * 3);
+    waystoneZone.set(z.array as Float32Array, vOffset * 3);
+    for (let k = 0; k < idx.count; k++) {
+      indices[iOffset + k] = vOffset + idx.getX(k);
+    }
+    vOffset += p.count;
+    iOffset += idx.count;
+  }
+
+  const merged = new THREE.BufferGeometry();
+  merged.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  merged.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+  merged.setAttribute('aWaystoneZone', new THREE.BufferAttribute(waystoneZone, 3));
+  merged.setIndex(new THREE.BufferAttribute(indices, 1));
+  merged.computeBoundingSphere();
+  return merged;
+}
+
 function buildBeadGeometry(beadRadius: number): THREE.BufferGeometry {
   const t = (1 + Math.sqrt(5)) * 0.5;
   const baseVerts: Array<[number, number, number]> = [
@@ -3106,12 +3277,20 @@ export function createLabyrinthGeometries(topology: LabyrinthTopology): Labyrint
   const monolithGeometry = buildMonolithGeometry(topology);
   const sanctumInlayGeometry = buildSanctumInlayGeometry(topology);
   const startSpringGeometry = buildStartSpringGeometry(topology);
+  const waystoneOctantSpecs: WaystoneOctantSpec[] = [
+    buildSingleWaystoneGeometry(topology, 0),
+    buildSingleWaystoneGeometry(topology, 1),
+    buildSingleWaystoneGeometry(topology, 2),
+  ];
+  const waystoneInlayGeometry = buildMergedWaystonesGeometry(waystoneOctantSpecs);
   const beadGeometry = buildBeadGeometry(topology.beadRadius);
 
   return {
     monolithGeometry,
     sanctumInlayGeometry,
     startSpringGeometry,
+    waystoneInlayGeometry,
+    waystoneOctantSpecs,
     beadGeometry,
   };
 }

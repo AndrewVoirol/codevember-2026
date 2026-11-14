@@ -1,4 +1,5 @@
 import {
+  CHECKPOINT_SOL_INDICES,
   EDGE_SAMPLE_COUNT,
   WET_ATLAS_FACE_SIZE,
   WET_ATLAS_HEIGHT,
@@ -55,11 +56,15 @@ export class LabyrinthBeadSimulator {
   private readonly distToGoal: Float64Array;
   private readonly nextEdgeToGoal: Int32Array;
   private readonly maxDistToGoal: number;
+  private readonly solutionNodeIndex: Int32Array;
+  readonly checkpointNodeIds: readonly [number, number, number];
+  private readonly checkpointBackEdgeIds: Int32Array;
 
   // High-precision wet atlas accumulators & active-texel sparse index for zero-GC O(painted) decay
   private readonly wetnessF32: Float32Array;
   private readonly sheenF32: Float32Array;
   private readonly thicknessF32: Float32Array;
+  private readonly verdigrisF32: Float32Array;
   private readonly activeTexels: Int32Array;
   private readonly activeFlag: Uint8Array;
   private activeTexelCount = 0;
@@ -80,12 +85,10 @@ export class LabyrinthBeadSimulator {
 
     const texelCount = WET_ATLAS_WIDTH * WET_ATLAS_HEIGHT;
     this.wetAtlasData = new Uint8Array(texelCount * 4);
-    for (let i = 3; i < this.wetAtlasData.length; i += 4) {
-      this.wetAtlasData[i] = 255;
-    }
     this.wetnessF32 = new Float32Array(texelCount);
     this.sheenF32 = new Float32Array(texelCount);
     this.thicknessF32 = new Float32Array(texelCount);
+    this.verdigrisF32 = new Float32Array(texelCount);
     this.activeTexels = new Int32Array(texelCount);
     this.activeFlag = new Uint8Array(texelCount);
 
@@ -105,9 +108,35 @@ export class LabyrinthBeadSimulator {
       impactImpulse: 0,
       solved: false,
       solveProgress01: 0,
+      checkpointsUnlocked: 0,
+      dowsingHint01: 0,
     };
 
     this.precomputeEdgeCurves();
+
+    this.solutionNodeIndex = new Int32Array(this.nodeCount).fill(-1);
+    for (let i = 0; i < topology.solutionNodePath.length; i++) {
+      this.solutionNodeIndex[topology.solutionNodePath[i]] = i;
+    }
+
+    const cp0 = topology.solutionNodePath[CHECKPOINT_SOL_INDICES[0]];
+    const cp1 = topology.solutionNodePath[CHECKPOINT_SOL_INDICES[1]];
+    const cp2 = topology.solutionNodePath[CHECKPOINT_SOL_INDICES[2]];
+    this.checkpointNodeIds = [cp0, cp1, cp2];
+    this.checkpointBackEdgeIds = new Int32Array(CHECKPOINT_SOL_INDICES.length).fill(-1);
+    for (let k = 0; k < CHECKPOINT_SOL_INDICES.length; k++) {
+      const solIdx = CHECKPOINT_SOL_INDICES[k];
+      const cpNode = topology.solutionNodePath[solIdx];
+      const prevNode = topology.solutionNodePath[solIdx - 1];
+      const outEdges = topology.adjacency[cpNode];
+      for (let ei = 0; ei < outEdges.length; ei++) {
+        const candId = outEdges[ei];
+        if (topology.edges[candId].to === prevNode) {
+          this.checkpointBackEdgeIds[k] = candId;
+          break;
+        }
+      }
+    }
 
     this.distToGoal = new Float64Array(this.nodeCount);
     this.nextEdgeToGoal = new Int32Array(this.nodeCount).fill(-1);
@@ -271,12 +300,13 @@ export class LabyrinthBeadSimulator {
       this.wetnessF32[texelIdx] = 0;
       this.sheenF32[texelIdx] = 0;
       this.thicknessF32[texelIdx] = 0;
+      this.verdigrisF32[texelIdx] = 0;
       this.activeFlag[texelIdx] = 0;
       const byteIdx = texelIdx * 4;
       data[byteIdx + 0] = 0;
       data[byteIdx + 1] = 0;
       data[byteIdx + 2] = 0;
-      data[byteIdx + 3] = 255;
+      data[byteIdx + 3] = 0;
     }
     this.activeTexelCount = 0;
     this.lastIgniteSample = -1;
@@ -290,7 +320,8 @@ export class LabyrinthBeadSimulator {
     v01: number,
     wetStrength: number,
     sheenStrength: number,
-    thicknessStrength: number
+    thicknessStrength: number,
+    verdigrisStrength = 0
   ): void {
     const faceIndex = getFaceBasis(face).index;
     const faceSize = WET_ATLAS_FACE_SIZE;
@@ -327,6 +358,7 @@ export class LabyrinthBeadSimulator {
         const nextWet = wetStrength * falloff;
         const nextSheen = sheenStrength * falloff;
         const nextThick = thicknessStrength * falloff;
+        const nextVerdigris = verdigrisStrength * falloff;
 
         let changed = false;
         if (nextWet > this.wetnessF32[texelIdx]) {
@@ -341,6 +373,10 @@ export class LabyrinthBeadSimulator {
           this.thicknessF32[texelIdx] = nextThick;
           changed = true;
         }
+        if (nextVerdigris > this.verdigrisF32[texelIdx]) {
+          this.verdigrisF32[texelIdx] = nextVerdigris;
+          changed = true;
+        }
 
         if (changed) {
           if (this.activeFlag[texelIdx] === 0) {
@@ -351,7 +387,7 @@ export class LabyrinthBeadSimulator {
           this.wetAtlasData[byteIdx + 0] = Math.min(255, Math.round(this.wetnessF32[texelIdx] * 255));
           this.wetAtlasData[byteIdx + 1] = Math.min(255, Math.round(this.sheenF32[texelIdx] * 255));
           this.wetAtlasData[byteIdx + 2] = Math.min(255, Math.round(this.thicknessF32[texelIdx] * 255));
-          this.wetAtlasData[byteIdx + 3] = 255;
+          this.wetAtlasData[byteIdx + 3] = Math.min(255, Math.round(this.verdigrisF32[texelIdx] * 255));
           this.wetAtlasDirty = true;
         }
       }
@@ -363,11 +399,20 @@ export class LabyrinthBeadSimulator {
     edgeId: number,
     wetStrength: number,
     sheenStrength: number,
-    thicknessStrength: number
+    thicknessStrength: number,
+    verdigrisStrength = 0
   ): void {
     const H = this.topology.cubeHalfExtent;
     const { face, u01, v01 } = localPointToFaceUv(pos, H);
-    this.stampFaceBrush(face, u01, v01, wetStrength, sheenStrength, thicknessStrength);
+    this.stampFaceBrush(
+      face,
+      u01,
+      v01,
+      wetStrength,
+      sheenStrength,
+      thicknessStrength,
+      verdigrisStrength
+    );
 
     // Dual-stamp adjacent cube faces across bevel-wrap portals and rim transitions for seamless corners
     const edge = this.topology.edges[edgeId];
@@ -382,7 +427,8 @@ export class LabyrinthBeadSimulator {
           this.scratchUv[1],
           wetStrength,
           sheenStrength,
-          thicknessStrength
+          thicknessStrength,
+          verdigrisStrength
         );
       }
       if (toFace !== face) {
@@ -393,29 +439,77 @@ export class LabyrinthBeadSimulator {
           this.scratchUv[1],
           wetStrength,
           sheenStrength,
-          thicknessStrength
+          thicknessStrength,
+          verdigrisStrength
         );
       }
     }
   }
 
-  private stampCurrentTrail(wetStrength: number, sheenStrength: number, thicknessStrength: number): void {
+  private stampCurrentTrail(
+    wetStrength: number,
+    sheenStrength: number,
+    thicknessStrength: number,
+    verdigrisStrength = 0
+  ): void {
     this.stampPositionWithEdge(
       this.state.localPos,
       this.state.edgeId,
       wetStrength,
       sheenStrength,
-      thicknessStrength
+      thicknessStrength,
+      verdigrisStrength
     );
   }
 
+  private isEdgeBlocked(edgeId: number): boolean {
+    const unlocked = this.state.checkpointsUnlocked;
+    for (let k = 0; k < unlocked; k++) {
+      if (edgeId === this.checkpointBackEdgeIds[k]) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private crystallizeSolutionEdgeRange(startSolEdgeIdx: number, endSolEdgeIdxExclusive: number): void {
+    const solEdges = this.topology.solutionEdgePath;
+    const lo = Math.max(0, startSolEdgeIdx);
+    const hi = Math.min(solEdges.length, endSolEdgeIdxExclusive);
+    const lockSubsamples = 20;
+    for (let pIdx = lo; pIdx < hi; pIdx++) {
+      const edgeId = solEdges[pIdx];
+      for (let subStep = 0; subStep <= lockSubsamples; subStep++) {
+        const tEdge = subStep / lockSubsamples;
+        this.evalEdgeBeadFrame(edgeId, tEdge, this.scratchPos, this.scratchNorm, this.scratchTan);
+        this.stampPositionWithEdge(this.scratchPos, edgeId, 0.94, 0.88, 1.0, 1.0);
+      }
+    }
+  }
+
+  private unlockCheckpointsUpToNode(nodeId: number): void {
+    while (
+      this.state.checkpointsUnlocked < 3 &&
+      nodeId === this.checkpointNodeIds[this.state.checkpointsUnlocked]
+    ) {
+      const k = this.state.checkpointsUnlocked;
+      this.state.checkpointsUnlocked = k + 1;
+      this.state.impactImpulse = Math.min(1.5, Math.max(this.state.impactImpulse, 0.72));
+      const startIdx = k === 0 ? 0 : CHECKPOINT_SOL_INDICES[k - 1];
+      const endIdx = CHECKPOINT_SOL_INDICES[k];
+      this.crystallizeSolutionEdgeRange(startIdx, endIdx);
+    }
+  }
+
   /**
-   * Progressively floods a luminous wet golden-ochre capillary glaze backward from
-   * Goal Sanctum to Start Spring along the 39-edge solution geodesic during Phase 1 win ignition.
+   * Progressively floods a flowing Verdigris Malachite & Celadon capillary river
+   * backward from Goal Sanctum to Start Spring along the 47-edge solution geodesic.
    */
   igniteSolutionPathWave(progress01: number): void {
     const solEdges = this.topology.solutionEdgePath;
     if (solEdges.length === 0) return;
+
+    this.state.checkpointsUnlocked = 3;
 
     const totalSamples = solEdges.length * IGNITE_SUBSAMPLES_PER_EDGE;
     const targetSample = Math.min(
@@ -431,7 +525,7 @@ export class LabyrinthBeadSimulator {
       const subStep = sIdx % IGNITE_SUBSAMPLES_PER_EDGE;
       const tEdge = 1.0 - subStep / IGNITE_SUBSAMPLES_PER_EDGE;
       this.evalEdgeBeadFrame(edgeId, tEdge, this.scratchPos, this.scratchNorm, this.scratchTan);
-      this.stampPositionWithEdge(this.scratchPos, edgeId, 1.0, 1.0, 1.0);
+      this.stampPositionWithEdge(this.scratchPos, edgeId, 1.0, 1.0, 1.0, 1.0);
     }
 
     this.lastIgniteSample = targetSample;
@@ -443,6 +537,7 @@ export class LabyrinthBeadSimulator {
     const wetDecay = Math.exp(-0.035 * dt);
     const sheenDecay = Math.exp(-0.32 * dt);
     const thickDecay = Math.exp(-0.008 * dt);
+    const dowsingDecay = Math.exp(-0.40 * dt);
 
     let anyChanged = false;
     for (let k = this.activeTexelCount - 1; k >= 0; k--) {
@@ -450,36 +545,44 @@ export class LabyrinthBeadSimulator {
       const w = this.wetnessF32[i];
       const sh = this.sheenF32[i];
       const th = this.thicknessF32[i];
+      const vd = this.verdigrisF32[i];
 
+      const isLockedVerdigris = vd >= th * 0.45 && vd >= 0.004;
       const nw = w * wetDecay;
       const nsh = sh * sheenDecay;
-      // Preserve permanent mineral yellow-ochre residue floor at 65% of peak deposit
-      const nth = Math.max(th * 0.65, th * thickDecay);
+      // Preserve permanent mineral yellow-ochre or smooth feathered locked verdigris floor
+      const nth = isLockedVerdigris ? th : Math.max(th * 0.65, th * thickDecay);
+      const nvd = isLockedVerdigris ? vd : vd * dowsingDecay;
 
       const fw = nw < 0.002 ? 0 : nw;
       const fsh = nsh < 0.002 ? 0 : nsh;
       const fth = nth < 0.002 ? 0 : nth;
+      const fvd = nvd < 0.002 ? 0 : nvd;
 
       this.wetnessF32[i] = fw;
       this.sheenF32[i] = fsh;
       this.thicknessF32[i] = fth;
+      this.verdigrisF32[i] = fvd;
 
       const byteIdx = i * 4;
       const r = Math.min(255, Math.round(fw * 255));
       const g = Math.min(255, Math.round(fsh * 255));
       const b = Math.min(255, Math.round(fth * 255));
+      const a = Math.min(255, Math.round(fvd * 255));
       if (
         this.wetAtlasData[byteIdx + 0] !== r ||
         this.wetAtlasData[byteIdx + 1] !== g ||
-        this.wetAtlasData[byteIdx + 2] !== b
+        this.wetAtlasData[byteIdx + 2] !== b ||
+        this.wetAtlasData[byteIdx + 3] !== a
       ) {
         this.wetAtlasData[byteIdx + 0] = r;
         this.wetAtlasData[byteIdx + 1] = g;
         this.wetAtlasData[byteIdx + 2] = b;
+        this.wetAtlasData[byteIdx + 3] = a;
         anyChanged = true;
       }
 
-      if (fw === 0 && fsh === 0 && fth === 0) {
+      if (fw === 0 && fsh === 0 && fth === 0 && fvd === 0) {
         this.activeFlag[i] = 0;
         const lastIdx = --this.activeTexelCount;
         if (k !== lastIdx) {
@@ -505,6 +608,8 @@ export class LabyrinthBeadSimulator {
     this.state.impactImpulse = 0;
     this.state.solved = false;
     this.state.solveProgress01 = 0;
+    this.state.checkpointsUnlocked = 0;
+    this.state.dowsingHint01 = 0;
 
     this.evalEdgeBeadFrame(
       startEdgeId,
@@ -515,7 +620,7 @@ export class LabyrinthBeadSimulator {
     );
 
     this.clearWetAtlas();
-    this.stampCurrentTrail(0.95, 0.9, 0.9);
+    this.stampCurrentTrail(0.95, 0.9, 0.9, 0);
   }
 
   step(dtSec: number, localGravity: readonly [number, number, number]): void {
@@ -535,6 +640,8 @@ export class LabyrinthBeadSimulator {
       this.state.impactImpulse *= Math.exp(-9 * clampedDt);
       if (this.state.impactImpulse < 1e-5) this.state.impactImpulse = 0;
       this.state.solveProgress01 = 1.0;
+      this.state.checkpointsUnlocked = 3;
+      this.state.dowsingHint01 = 0;
       return;
     }
 
@@ -549,11 +656,13 @@ export class LabyrinthBeadSimulator {
       // Resting-junction launch selection: align with localGravity if resting near edge.from
       if (t <= 1e-4 && speed < 1e-3) {
         const fromNode = edges[edgeId].from;
+        this.unlockCheckpointsUpToNode(fromNode);
         const outEdges = adjacency[fromNode];
-        let bestOut = edgeId;
+        let bestOut = -1;
         let bestDot = -Infinity;
         for (let i = 0; i < outEdges.length; i++) {
           const candId = outEdges[i];
+          if (this.isEdgeBlocked(candId)) continue;
           const off = candId * 3;
           const d =
             this.edgeStartTan[off + 0] * gx +
@@ -564,7 +673,7 @@ export class LabyrinthBeadSimulator {
             bestOut = candId;
           }
         }
-        if (bestDot > 0.02 && bestOut !== edgeId) {
+        if (bestOut !== -1 && (this.isEdgeBlocked(edgeId) || (bestDot > 0.02 && bestOut !== edgeId))) {
           edgeId = bestOut;
           t = 0;
           speed = 0;
@@ -610,10 +719,10 @@ export class LabyrinthBeadSimulator {
 
       let newSpeed = speed + accel * dtSub;
 
-      // Velocity reversal mid-edge flips cleanly onto twin reverse edge
+      // Velocity reversal mid-edge flips cleanly onto twin reverse edge unless gated by ratchet
       if (newSpeed < 0) {
         const twinId = this.twinEdgeId[edgeId];
-        if (twinId !== -1) {
+        if (twinId !== -1 && !this.isEdgeBlocked(twinId)) {
           edgeId = twinId;
           t = 1.0 - t;
           newSpeed = -newSpeed;
@@ -638,6 +747,8 @@ export class LabyrinthBeadSimulator {
         this.state.speed = 0;
         this.state.solved = true;
         this.state.solveProgress01 = 1.0;
+        this.state.checkpointsUnlocked = 3;
+        this.state.dowsingHint01 = 0;
         this.evalEdgeBeadFrame(
           edgeId,
           goalSideT,
@@ -645,11 +756,11 @@ export class LabyrinthBeadSimulator {
           this.state.localNormal,
           this.state.localTangent
         );
-        this.stampCurrentTrail(1.0, 1.0, 1.0);
+        this.stampCurrentTrail(1.0, 1.0, 1.0, 0.96);
         return;
       }
 
-      // Junction transitions & dead-end bounces (cap hops per substep)
+      // Junction transitions, catch-basin stops & dead-end bounces (cap hops per substep)
       let hopGuard = 0;
       while (tNext >= 1.0 && hopGuard < 8) {
         hopGuard++;
@@ -663,6 +774,8 @@ export class LabyrinthBeadSimulator {
           this.state.speed = 0;
           this.state.solved = true;
           this.state.solveProgress01 = 1.0;
+          this.state.checkpointsUnlocked = 3;
+          this.state.dowsingHint01 = 0;
           this.evalEdgeBeadFrame(
             edgeId,
             1.0,
@@ -670,9 +783,11 @@ export class LabyrinthBeadSimulator {
             this.state.localNormal,
             this.state.localTangent
           );
-          this.stampCurrentTrail(1.0, 1.0, 1.0);
+          this.stampCurrentTrail(1.0, 1.0, 1.0, 0.96);
           return;
         }
+
+        this.unlockCheckpointsUpToNode(arrivedNode);
 
         const outEdges = adjacency[arrivedNode];
         const twinId = this.twinEdgeId[edgeId];
@@ -681,8 +796,18 @@ export class LabyrinthBeadSimulator {
         const inDirY = this.edgeEndTan[inOff + 1];
         const inDirZ = this.edgeEndTan[inOff + 2];
 
+        let unblockedCount = 0;
+        let onlyUnblockedId = -1;
+        for (let i = 0; i < outEdges.length; i++) {
+          const candId = outEdges[i];
+          if (!this.isEdgeBlocked(candId)) {
+            unblockedCount++;
+            onlyUnblockedId = candId;
+          }
+        }
+
         if (outEdges.length === 1) {
-          // Dead-end impact bounce with restitution e = 0.28
+          // Physical dead-end impact bounce with restitution e = 0.28
           const bouncedSpeed = newSpeed * DEAD_END_RESTITUTION;
           this.state.impactImpulse = Math.min(
             1.5,
@@ -692,9 +817,32 @@ export class LabyrinthBeadSimulator {
           newSpeed = bouncedSpeed;
           edgeLen = this.edgeBeadLen[edgeId];
           tNext = Math.min(0.99, overshootDist / edgeLen);
+        } else if (unblockedCount === 1 && onlyUnblockedId !== -1) {
+          // Degree-2 one-way checkpoint catch-basin: free forward passage, cushioned stop if reversing
+          const bOff = onlyUnblockedId * 3;
+          const cosTurn = clamp(
+            inDirX * this.edgeStartTan[bOff + 0] +
+              inDirY * this.edgeStartTan[bOff + 1] +
+              inDirZ * this.edgeStartTan[bOff + 2],
+            -1,
+            1
+          );
+          edgeId = onlyUnblockedId;
+          edgeLen = this.edgeBeadLen[edgeId];
+          if (onlyUnblockedId === twinId) {
+            if (newSpeed > 0.08) {
+              this.state.impactImpulse = Math.min(1.5, this.state.impactImpulse + newSpeed * 0.35);
+            }
+            newSpeed = 0;
+            tNext = 0;
+          } else {
+            const cornerFactor = CORNER_RETENTION_BASE + (1.0 - CORNER_RETENTION_BASE) * Math.max(0, cosTurn);
+            newSpeed *= cornerFactor;
+            tNext = overshootDist / edgeLen;
+          }
         } else {
           // Junction routing: decompose gravity into axial (along inDir) & lateral components.
-          // Strong lateral gravity (> 1.6 m/s^2) models physical channel-wall capture before
+          // Strong lateral gravity (> 2.2 m/s^2) models physical channel-wall capture before
           // side mouths so players catch 90° turns smoothly without hyper-delicate pre-braking.
           const gAxial = gx * inDirX + gy * inDirY + gz * inDirZ;
           const gPerpX = gx - gAxial * inDirX;
@@ -713,8 +861,9 @@ export class LabyrinthBeadSimulator {
           const momY = axialMag * inDirY + lateralSteerDt * gPerpY;
           const momZ = axialMag * inDirZ + lateralSteerDt * gPerpZ;
 
-          let bestOutId = outEdges[0];
+          let bestOutId = -1;
           let bestScore = -Infinity;
+          let bestBlockedScore = -Infinity;
           for (let i = 0; i < outEdges.length; i++) {
             const candId = outEdges[i];
             const cOff = candId * 3;
@@ -722,11 +871,30 @@ export class LabyrinthBeadSimulator {
             const uy = this.edgeStartTan[cOff + 1];
             const uz = this.edgeStartTan[cOff + 2];
             let score = ux * momX + uy * momY + uz * momZ;
+            if (this.isEdgeBlocked(candId)) {
+              if (score > bestBlockedScore) bestBlockedScore = score;
+              continue;
+            }
             if (candId !== twinId) score += 1e-6;
             if (score > bestScore) {
               bestScore = score;
               bestOutId = candId;
             }
+          }
+          if (bestOutId === -1) {
+            bestOutId = outEdges[0];
+          }
+
+          if (unblockedCount < outEdges.length && bestBlockedScore > bestScore && bestScore <= 0.005) {
+            // Momentum presses directly into the locked catch-basin stop -> park smoothly at basin lip
+            if (newSpeed > 0.08) {
+              this.state.impactImpulse = Math.min(1.5, this.state.impactImpulse + newSpeed * 0.35);
+            }
+            edgeId = bestOutId;
+            edgeLen = this.edgeBeadLen[edgeId];
+            newSpeed = 0;
+            tNext = 0;
+            break;
           }
 
           const bOff = bestOutId * 3;
@@ -774,7 +942,25 @@ export class LabyrinthBeadSimulator {
         this.state.localTangent
       );
 
-      this.stampCurrentTrail(1.0, 1.0, 0.96);
+      const postEdge = edges[edgeId];
+      const idxFrom = this.solutionNodeIndex[postEdge.from];
+      const idxTo = this.solutionNodeIndex[postEdge.to];
+      let dowsingHint = 0;
+      if (idxFrom >= 0 && idxTo >= 0 && Math.abs(idxTo - idxFrom) === 1) {
+        const curSolPos = idxFrom + (idxTo - idxFrom) * this.state.t;
+        const targetSolPos =
+          this.state.checkpointsUnlocked < 3
+            ? CHECKPOINT_SOL_INDICES[this.state.checkpointsUnlocked]
+            : this.topology.solutionNodePath.length - 1;
+        const hopsRemaining = targetSolPos - curSolPos;
+        if (hopsRemaining >= 0 && hopsRemaining <= 4.5) {
+          const raw = 1 - hopsRemaining / 4.5;
+          dowsingHint = raw * raw;
+        }
+      }
+      this.state.dowsingHint01 = dowsingHint;
+
+      this.stampCurrentTrail(1.0, 1.0, 0.96, dowsingHint * 0.20);
     }
 
     const activeEdge = edges[this.state.edgeId];

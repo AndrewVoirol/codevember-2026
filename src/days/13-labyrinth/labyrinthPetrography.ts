@@ -159,13 +159,19 @@ export function createPetrographicVolumeTexture(): THREE.Data3DTexture {
         siteY[idx] = 0.14 + 0.72 * rand();
         siteZ[idx] = 0.14 + 0.72 * rand();
         const roll = rand();
-        // ~16% angular pale shell/calcite clasts, remaining warm oolitic matrix
-        siteTone[idx] = roll < 0.16 ? 0.78 + 0.18 * rand() : 0.34 + 0.34 * rand();
+        // Trimodal lithic crystal grains: dark mica/basalt clasts, intermediate matrix, pale calcite/quartz
+        if (roll < 0.18) {
+          siteTone[idx] = 0.12 + 0.12 * rand();
+        } else if (roll < 0.82) {
+          siteTone[idx] = 0.38 + 0.24 * rand();
+        } else {
+          siteTone[idx] = 0.78 + 0.18 * rand();
+        }
       }
     }
   }
 
-  // Splat 2,600 true 3D Euclidean spherical pores into periodic G buffer (`& 63` wrap)
+  // Splat 2,600 true 3D Euclidean spherical pores with sharp crater rims into periodic G buffer (`& 63` wrap)
   const poreField = new Float32Array(totalVoxels);
   const mask63 = N - 1;
   const totalPores = 2600;
@@ -174,8 +180,8 @@ export function createPetrographicVolumeTexture(): THREE.Data3DTexture {
     const cy = rand() * N;
     const cz = rand() * N;
     const isCoarse = pi >= 2100;
-    const radius = isCoarse ? 1.45 + 0.90 * rand() : 1.00 + 0.45 * rand();
-    const strength = isCoarse ? 0.75 + 0.25 * rand() : 0.56 + 0.36 * rand();
+    const radius = isCoarse ? 1.35 + 0.80 * rand() : 0.88 + 0.42 * rand();
+    const strength = isCoarse ? 0.82 + 0.18 * rand() : 0.62 + 0.34 * rand();
     const rCeil = Math.ceil(radius);
     const invR2 = 1 / (radius * radius);
 
@@ -192,7 +198,7 @@ export function createPetrographicVolumeTexture(): THREE.Data3DTexture {
           const ddx = wx + 0.5 - cx;
           const normSq = (ddx * ddx + ddy * ddy + ddz * ddz) * invR2;
           if (normSq < 1) {
-            const profile = Math.pow(1 - normSq, 1.5) * strength;
+            const profile = Math.pow(1 - normSq, 0.65) * strength;
             const vIdx = gy + (wx & mask63);
             if (profile > poreField[vIdx]) {
               poreField[vIdx] = profile;
@@ -260,21 +266,21 @@ export function createPetrographicVolumeTexture(): THREE.Data3DTexture {
         }
 
         const edgeDist = Math.sqrt(d2Sq) - Math.sqrt(d1Sq);
-        const hairlineBlend = 1 - smoothstep(0.018, 0.068, edgeDist);
-        const rVal = clamp01(closestTone * (1 - hairlineBlend * 0.72) + 0.10 * hairlineBlend);
+        const hairlineBlend = 1 - smoothstep(0.012, 0.042, edgeDist);
+        const rVal = clamp01(closestTone * (1 - hairlineBlend * 0.78) + 0.08 * hairlineBlend);
 
         // True 3D spherical pores
         const gVal = clamp01(poreField[vIdx]);
 
-        // 3-octave periodic sandstone grain mapped cleanly to [0.08..0.92]
+        // 3-octave periodic grain mapped across [0.05..0.95] for clear chisel relief
         const n10 = samplePeriodicGradient(grain10, ux, uy, uz);
         const n19 = samplePeriodicGradient(grain19, ux, uy, uz);
         const n31 = samplePeriodicGradient(grain31, ux, uy, uz);
-        const rawGrain = n10 * 0.45 + n19 * 0.35 + n31 * 0.20;
-        const bVal = clamp01(0.5 + rawGrain * 0.62) * 0.84 + 0.08;
+        const rawGrain = n10 * 0.38 + n19 * 0.36 + n31 * 0.26;
+        const bVal = clamp01(0.5 + rawGrain * 0.88) * 0.90 + 0.05;
 
-        // Smooth composite micro-relief height
-        const aVal = clamp01(0.52 + 0.15 * (rVal - 0.5) - 0.44 * gVal + 0.26 * (bVal - 0.5));
+        // High-contrast composite micro-relief heightfield
+        const aVal = clamp01(0.54 + 0.22 * (rVal - 0.5) - 0.56 * gVal + 0.36 * (bVal - 0.5));
 
         const outIdx = vIdx * 4;
         data[outIdx] = Math.round(rVal * 255);

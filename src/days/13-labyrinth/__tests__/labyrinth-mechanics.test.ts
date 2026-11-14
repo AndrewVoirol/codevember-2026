@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three/webgpu';
 import {
+  CHECKPOINT_SOL_INDICES,
   CUBE_FACES,
   EDGE_SAMPLE_COUNT,
   WET_ATLAS_FACE_SIZE,
@@ -196,10 +197,11 @@ describe('Day 13 — Labyrinth: Physics, Spline Integration & Automated Solve', 
       }
     }
 
-    // Verify wet Yellow Ochre trail painted into atlas with alpha = 255
+    // Verify wet Yellow Ochre trail painted into atlas with valid scalar verdigris alpha channel [0..255]
     let paintedTexels = 0;
     for (let i = 0; i < sim.wetAtlasData.length; i += 4) {
-      expect(sim.wetAtlasData[i + 3]).toBe(255);
+      expect(sim.wetAtlasData[i + 3]).toBeGreaterThanOrEqual(0);
+      expect(sim.wetAtlasData[i + 3]).toBeLessThanOrEqual(255);
       if (sim.wetAtlasData[i + 0] > 30 && sim.wetAtlasData[i + 2] > 30) {
         paintedTexels++;
       }
@@ -506,6 +508,183 @@ describe('Day 13 — Labyrinth: Physics, Spline Integration & Automated Solve', 
       ) {
         expect(dotTan).toBeGreaterThan(0.99);
       }
+    }
+  });
+
+  it('unlocks 3 exterior one-way checkpoints sequentially, locks completed acts in verdigris, and guarantees zero downstream deadlocks', () => {
+    const sim = new LabyrinthBeadSimulator(topology);
+
+    // Every checkpoint must sit on an exterior (tier = 0) corridor floor
+    for (let k = 0; k < CHECKPOINT_SOL_INDICES.length; k++) {
+      const cpNode = topology.nodes[topology.solutionNodePath[CHECKPOINT_SOL_INDICES[k]]];
+      expect(cpNode.tier).toBe(0);
+    }
+
+    // Verify graph-theoretic deadlock-freedom when backward cut-edges are locked at stages 1, 2, 3
+    const cpBackEdges = CHECKPOINT_SOL_INDICES.map((solIdx) => {
+      const cpId = topology.solutionNodePath[solIdx];
+      const prevId = topology.solutionNodePath[solIdx - 1];
+      return topology.adjacency[cpId].find((eid) => topology.edges[eid].to === prevId)!;
+    });
+    for (let stage = 1; stage <= 3; stage++) {
+      const blocked = new Set(cpBackEdges.slice(0, stage));
+      const cpStart = topology.solutionNodePath[CHECKPOINT_SOL_INDICES[stage - 1]];
+      const reach = new Set<number>([cpStart]);
+      const q = [cpStart];
+      for (let h = 0; h < q.length; h++) {
+        const u = q[h];
+        for (const eid of topology.adjacency[u]) {
+          if (blocked.has(eid)) continue;
+          const v = topology.edges[eid].to;
+          if (!reach.has(v)) {
+            reach.add(v);
+            q.push(v);
+          }
+        }
+      }
+      const canReachGoal = new Set<number>([topology.goalNodeId]);
+      const rq = [topology.goalNodeId];
+      for (let h = 0; h < rq.length; h++) {
+        const v = rq[h];
+        for (const revEid of topology.adjacency[v]) {
+          const u = topology.edges[revEid].to;
+          const fwd = topology.adjacency[u].find((eid) => topology.edges[eid].to === v)!;
+          if (blocked.has(fwd)) continue;
+          if (!canReachGoal.has(u)) {
+            canReachGoal.add(u);
+            rq.push(u);
+          }
+        }
+      }
+      for (const n of reach) {
+        expect(canReachGoal.has(n)).toBe(true);
+      }
+      expect(reach.has(topology.solutionNodePath[CHECKPOINT_SOL_INDICES[stage - 1] - 1])).toBe(false);
+    }
+
+    // Drive forward past Checkpoint 0 and verify sequential unlock + act crystallization + ratchet stop
+    const gOut: [number, number, number] = [0, 0, 0];
+    let guard = 0;
+    while (sim.state.checkpointsUnlocked < 1 && guard < 1200) {
+      sim.computeDownhillGravityForNextStep(gOut);
+      sim.step(1 / 60, gOut);
+      guard++;
+    }
+    expect(sim.state.checkpointsUnlocked).toBe(1);
+
+    // At least part of Act 1 is crystallized with strong verdigris alpha (>= 220)
+    let act1VerdigrisCount = 0;
+    for (let i = 3; i < sim.wetAtlasData.length; i += 4) {
+      if (sim.wetAtlasData[i] >= 220) act1VerdigrisCount++;
+    }
+    expect(act1VerdigrisCount).toBeGreaterThan(80);
+
+    // Push strongly backward toward Checkpoint 0's locked previous node; must NOT cross back into Act 1
+    const cp0Node = topology.nodes[sim.checkpointNodeIds[0]];
+    const prev0Node = topology.nodes[topology.solutionNodePath[CHECKPOINT_SOL_INDICES[0] - 1]];
+    const backGrav: [number, number, number] = [
+      (prev0Node.localPos[0] - cp0Node.localPos[0]) * 45,
+      (prev0Node.localPos[1] - cp0Node.localPos[1]) * 45,
+      (prev0Node.localPos[2] - cp0Node.localPos[2]) * 45,
+    ];
+    for (let i = 0; i < 180; i++) {
+      sim.step(1 / 60, backGrav);
+      const curFrom = topology.edges[sim.state.edgeId].from;
+      const curTo = topology.edges[sim.state.edgeId].to;
+      expect(curFrom).not.toBe(prev0Node.id);
+      expect(curTo).not.toBe(prev0Node.id);
+    }
+
+    // Continue solving to completion; checkpoints 2 and 3 must unlock strictly in order
+    const unlockSeq = [sim.state.checkpointsUnlocked];
+    while (!sim.state.solved && guard < 3600) {
+      const prev = sim.state.checkpointsUnlocked;
+      sim.computeDownhillGravityForNextStep(gOut);
+      sim.step(1 / 60, gOut);
+      if (sim.state.checkpointsUnlocked !== prev) {
+        unlockSeq.push(sim.state.checkpointsUnlocked);
+      }
+      guard++;
+    }
+    expect(sim.state.solved).toBe(true);
+    expect(unlockSeq).toEqual([1, 2, 3]);
+  });
+
+  it('keeps dowsing hint strictly zero on decoys and subtly bounded near checkpoints', () => {
+    const sim = new LabyrinthBeadSimulator(topology);
+
+    // Drive directly into decoy branch (pz,1,5) -> (1,6) -> (4,6)
+    for (let i = 0; i < 60; i++) {
+      sim.step(1 / 60, [0.5, 9.81, 0]);
+      expect(sim.state.dowsingHint01).toBe(0);
+    }
+    for (let i = 0; i < 90; i++) {
+      sim.step(1 / 60, [9.81, 0.2, 0]);
+      expect(sim.state.dowsingHint01).toBe(0);
+    }
+    for (let i = 3; i < sim.wetAtlasData.length; i += 4) {
+      expect(sim.wetAtlasData[i]).toBe(0);
+    }
+
+    // Reset and advance along solution toward Checkpoint 0, verifying subtle bounded alpha before crossing
+    sim.reset();
+    const gOut: [number, number, number] = [0, 0, 0];
+    let maxDowsingBeforeCp = 0;
+    let maxAlphaWhileDowsing = 0;
+    let steps = 0;
+    while (sim.state.checkpointsUnlocked === 0 && steps < 900) {
+      sim.computeDownhillGravityForNextStep(gOut);
+      sim.step(1 / 60, gOut);
+      if (sim.state.checkpointsUnlocked === 0) {
+        if (sim.state.dowsingHint01 > maxDowsingBeforeCp) {
+          maxDowsingBeforeCp = sim.state.dowsingHint01;
+        }
+        if (sim.state.dowsingHint01 > 0.35) {
+          for (let i = 3; i < sim.wetAtlasData.length; i += 4) {
+            if (sim.wetAtlasData[i] > maxAlphaWhileDowsing) {
+              maxAlphaWhileDowsing = sim.wetAtlasData[i];
+            }
+          }
+        }
+      }
+      steps++;
+    }
+    expect(maxDowsingBeforeCp).toBeGreaterThan(0.15);
+    expect(maxDowsingBeforeCp).toBeLessThanOrEqual(1);
+    expect(maxAlphaWhileDowsing).toBeGreaterThan(0);
+    expect(maxAlphaWhileDowsing).toBeLessThanOrEqual(60);
+  });
+
+  it('transmutes solution river to full verdigris while preserving decoy ochre and resets cleanly', () => {
+    const sim = new LabyrinthBeadSimulator(topology);
+    // Paint a decoy trail on pz(4,6) dead-end first
+    for (let i = 0; i < 45; i++) sim.step(1 / 60, [0.5, 9.81, 0]);
+    for (let i = 0; i < 90; i++) sim.step(1 / 60, [9.81, 0.2, 0]);
+
+    const deadEndNode = topology.nodes.find((n) => n.face === 'pz' && n.u === 4 && n.v === 6)!;
+    const decoyProj = localPointToFaceUv(deadEndNode.localPos, topology.cubeHalfExtent);
+    const dx = Math.round(decoyProj.u01 * (WET_ATLAS_FACE_SIZE - 1));
+    const dy = Math.round(decoyProj.v01 * (WET_ATLAS_FACE_SIZE - 1));
+    const decoyByteIdx =
+      (dy * WET_ATLAS_WIDTH + decoyProj.faceIndex * WET_ATLAS_FACE_SIZE + dx) * 4;
+    expect(sim.wetAtlasData[decoyByteIdx + 0]).toBeGreaterThan(60); // painted ochre/wetness
+    expect(sim.wetAtlasData[decoyByteIdx + 3]).toBe(0); // zero verdigris on decoy
+
+    // Ignite solution wave -> stamps full verdigris across all 47 solution edges, decoy stays non-green
+    sim.igniteSolutionPathWave(1.0);
+    let maxSolAlpha = 0;
+    for (let i = 3; i < sim.wetAtlasData.length; i += 4) {
+      if (sim.wetAtlasData[i] > maxSolAlpha) maxSolAlpha = sim.wetAtlasData[i];
+    }
+    expect(maxSolAlpha).toBeGreaterThanOrEqual(240);
+    expect(sim.wetAtlasData[decoyByteIdx + 3]).toBe(0);
+
+    // Reset clears checkpoints, dowsing, and every verdigris texel back to 0
+    sim.reset();
+    expect(sim.state.checkpointsUnlocked).toBe(0);
+    expect(sim.state.dowsingHint01).toBe(0);
+    for (let i = 3; i < sim.wetAtlasData.length; i += 4) {
+      expect(sim.wetAtlasData[i]).toBe(0);
     }
   });
 });

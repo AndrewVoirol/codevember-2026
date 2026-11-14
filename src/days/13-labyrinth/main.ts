@@ -68,6 +68,8 @@ export interface LabyrinthTelemetryState {
   impactImpulse: number;
   solved: boolean;
   solveProgress01: number;
+  checkpointsUnlocked: number;
+  dowsingHint01: number;
   victoryPhase: LabyrinthVictoryPhase;
   vaultOpen01: number;
   startNodeId: number;
@@ -75,6 +77,7 @@ export interface LabyrinthTelemetryState {
   nearestNodeId: number;
   solutionEdgeCount: number;
   wetTrailTexels: number;
+  verdigrisTrailTexels: number;
   quaternion: [number, number, number, number];
   cameraDistance: number;
 }
@@ -165,9 +168,16 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
     monolithGeometry,
     sanctumInlayGeometry,
     startSpringGeometry,
+    waystoneInlayGeometry,
+    waystoneOctantSpecs,
     beadGeometry,
   } = createLabyrinthGeometries(topology);
-  const optics = createLabyrinthOptics(stage, simulator.wetAtlasData, topology.beadRadius);
+  const optics = createLabyrinthOptics(
+    stage,
+    simulator.wetAtlasData,
+    topology.beadRadius,
+    topology.nodes[topology.goalNodeId].localPos
+  );
 
   const monolithGroup = new THREE.Group();
   monolithGroup.name = 'MonolithicLabyrinthCube';
@@ -190,6 +200,12 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
   startSpringMesh.castShadow = false;
   startSpringMesh.receiveShadow = true;
   monolithGroup.add(startSpringMesh);
+
+  const waystoneMesh = new THREE.Mesh(waystoneInlayGeometry, optics.waystoneMaterial);
+  waystoneMesh.name = 'VerdigrisWaystones';
+  waystoneMesh.castShadow = false;
+  waystoneMesh.receiveShadow = true;
+  monolithGroup.add(waystoneMesh);
 
   const centerpiece = createLabyrinthCenterpiece(stage, optics.beadMaterial);
   centerpiece.group.visible = false;
@@ -271,6 +287,14 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
     startSpringVaultMesh.receiveShadow = true;
     octantGroups[3].add(startSpringVaultMesh);
 
+    for (let wi = 0; wi < waystoneOctantSpecs.length; wi++) {
+      const spec = waystoneOctantSpecs[wi];
+      const wayVaultMesh = new THREE.Mesh(spec.geometry, optics.waystoneMaterial);
+      wayVaultMesh.castShadow = false;
+      wayVaultMesh.receiveShadow = true;
+      octantGroups[spec.octantIndex].add(wayVaultMesh);
+    }
+
     sanctumClickTargets.push(sanctumHalfPosZMesh, sanctumHalfNegZMesh, ...centerpiece.clickTargets);
   };
 
@@ -325,6 +349,7 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
       st.solveProgress01,
       dtSec
     );
+    optics.setProgressUniforms(st.checkpointsUnlocked, st.dowsingHint01);
     if (simulator.wetAtlasDirty) {
       optics.wetTrailTexture.needsUpdate = true;
       simulator.wetAtlasDirty = false;
@@ -339,7 +364,8 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
     waveCompleted = false;
     camEasedOnOpen = false;
     userDraggedDuringVictory = false;
-    optics.setVictoryUniforms(0, 0);
+    optics.setProgressUniforms(0, 0);
+    optics.setVictoryUniforms(0, 0, 0);
     optics.wetTrailTexture.needsUpdate = true;
     simulator.wetAtlasDirty = false;
 
@@ -347,6 +373,7 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
     monolithMesh.visible = true;
     sanctumMesh.visible = true;
     startSpringMesh.visible = true;
+    waystoneMesh.visible = true;
     vaultGroup.visible = false;
     centerpiece.group.visible = false;
     centerpiece.update(0, 0, 0);
@@ -532,6 +559,10 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
     monolithGeometry.dispose();
     sanctumInlayGeometry.dispose();
     startSpringGeometry.dispose();
+    waystoneInlayGeometry.dispose();
+    for (let wi = 0; wi < waystoneOctantSpecs.length; wi++) {
+      waystoneOctantSpecs[wi].geometry.dispose();
+    }
     beadGeometry.dispose();
     if (octantsResult) {
       for (let oi = 0; oi < octantsResult.octantGeometries.length; oi++) {
@@ -567,10 +598,14 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
     }
 
     let wetTrailTexels = 0;
+    let verdigrisTrailTexels = 0;
     const atlas = simulator.wetAtlasData;
     for (let i = 0; i < atlas.length; i += 4) {
       if (atlas[i] > 4 || atlas[i + 2] > 4) {
         wetTrailTexels++;
+      }
+      if (atlas[i + 3] > 96) {
+        verdigrisTrailTexels++;
       }
     }
 
@@ -596,6 +631,8 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
       impactImpulse: Number(st.impactImpulse.toFixed(4)),
       solved: st.solved,
       solveProgress01: Number(st.solveProgress01.toFixed(4)),
+      checkpointsUnlocked: st.checkpointsUnlocked,
+      dowsingHint01: Number(st.dowsingHint01.toFixed(4)),
       victoryPhase,
       vaultOpen01: Number(vaultOpen01.toFixed(4)),
       startNodeId: topology.startNodeId,
@@ -603,6 +640,7 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
       nearestNodeId,
       solutionEdgeCount: topology.solutionEdgePath.length,
       wetTrailTexels,
+      verdigrisTrailTexels,
       quaternion: [
         Number(monolithGroup.quaternion.x.toFixed(5)),
         Number(monolithGroup.quaternion.y.toFixed(5)),
@@ -694,6 +732,7 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
     } else {
       victoryElapsedSec += dt;
       const t = victoryElapsedSec;
+      optics.setProgressUniforms(3, 0);
 
       if (t < 0.75) {
         victoryPhase = 'ignition';
@@ -704,7 +743,7 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
           simulator.wetAtlasDirty = false;
         }
         const igniteU = Math.min(1, t / 0.55);
-        optics.setVictoryUniforms(1, igniteU);
+        optics.setVictoryUniforms(1, igniteU, igniteU);
 
         // Pre-unlatch mechanical tremor right before octants part
         if (t > 0.58) {
@@ -733,12 +772,13 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
           }
         }
         const postIgnite = t < 1.25 ? 1.0 : Math.max(0.35, 1.0 - (t - 1.25) * 0.55);
-        optics.setVictoryUniforms(1, postIgnite);
+        optics.setVictoryUniforms(1, postIgnite, 1.0);
 
         ensureVaultOctantsBuiltSync();
         monolithMesh.visible = false;
         sanctumMesh.visible = false;
         startSpringMesh.visible = false;
+        waystoneMesh.visible = false;
         vaultGroup.visible = true;
         centerpiece.group.visible = true;
 
