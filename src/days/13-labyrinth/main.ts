@@ -16,7 +16,7 @@ import { createLabyrinthCenterpiece } from './labyrinthCenterpiece';
 const DEFAULT_CAM_POS: readonly [number, number, number] = [0, 0.12, 4.35];
 const MIN_CAM_DIST = 2.45;
 const MAX_CAM_DIST = 6.8;
-const MAX_HOVER_BIAS_RAD = 0.035;
+const MAX_HOVER_BIAS_RAD = 0.004;
 const TRACKBALL_RADIUS = 0.82;
 
 // Pre-allocated module-scope math scratch objects (strictly zero per-frame allocations)
@@ -427,6 +427,7 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
     if (stage.shell.canvas.style.cursor !== '') {
       stage.shell.canvas.style.cursor = '';
     }
+    optics.updateBeadUniforms([0, 0, 0], simulator.state.localNormal, 0, 0, 0, simulator.state.rollQuat);
     syncVisualFromSimulator(1 / 60);
   };
 
@@ -738,15 +739,15 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
       }
     }
 
-    // 3. Subtle ±2° camera-aligned hover gravity-tip bias relative to release anchor (zero snaps)
+    // 3. Micro ±0.23° camera-aligned hover luster bias with 0.25 NDC release deadzone (never dislodges settled bead)
+    let hoverDx = pointer.ndc.x - hoverAnchorNdcX;
+    let hoverDy = pointer.ndc.y - hoverAnchorNdcY;
+    hoverDx = Math.abs(hoverDx) <= 0.25 ? 0 : hoverDx - Math.sign(hoverDx) * 0.25;
+    hoverDy = Math.abs(hoverDy) <= 0.25 ? 0 : hoverDy - Math.sign(hoverDy) * 0.25;
     const targetHoverX =
-      !isDragging && pointer.isActive
-        ? Math.tanh((pointer.ndc.x - hoverAnchorNdcX) * 1.2) * MAX_HOVER_BIAS_RAD
-        : 0;
+      !isDragging && pointer.isActive ? Math.tanh(hoverDx * 1.2) * MAX_HOVER_BIAS_RAD : 0;
     const targetHoverY =
-      !isDragging && pointer.isActive
-        ? Math.tanh((pointer.ndc.y - hoverAnchorNdcY) * 1.2) * MAX_HOVER_BIAS_RAD
-        : 0;
+      !isDragging && pointer.isActive ? Math.tanh(hoverDy * 1.2) * MAX_HOVER_BIAS_RAD : 0;
     const hoverAlpha = 1 - Math.exp(-dt * 7.5);
     hoverYaw += (targetHoverX - hoverYaw) * hoverAlpha;
     hoverPitch += (targetHoverY - hoverPitch) * hoverAlpha;

@@ -195,7 +195,7 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
     'rawUmber',
     'yellowOchre',
     'Suspended chamfered limestone and vesicular basalt 6-face labyrinth cube with verdigris copper-carbonate seams, vaulted stone underpasses, and a liquid quicksilver bead painting a yellow-ochre glaze trail into the cinnabar sanctum to unlatch an 8-octant brass astrolabe & lapis-realgar reliquary vault',
-    'Drag to tilt and roll via gimbal-free SO(3) trackball rotation; hover imparts ±6° gravity bias; scroll to zoom; click the opened core or double-click to reset'
+    'Drag to tilt and roll via gimbal-free SO(3) trackball rotation; hover imparts subtle specular micro-bias without dislodging resting marbles; scroll to zoom; click the opened core or double-click to reset'
   ),
   createDay(
     14,

@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three/webgpu';
+import { float } from 'three/tsl';
+import { type SpecimenStage } from '../../../core/stage/SpecimenStage';
 import {
   CHECKPOINT_SOL_INDICES,
   CUBE_FACES,
@@ -22,6 +24,7 @@ import {
   ROLLING_GRAVITY_FACTOR,
 } from '../labyrinthPhysics';
 import { createLabyrinthGeometries } from '../labyrinthGeometry';
+import { createLabyrinthOptics } from '../labyrinthOptics';
 
 describe('Day 13 — Labyrinth: Multi-Face Topology & Geodesic Invariants', () => {
   const topology = createLabyrinthTopology();
@@ -1144,5 +1147,220 @@ describe('Day 13 — Labyrinth: Physics, Spline Integration & Automated Solve', 
     }
     expect(sim.state.solved).toBe(true);
     expect(maxExcessJump).toBeLessThanOrEqual(0);
+  });
+
+  it('eliminates phantom sideways ramp suction past py[4,3] when tilted purely along the corridor', () => {
+    const fromNode = topology.nodes.find(
+      (n) => n.face === 'py' && n.u === 4 && n.v === 4 && n.tier === 0
+    )!;
+    const midNode = topology.nodes.find(
+      (n) => n.face === 'py' && n.u === 4 && n.v === 3 && n.tier === 0
+    )!;
+    const approachEdge = topology.edges.find(
+      (e) => e.from === fromNode.id && e.to === midNode.id
+    )!;
+    expect(approachEdge).toBeDefined();
+
+    const dx = midNode.localPos[0] - fromNode.localPos[0];
+    const dy = midNode.localPos[1] - fromNode.localPos[1];
+    const dz = midNode.localPos[2] - fromNode.localPos[2];
+    const len = Math.hypot(dx, dy, dz) || 1;
+    const fn = midNode.localNormal;
+    const gPureAlong: [number, number, number] = [
+      (dx / len) * 2.4 - fn[0] * 9.5,
+      (dy / len) * 2.4 - fn[1] * 9.5,
+      (dz / len) * 2.4 - fn[2] * 9.5,
+    ];
+
+    const sim = new LabyrinthBeadSimulator(topology);
+    (sim.state as { edgeId: number; t: number; speed: number }).edgeId = approachEdge.id;
+    (sim.state as { t: number }).t = 0.1;
+    (sim.state as { speed: number }).speed = 0.45;
+
+    let enteredRamp = false;
+    let rolledPastJunction = false;
+    for (let i = 0; i < 60; i++) {
+      sim.step(1 / 60, gPureAlong);
+      const curEdge = topology.edges[sim.state.edgeId];
+      if (curEdge.kind === 'ramp') enteredRamp = true;
+      if (curEdge.from === midNode.id && curEdge.kind === 'surface') {
+        rolledPastJunction = true;
+      }
+    }
+    expect(enteredRamp).toBe(false);
+    expect(rolledPastJunction).toBe(true);
+  });
+
+  it('glides freely on flat corridors without excessive low-speed drag before settling', () => {
+    const startEdge = topology.edges.find(
+      (e) =>
+        topology.nodes[e.from].face === 'pz' &&
+        topology.nodes[e.from].u === 1 &&
+        topology.nodes[e.from].v === 5 &&
+        topology.nodes[e.to].face === 'pz' &&
+        topology.nodes[e.to].u === 2 &&
+        topology.nodes[e.to].v === 5
+    )!;
+    const sim = new LabyrinthBeadSimulator(topology);
+    (sim.state as { edgeId: number; t: number; speed: number }).edgeId = startEdge.id;
+    (sim.state as { t: number }).t = 0;
+    (sim.state as { speed: number }).speed = 0.42;
+
+    let totalDist = 0;
+    let prevPos: [number, number, number] = [...sim.state.localPos];
+    for (let i = 0; i < 600; i++) {
+      sim.step(1 / 60, [0, 0, -9.81]);
+      totalDist += Math.hypot(
+        sim.state.localPos[0] - prevPos[0],
+        sim.state.localPos[1] - prevPos[1],
+        sim.state.localPos[2] - prevPos[2]
+      );
+      prevPos = [...sim.state.localPos];
+    }
+    expect(totalDist).toBeGreaterThan(0.55);
+    expect(sim.state.speed).toBeLessThan(0.02);
+  });
+
+  it('produces diminishing multi-bounce dead-end settle and true head-on axial T-wall rebound', () => {
+    const dt = 1 / 60;
+    const deadEndEdge = topology.edges.find(
+      (e) => topology.adjacency[e.to].length === 1 && e.kind === 'surface'
+    )!;
+    expect(deadEndEdge).toBeDefined();
+
+    const fromNode = topology.nodes[deadEndEdge.from];
+    const toNode = topology.nodes[deadEndEdge.to];
+    const dx = toNode.localPos[0] - fromNode.localPos[0];
+    const dy = toNode.localPos[1] - fromNode.localPos[1];
+    const dz = toNode.localPos[2] - fromNode.localPos[2];
+    const dl = Math.hypot(dx, dy, dz) || 1;
+    const fn = toNode.localNormal;
+    const gDead: [number, number, number] = [
+      (dx / dl) * 3.1 - fn[0] * 9.3,
+      (dy / dl) * 3.1 - fn[1] * 9.3,
+      (dz / dl) * 3.1 - fn[2] * 9.3,
+    ];
+
+    const simDead = new LabyrinthBeadSimulator(topology);
+    (simDead.state as { edgeId: number; t: number; speed: number }).edgeId = deadEndEdge.id;
+    (simDead.state as { t: number }).t = 0.15;
+    (simDead.state as { speed: number }).speed = 0.55;
+
+    let deadBounces = 0;
+    let prevDeadEdge = deadEndEdge.id;
+    const bouncePeaks: number[] = [];
+    for (let i = 0; i < 150; i++) {
+      simDead.step(dt, gDead);
+      if (prevDeadEdge === deadEndEdge.id && simDead.state.edgeId !== deadEndEdge.id && simDead.state.speed > 0) {
+        deadBounces++;
+        bouncePeaks.push(simDead.state.speed);
+      }
+      prevDeadEdge = simDead.state.edgeId;
+    }
+    expect(deadBounces).toBeGreaterThanOrEqual(3);
+    expect(bouncePeaks[0]).toBeGreaterThan(bouncePeaks[1]);
+    expect(bouncePeaks[1]).toBeGreaterThan(bouncePeaks[2]);
+    expect(simDead.state.speed).toBe(0);
+
+    // Stem-into-bar flat T-wall head-on hit rebounds axially onto twin reverse edge
+    const tNode = topology.nodes.find((n) => {
+      if (n.tier !== 0 || n.id === topology.goalNodeId) return false;
+      const out = topology.adjacency[n.id];
+      if (out.length !== 3) return false;
+      return out.some((aid, idxA) =>
+        out.some((bid, idxB) => {
+          if (idxA === idxB) return false;
+          const pa = topology.edges[aid].samplesPos;
+          const pb = topology.edges[bid].samplesPos;
+          const dA = Math.hypot(pa[3] - pa[0], pa[4] - pa[1], pa[5] - pa[2]) || 1;
+          const dB = Math.hypot(pb[3] - pb[0], pb[4] - pb[1], pb[5] - pb[2]) || 1;
+          const dot =
+            ((pa[3] - pa[0]) * (pb[3] - pb[0]) +
+              (pa[4] - pa[1]) * (pb[4] - pb[1]) +
+              (pa[5] - pa[2]) * (pb[5] - pb[2])) /
+            (dA * dB);
+          return dot < -0.95;
+        })
+      );
+    })!;
+    const tOut = topology.adjacency[tNode.id];
+    const stemOutId = tOut.find((candId) => {
+      let oppDots = 0;
+      const pc = topology.edges[candId].samplesPos;
+      const dc = Math.hypot(pc[3] - pc[0], pc[4] - pc[1], pc[5] - pc[2]) || 1;
+      for (const otherId of tOut) {
+        if (otherId === candId) continue;
+        const po = topology.edges[otherId].samplesPos;
+        const doLen = Math.hypot(po[3] - po[0], po[4] - po[1], po[5] - po[2]) || 1;
+        const dot =
+          ((pc[3] - pc[0]) * (po[3] - po[0]) +
+            (pc[4] - pc[1]) * (po[4] - po[1]) +
+            (pc[5] - pc[2]) * (po[5] - po[2])) /
+          (dc * doLen);
+        if (Math.abs(dot) < 0.2) oppDots++;
+      }
+      return oppDots === 2;
+    })!;
+    const stemOutEdge = topology.edges[stemOutId];
+    const stemInEdge = topology.edges.find((e) => e.from === stemOutEdge.to && e.to === tNode.id)!;
+    const pS = stemOutEdge.samplesPos;
+    const dS = Math.hypot(pS[3] - pS[0], pS[4] - pS[1], pS[5] - pS[2]) || 1;
+    const stemInDir: [number, number, number] = [
+      -(pS[3] - pS[0]) / dS,
+      -(pS[4] - pS[1]) / dS,
+      -(pS[5] - pS[2]) / dS,
+    ];
+    const tHeadGrav: [number, number, number] = [
+      stemInDir[0] * 3.0 - tNode.localNormal[0] * 9.3,
+      stemInDir[1] * 3.0 - tNode.localNormal[1] * 9.3,
+      stemInDir[2] * 3.0 - tNode.localNormal[2] * 9.3,
+    ];
+
+    const simT = new LabyrinthBeadSimulator(topology);
+    (simT.state as { edgeId: number; t: number; speed: number }).edgeId = stemInEdge.id;
+    (simT.state as { t: number }).t = 0.25;
+    (simT.state as { speed: number }).speed = 0.55;
+
+    let hitAxialRebound = false;
+    for (let i = 0; i < 120; i++) {
+      const prevEdgeId = simT.state.edgeId;
+      simT.step(dt, tHeadGrav);
+      if (prevEdgeId === stemInEdge.id && simT.state.edgeId === stemOutId && simT.state.speed > 0.05) {
+        hitAxialRebound = true;
+      }
+    }
+    expect(hitAxialRebound).toBe(true);
+    expect(simT.state.speed).toBe(0);
+  });
+
+  it('excites and cleanly damps liquid-mercury dome slosh on abrupt stops', () => {
+    const wetAtlas = new Uint8Array(WET_ATLAS_WIDTH * WET_ATLAS_HEIGHT * 4);
+    const optics = createLabyrinthOptics({ uTime: float(0) } as unknown as SpecimenStage, wetAtlas);
+    try {
+      const sloshOut: [number, number, number] = [0, 0, 0];
+      const dt = 1 / 60;
+      optics.updateBeadUniforms([1.0, 0, 0], [0, 1, 0], 0, 0, dt);
+
+      let maxAbsSlosh = 0;
+      let minSloshX = Infinity;
+      let magAt06s = Infinity;
+      for (let i = 1; i <= 60; i++) {
+        optics.updateBeadUniforms([0, 0, 0], [0, 1, 0], 0, 0, dt);
+        optics.getBeadSloshLocal(sloshOut);
+        const mag = Math.hypot(sloshOut[0], sloshOut[1], sloshOut[2]);
+        if (mag > maxAbsSlosh) maxAbsSlosh = mag;
+        if (sloshOut[0] < minSloshX) minSloshX = sloshOut[0];
+        if (i === 36) magAt06s = mag;
+        expect(Math.abs(sloshOut[1])).toBeLessThan(1e-6);
+      }
+      expect(maxAbsSlosh).toBeGreaterThan(0.02);
+      expect(maxAbsSlosh).toBeLessThanOrEqual(0.22);
+      expect(minSloshX).toBeLessThan(-0.005);
+      expect(magAt06s).toBeLessThan(0.003);
+      optics.getBeadSloshLocal(sloshOut);
+      expect(Math.hypot(sloshOut[0], sloshOut[1], sloshOut[2])).toBe(0);
+    } finally {
+      optics.dispose();
+    }
   });
 });

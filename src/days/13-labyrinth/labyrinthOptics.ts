@@ -65,6 +65,7 @@ export interface LabyrinthOpticsBundle {
     dtSec?: number,
     rollQuat?: readonly [number, number, number, number] | THREE.Quaternion
   ) => void;
+  getBeadSloshLocal: (out: [number, number, number]) => [number, number, number];
   setProgressUniforms: (checkpointsUnlocked: number, dowsingHint01: number) => void;
   setVictoryUniforms: (
     solveProgress01: number,
@@ -822,6 +823,7 @@ export function createLabyrinthOptics(
   const uBeadNormalLocal = uniform(new THREE.Vector3(0, 1, 0));
   const uBeadImpact = uniform(0.0);
   const uBeadRollQuat = uniform(new THREE.Vector4(0, 0, 0, 1));
+  const uBeadSloshLocal = uniform(new THREE.Vector3(0, 0, 0));
 
   const beadRadiusFloat = float(beadRadius);
 
@@ -851,12 +853,17 @@ export function createLabyrinthOptics(
     const perpScale = float(1.0).div(sqrt(float(1.0).add(stretch)));
     const pStretched = pParallel.mul(float(1.0).add(stretch)).add(pPerp.mul(perpScale));
 
+    // 2b. Tangent-plane inertial capillary dome rock (floor contact pinned at hNorm = -1)
+    const domeRockMask = smoothstep(float(-0.85), float(0.65), hNorm);
+    const sloshTan = uBeadSloshLocal.sub(nFloor.mul(dot(uBeadSloshLocal, nFloor)));
+    const pRocked = pStretched.add(sloshTan.mul(beadRadiusFloat.mul(domeRockMask)));
+
     // 3. Damped Rayleigh-Lamb l=2 axisymmetric oscillation P2(cos theta) from uBeadImpact
     const pUnit = normalize(p0.add(vec3(0.0, 1e-5, 0.0)));
     const cosTheta = dot(pUnit, nFloor);
     const p2Mode = float(0.5).mul(float(3.0).mul(cosTheta).mul(cosTheta).sub(1.0));
     const lambOsc = uBeadImpact.mul(sin(stage.uTime.mul(32.0))).mul(0.15);
-    return pStretched.add(pUnit.mul(beadRadiusFloat.mul(lambOsc).mul(p2Mode)));
+    return pRocked.add(pUnit.mul(beadRadiusFloat.mul(lambOsc).mul(p2Mode)));
   });
 
   const computeBeadDeformedNormal = Fn(([pt_in, norm_in]: [TslNode, TslNode]) => {
@@ -980,10 +987,20 @@ export function createLabyrinthOptics(
   }
 
   // -------------------------------------------------------------------------
-  // Zero-Allocation Bead Uniform Updater with Damped Rayleigh-Lamb Envelope
+  // Zero-Allocation Bead Uniform Updater with Damped Rayleigh-Lamb & Dome Slosh
   // -------------------------------------------------------------------------
   let ringAmplitude = 0;
   let prevRawImpact = 0;
+  let sloshX = 0;
+  let sloshY = 0;
+  let sloshZ = 0;
+  let sloshVx = 0;
+  let sloshVy = 0;
+  let sloshVz = 0;
+  let prevVelX = 0;
+  let prevVelY = 0;
+  let prevVelZ = 0;
+  let hasPrevVel = false;
 
   const updateBeadUniforms: LabyrinthOpticsBundle['updateBeadUniforms'] = (
     velocityLocal,
@@ -993,33 +1010,145 @@ export function createLabyrinthOptics(
     dtSec = 1 / 60,
     rollQuat
   ) => {
-    const dt = Math.max(0.0005, Math.min(0.05, dtSec));
-
+    let vx: number;
+    let vy: number;
+    let vz: number;
     if (Array.isArray(velocityLocal)) {
-      uBeadVelocityLocal.value.set(velocityLocal[0], velocityLocal[1], velocityLocal[2]);
+      vx = velocityLocal[0];
+      vy = velocityLocal[1];
+      vz = velocityLocal[2];
     } else {
       const v = velocityLocal as THREE.Vector3;
-      uBeadVelocityLocal.value.set(v.x, v.y, v.z);
+      vx = v.x;
+      vy = v.y;
+      vz = v.z;
     }
+    uBeadVelocityLocal.value.set(vx, vy, vz);
 
+    let nx: number;
+    let ny: number;
+    let nz: number;
     if (Array.isArray(normalLocalVec)) {
-      uBeadNormalLocal.value.set(normalLocalVec[0], normalLocalVec[1], normalLocalVec[2]);
+      nx = normalLocalVec[0];
+      ny = normalLocalVec[1];
+      nz = normalLocalVec[2];
     } else {
       const n = normalLocalVec as THREE.Vector3;
-      uBeadNormalLocal.value.set(n.x, n.y, n.z);
+      nx = n.x;
+      ny = n.y;
+      nz = n.z;
     }
+    uBeadNormalLocal.value.set(nx, ny, nz);
+    const nLen = Math.hypot(nx, ny, nz) || 1;
+    nx /= nLen;
+    ny /= nLen;
+    nz /= nLen;
 
-    const clampedImpact = Math.max(0, Math.min(1.5, impactImpulse));
-    if (clampedImpact > prevRawImpact + 0.02) {
-      ringAmplitude = Math.max(ringAmplitude, clampedImpact);
+    if (dtSec <= 0) {
+      ringAmplitude = 0;
+      prevRawImpact = 0;
+      sloshX = 0;
+      sloshY = 0;
+      sloshZ = 0;
+      sloshVx = 0;
+      sloshVy = 0;
+      sloshVz = 0;
+      prevVelX = vx;
+      prevVelY = vy;
+      prevVelZ = vz;
+      hasPrevVel = false;
+      uBeadImpact.value = 0;
+      uBeadSloshLocal.value.set(0, 0, 0);
+      uSolveProgress.value = Math.max(0, Math.min(1, solveProgress01));
     } else {
-      ringAmplitude = Math.max(ringAmplitude * Math.exp(-dt * 5.2), clampedImpact);
-    }
-    if (ringAmplitude < 1e-4) ringAmplitude = 0;
-    prevRawImpact = clampedImpact;
+      const dt = Math.max(0.0005, Math.min(0.05, dtSec));
 
-    uBeadImpact.value = ringAmplitude;
-    uSolveProgress.value = Math.max(0, Math.min(1, solveProgress01));
+      const dvx = vx - prevVelX;
+      const dvy = vy - prevVelY;
+      const dvz = vz - prevVelZ;
+      const dvMag = Math.hypot(dvx, dvy, dvz);
+
+      let axTan = 0;
+      let ayTan = 0;
+      let azTan = 0;
+      if (!hasPrevVel || dvMag > 3.5) {
+        hasPrevVel = true;
+      } else {
+        const ax = -dvx / dt;
+        const ay = -dvy / dt;
+        const az = -dvz / dt;
+        const aDotN = ax * nx + ay * ny + az * nz;
+        axTan = ax - aDotN * nx;
+        ayTan = ay - aDotN * ny;
+        azTan = az - aDotN * nz;
+        const aTanMag = Math.hypot(axTan, ayTan, azTan);
+        if (aTanMag > 28.0) {
+          const s = 28.0 / aTanMag;
+          axTan *= s;
+          ayTan *= s;
+          azTan *= s;
+        }
+      }
+      prevVelX = vx;
+      prevVelY = vy;
+      prevVelZ = vz;
+
+      // 2nd-order underdamped capillary-gravity slosh (omega0 = 26 rad/s, 2*zeta*omega0 = 14.5 / s)
+      const sloshSteps = Math.max(1, Math.ceil(dt / (1 / 120)));
+      const subDt = dt / sloshSteps;
+      const omega0Sq = 676.0;
+      const damping = 14.5;
+      const driveGain = 5.5;
+      for (let s = 0; s < sloshSteps; s++) {
+        sloshVx += (driveGain * axTan - omega0Sq * sloshX - damping * sloshVx) * subDt;
+        sloshVy += (driveGain * ayTan - omega0Sq * sloshY - damping * sloshVy) * subDt;
+        sloshVz += (driveGain * azTan - omega0Sq * sloshZ - damping * sloshVz) * subDt;
+        sloshX += sloshVx * subDt;
+        sloshY += sloshVy * subDt;
+        sloshZ += sloshVz * subDt;
+      }
+
+      const sDotN = sloshX * nx + sloshY * ny + sloshZ * nz;
+      sloshX -= sDotN * nx;
+      sloshY -= sDotN * ny;
+      sloshZ -= sDotN * nz;
+      const svDotN = sloshVx * nx + sloshVy * ny + sloshVz * nz;
+      sloshVx -= svDotN * nx;
+      sloshVy -= svDotN * ny;
+      sloshVz -= svDotN * nz;
+
+      const sloshMag = Math.hypot(sloshX, sloshY, sloshZ);
+      if (sloshMag > 0.22) {
+        const s = 0.22 / sloshMag;
+        sloshX *= s;
+        sloshY *= s;
+        sloshZ *= s;
+      }
+      const sloshVMag = Math.hypot(sloshVx, sloshVy, sloshVz);
+      const vMag = Math.hypot(vx, vy, vz);
+      if (sloshMag < 1e-4 && sloshVMag < 1e-3 && vMag < 1e-3) {
+        sloshX = 0;
+        sloshY = 0;
+        sloshZ = 0;
+        sloshVx = 0;
+        sloshVy = 0;
+        sloshVz = 0;
+      }
+      uBeadSloshLocal.value.set(sloshX, sloshY, sloshZ);
+
+      const clampedImpact = Math.max(0, Math.min(1.5, impactImpulse));
+      if (clampedImpact > prevRawImpact + 0.02) {
+        ringAmplitude = Math.max(ringAmplitude, clampedImpact);
+      } else {
+        ringAmplitude = Math.max(ringAmplitude * Math.exp(-dt * 5.2), clampedImpact);
+      }
+      if (ringAmplitude < 1e-4) ringAmplitude = 0;
+      prevRawImpact = clampedImpact;
+
+      uBeadImpact.value = ringAmplitude;
+      uSolveProgress.value = Math.max(0, Math.min(1, solveProgress01));
+    }
+
     if (rollQuat !== undefined) {
       if (Array.isArray(rollQuat)) {
         uBeadRollQuat.value.set(rollQuat[0], rollQuat[1], rollQuat[2], rollQuat[3]);
@@ -1030,6 +1159,13 @@ export function createLabyrinthOptics(
     } else {
       uBeadRollQuat.value.set(0, 0, 0, 1);
     }
+  };
+
+  const getBeadSloshLocal: LabyrinthOpticsBundle['getBeadSloshLocal'] = (out) => {
+    out[0] = uBeadSloshLocal.value.x;
+    out[1] = uBeadSloshLocal.value.y;
+    out[2] = uBeadSloshLocal.value.z;
+    return out;
   };
 
   const setProgressUniforms: LabyrinthOpticsBundle['setProgressUniforms'] = (
@@ -1058,6 +1194,7 @@ export function createLabyrinthOptics(
     beadMaterial,
     wetTrailTexture,
     updateBeadUniforms,
+    getBeadSloshLocal,
     setProgressUniforms,
     setVictoryUniforms,
     dispose: () => {
