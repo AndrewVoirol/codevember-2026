@@ -40,6 +40,9 @@ const _localGravityVec = new THREE.Vector3();
 const _localGravityArr: [number, number, number] = [0, -9.81, 0];
 const _stepGravArr: [number, number, number] = [0, -9.81, 0];
 const _beadVelScratch: [number, number, number] = [0, 0, 0];
+const _clickRaycaster = new THREE.Raycaster();
+const _clickNdc = new THREE.Vector2();
+const _sanctumHits: THREE.Intersection[] = [];
 
 export interface LabyrinthTelemetryState {
   edgeId: number;
@@ -172,9 +175,13 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
   const baseQuat = defaultIsoQuat.clone();
   let isDragging = false;
   let activePointerId: number | null = null;
+  let pointerDownX = 0;
+  let pointerDownY = 0;
   let lastMoveMs = 0;
   let hoverYaw = 0;
   let hoverPitch = 0;
+
+  const sanctumClickTargets: THREE.Object3D[] = [sanctumMesh, beadMesh];
 
   monolithGroup.quaternion.copy(baseQuat);
 
@@ -211,13 +218,42 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
     stage.camera.lookAt(0, 0, 0);
     stage.camera.updateMatrixWorld();
     monolithGroup.quaternion.copy(baseQuat);
+    if (stage.shell.canvas.style.cursor !== '') {
+      stage.shell.canvas.style.cursor = '';
+    }
     syncVisualFromSimulator(1 / 60);
   };
 
   syncVisualFromSimulator(1 / 60);
 
-  // Pointer NDC helper for trackball drag
+  // Pointer NDC & raycast helpers for trackball drag and solved sanctum click-to-reset
   const canvas = stage.shell.canvas;
+  const setCanvasCursor = (cursor: string): void => {
+    if (canvas.style.cursor !== cursor) {
+      canvas.style.cursor = cursor;
+    }
+  };
+  const isPointerOverSanctumOrBead = (clientX: number, clientY: number): boolean => {
+    const rect = canvas.getBoundingClientRect();
+    if (
+      rect.width <= 0 ||
+      rect.height <= 0 ||
+      clientX < rect.left ||
+      clientX > rect.right ||
+      clientY < rect.top ||
+      clientY > rect.bottom
+    ) {
+      return false;
+    }
+    _clickNdc.set(
+      ((clientX - rect.left) / rect.width) * 2 - 1,
+      -((clientY - rect.top) / rect.height) * 2 + 1
+    );
+    _clickRaycaster.setFromCamera(_clickNdc, stage.camera);
+    _sanctumHits.length = 0;
+    _clickRaycaster.intersectObjects(sanctumClickTargets, false, _sanctumHits);
+    return _sanctumHits.length > 0;
+  };
   const clientToNdc = (clientX: number, clientY: number, out: [number, number]): void => {
     const rect = canvas.getBoundingClientRect();
     const w = Math.max(1, rect.width);
@@ -233,6 +269,9 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
     if (ev.button !== 0) return;
     isDragging = true;
     activePointerId = ev.pointerId;
+    pointerDownX = ev.clientX;
+    pointerDownY = ev.clientY;
+    setCanvasCursor('');
     _angVelWorld.set(0, 0, 0);
     lastMoveMs = performance.now();
     clientToNdc(ev.clientX, ev.clientY, _ndcPair);
@@ -245,7 +284,14 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
   };
 
   const onPointerMove = (ev: PointerEvent) => {
-    if (!isDragging) return;
+    if (!isDragging) {
+      if (simulator.state.solved && isPointerOverSanctumOrBead(ev.clientX, ev.clientY)) {
+        setCanvasCursor('pointer');
+      } else {
+        setCanvasCursor('');
+      }
+      return;
+    }
     if (activePointerId !== null && ev.pointerId !== activePointerId) return;
 
     clientToNdc(ev.clientX, ev.clientY, _ndcPair);
@@ -284,6 +330,17 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
     }
     isDragging = false;
     activePointerId = null;
+
+    if (
+      ev.type === 'pointerup' &&
+      ev.button === 0 &&
+      simulator.state.solved &&
+      Math.hypot(ev.clientX - pointerDownX, ev.clientY - pointerDownY) < 6 &&
+      isPointerOverSanctumOrBead(ev.clientX, ev.clientY)
+    ) {
+      resetAll();
+      setCanvasCursor('');
+    }
   };
 
   const onWheel = (ev: WheelEvent) => {
@@ -304,6 +361,8 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
   canvas.addEventListener('dblclick', onDoubleClick);
 
   stage.shell.registerDispose(() => {
+    setCanvasCursor('');
+    _sanctumHits.length = 0;
     canvas.removeEventListener('pointerdown', onPointerDown);
     window.removeEventListener('pointermove', onPointerMove);
     window.removeEventListener('pointerup', endDrag);

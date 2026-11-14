@@ -1,0 +1,46 @@
+{
+  "day": 13,
+  "slug": "13-labyrinth",
+  "expectedHeader": "Day 13 - Labyrinth",
+  "domAudit": {
+    "headerText": "Day 13 - Labyrinth",
+    "bodyBg": "rgb(33, 37, 41)",
+    "drawerCount": 30
+  },
+  "telemetry": {
+    "frameCount": 392,
+    "avgFrameMs": 8.35,
+    "p95FrameMs": 10,
+    "sceneState": {
+      "day": 13,
+      "slug": "13-labyrinth",
+      "headerLabel": "Day 13 - Labyrinth",
+      "frameCount": 392,
+      "cameraPos": [
+        0,
+        0.11999999999999979,
+        4.349999999999996
+      ],
+      "pointerWorld": [
+        0.31597817121087035,
+        -0.24936158706472022,
+        0.006878940332819994
+      ],
+      "pointerSpeed": 0,
+      "pointerDwellSec": 1.9537,
+      "pointerImpulse": 0.0007
+    }
+  },
+  "metrics": {
+    "specimenCoverageRatio": 0.4365,
+    "interactionMad": 17.011
+  },
+  "gpuErrors": [],
+  "gateFailures": [],
+  "artifacts": {
+    "contactSheet": "screenshots/day-13-labyrinth-contact-sheet.png",
+    "initial": "screenshots/day-13-labyrinth-initial.png",
+    "drawer": "screenshots/day-13-labyrinth-drawer.png"
+  },
+  "passed": true
+}

@@ -190,7 +190,7 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
   createDay(
     13,
     'Labyrinth',
-    'in-progress',
+    'complete',
     'tsl',
     'rawUmber',
     'yellowOchre',
