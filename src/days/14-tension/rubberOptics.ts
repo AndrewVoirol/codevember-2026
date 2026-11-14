@@ -4,7 +4,6 @@ import {
   attribute,
   clamp,
   float,
-  max,
   mix,
   positionLocal,
   select,
