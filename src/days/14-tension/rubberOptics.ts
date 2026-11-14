@@ -6,6 +6,7 @@ import {
   exp,
   float,
   length,
+  max,
   mix,
   positionLocal,
   select,
@@ -32,10 +33,10 @@ import {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type TslNode = any;
 
-const VERTS_PER_RING = 4;
+const VERTS_PER_RING = 8;
 const MAX_RINGS = SEGMENTS_PER_BAND + 1;
 const MAX_VERTS_PER_BAND = MAX_RINGS * VERTS_PER_RING;
-const MAX_INDICES_PER_BAND = SEGMENTS_PER_BAND * 4 * 6;
+const MAX_INDICES_PER_BAND = SEGMENTS_PER_BAND * VERTS_PER_RING * 6;
 const MAX_DUST_PUFFS = 384;
 
 // Pre-allocated scratch buffers for zero-GC syncFromSim
@@ -46,13 +47,13 @@ const _dummyPos = new THREE.Vector3();
 const _dummyQuat = new THREE.Quaternion();
 const _dummyScale = new THREE.Vector3();
 
-// Corner offsets around the 4-vertex beveled strap ring:
-// 0: top-left (+R, -B), 1: top-right (+R, +B), 2: bot-right (-R, +B), 3: bot-left (-R, -B)
-const CORNER_R = [1, 1, -1, -1] as const;
-const CORNER_B = [-1, 1, 1, -1] as const;
-// Beveled outward normal weights so the 4-vert strap catches rounded edge highlights
-const NORM_R = [0.86, 0.86, -0.86, -0.86] as const;
-const NORM_B = [-0.51, 0.51, 0.51, -0.51] as const;
+// 8-vertex chamfered strap cross-section in (radial R, binormal B):
+// Wide flat outer/inner faces with crisp beveled side shoulders for specular edge separation
+const CORNER_R = [1.0, 1.0, 0.52, -0.52, -1.0, -1.0, -0.52, 0.52] as const;
+const CORNER_B = [-0.78, 0.78, 1.0, 1.0, 0.78, -0.78, -1.0, -1.0] as const;
+// Smooth outward normals around the chamfered profile
+const NORM_R = [0.96, 0.96, 0.48, -0.48, -0.96, -0.96, -0.48, 0.48] as const;
+const NORM_B = [-0.28, 0.28, 0.88, 0.88, 0.28, -0.28, -0.88, -0.88] as const;
 
 export interface RubberBallSimReader {
   sampleBandCenterline: (idx: number, pos: Float32Array, strain: Float32Array) => number;
@@ -75,8 +76,9 @@ export interface RubberBallVisuals {
 /**
  * Builds the mineral-dyed natural rubber TSL material for a given pigment.
  * Includes Kubelka-Munk pigment depth, crepe rubber micro-grain,
- * strain-induced stress-whitening, talcum/sulfur bloom in crevices/edges,
- * dithered fade for tumbling scraps, and subtle hover highlight.
+ * contact/underside ambient occlusion for strand separation,
+ * strain-induced stress-whitening & crazing, snap-tip flash,
+ * talcum/sulfur bloom in crevices/edges, and subtle hover highlight.
  */
 function createRubberBandMaterial(
   pigmentKey: PigmentKey,
@@ -84,7 +86,7 @@ function createRubberBandMaterial(
   uTime: TslNode
 ): THREE.MeshStandardNodeMaterial {
   const mat = new THREE.MeshStandardNodeMaterial({
-    roughness: 0.68,
+    roughness: 0.72,
     metalness: 0.02,
     side: THREE.DoubleSide,
     alphaTest: 0.5,
@@ -96,18 +98,25 @@ function createRubberBandMaterial(
 
   const pos0 = positionLocal;
   const aStrain = attribute('aStrain', 'float');
-  const aCrossUv = attribute('aCrossUv', 'vec2'); // x: across [-1..1], y: along [0..1]
-  const aBandMeta = attribute('aBandMeta', 'vec3'); // x: bandId, y: opacity, z: batchSeed
+  // x: across [-1..1], y: along [0..1], z: radialFace [-1..1] (+1 outer, -1 inner)
+  const aCrossUv = attribute('aCrossUv', 'vec3');
+  // x: bandId, y: opacity, z: batchSeed, w: snapTipFlash
+  const aBandMeta = attribute('aBandMeta', 'vec4');
 
   const bandId = aBandMeta.x;
   const opacity = aBandMeta.y;
   const batchSeed = aBandMeta.z;
+  const snapTipFlash = aBandMeta.w;
 
   // Evaluate all procedural 3D noise in uniform control flow
-  const crepeGrain = mineralToothFbm(pos0.add(vec3(batchSeed.mul(13.7))), float(56.0));
-  const talcumNoise = mineralToothFbm(pos0.add(vec3(batchSeed.mul(5.3))), float(14.5));
+  const crepeGrain = mineralToothFbm(pos0.add(vec3(batchSeed.mul(13.7))), float(62.0));
+  const talcumNoise = mineralToothFbm(pos0.add(vec3(batchSeed.mul(5.3))), float(15.5));
   const stretchFiber = mineralToothFbm(
-    vec3(aCrossUv.y.mul(44.0), aCrossUv.x.mul(7.0), bandId.mul(3.17)),
+    vec3(aCrossUv.y.mul(48.0), aCrossUv.x.mul(7.5), bandId.mul(3.17)),
+    float(1.0)
+  );
+  const crazingNoise = mineralToothFbm(
+    vec3(aCrossUv.y.mul(115.0), aCrossUv.x.mul(18.0), bandId.mul(5.41)),
     float(1.0)
   );
   const ditherVal = hash31Tsl(pos0.mul(92.0).add(vec3(uTime.mul(0.01))));
@@ -118,44 +127,66 @@ function createRubberBandMaterial(
     CHALKY_SLATE_LINEAR[1],
     CHALKY_SLATE_LINEAR[2]
   );
-  const batchThickness = float(0.72)
-    .add(batchSeed.sub(0.5).mul(0.18))
-    .add(crepeGrain.sub(0.5).mul(0.14));
+  const batchThickness = float(0.74)
+    .add(batchSeed.sub(0.5).mul(0.24))
+    .add(crepeGrain.sub(0.5).mul(0.16));
   const baseBody = kubelkaMunkGlaze(pigment.K, pigment.S, batchThickness, chalkBacking);
 
-  // Subtle ambient occlusion / darkening toward inner edge of strap
+  // Per-band subtle value variation + crepe micro-tooth for strand separation
+  const batchTone = float(0.92).add(batchSeed.mul(0.16));
   const edgeProximity = smoothstep(0.55, 1.0, abs(aCrossUv.x));
-  const grainedBody = baseBody.mul(float(0.92).add(crepeGrain.mul(0.16)));
 
-  // Natural latex stress-whitening: paler & warmer with longitudinal stretch streaks
+  // Contact / crevice ambient occlusion: inner underside (-1) is deeply shaded,
+  // side bevels (~0.52) get crisp edge-shadow separation, outer face (+1) stays clean
+  const radialAo = mix(float(0.54), float(1.0), smoothstep(-0.85, 0.75, aCrossUv.z));
+  const bevelShadow = mix(float(1.0), float(0.84), edgeProximity);
+  const grainedBody = baseBody
+    .mul(batchTone)
+    .mul(float(0.91).add(crepeGrain.mul(0.18)))
+    .mul(radialAo)
+    .mul(bevelShadow);
+
+  // Natural latex stress-whitening & high-strain micro-crazing
   const strainFactor = smoothstep(0.12, 0.88, aStrain);
-  const stretchStreak = smoothstep(0.28, 0.74, stretchFiber);
+  const highStrain = smoothstep(0.52, 0.96, aStrain);
+  const stretchStreak = smoothstep(0.26, 0.74, stretchFiber);
+  const crazingFissure = smoothstep(0.54, 0.82, crazingNoise).mul(highStrain);
+
   const whitenMix = clamp(
-    strainFactor.mul(0.58).add(strainFactor.mul(stretchStreak).mul(0.28)),
+    strainFactor
+      .mul(0.54)
+      .add(strainFactor.mul(stretchStreak).mul(0.28))
+      .add(crazingFissure.mul(0.36)),
     0.0,
-    0.84
+    0.88
   );
-  const strainColor = mix(grainedBody, kaolin.rInf.mul(0.94), whitenMix);
+  const crazedColor = mix(grainedBody, kaolin.rInf.mul(0.95), whitenMix);
+
+  // Snap-tip break-point crazing flash (brief bright kaolin/calcite highlight at severed tips)
+  const tipFlashColor = mix(crazedColor, calcite.rInf, clamp(snapTipFlash.mul(0.85), 0.0, 0.85));
 
   // Talcum / sulfur bloom settling along beveled strap edges and micro-pockets
   const bloomMask = clamp(
-    edgeProximity.mul(0.22).add(smoothstep(0.58, 0.86, talcumNoise).mul(0.18)),
+    edgeProximity.mul(0.24).add(smoothstep(0.58, 0.86, talcumNoise).mul(0.18)),
     0.0,
-    0.34
+    0.36
   );
-  const finalColor = mix(strainColor, calcite.rInf.mul(0.88), bloomMask);
+  const finalColor = mix(tipFlashColor, calcite.rInf.mul(0.9), bloomMask);
 
   // Hover affordance: gentle warm mineral lift on hovered band
   const isHovered = smoothstep(0.5, 0.0, abs(bandId.sub(uHoveredBandId)));
-  const hoverLift = calcite.rInf.mul(0.14).mul(isHovered);
+  const hoverLift = calcite.rInf.mul(0.14).mul(isHovered).add(calcite.rInf.mul(0.18).mul(snapTipFlash));
 
   mat.colorNode = finalColor;
   mat.emissiveNode = hoverLift;
 
-  // Roughness: matte crepe at rest (0.72), tighter taut sheen under strain (0.42), chalky at talcum bloom
-  const tautRoughness = mix(float(0.72), float(0.42), strainFactor);
-  const grainRough = tautRoughness.add(crepeGrain.sub(0.5).mul(0.14));
-  mat.roughnessNode = clamp(mix(grainRough, float(0.92), bloomMask), 0.32, 0.96);
+  // Roughness: matte vulcanized crepe at rest (0.76), taut rubber sheen under strain (0.38),
+  // chalky rough in crazed micro-fissures & talcum bloom
+  const tautRoughness = mix(float(0.76), float(0.38), strainFactor);
+  const grainRough = tautRoughness
+    .add(crepeGrain.sub(0.5).mul(0.14))
+    .add(crazingFissure.mul(0.22));
+  mat.roughnessNode = clamp(mix(grainRough, float(0.93), bloomMask), 0.3, 0.96);
 
   // Crisp opaque depth-buffered rendering for active bands; dithered dissolve only when fading
   mat.opacityNode = select(
@@ -211,7 +242,11 @@ function createStarterCore(): {
     float(0.85),
     vec3(CHALKY_SLATE_LINEAR[0], CHALKY_SLATE_LINEAR[1], CHALKY_SLATE_LINEAR[2])
   );
-  nubMat.colorNode = mix(nubBase.mul(float(0.88).add(nubTooth.mul(0.24))), boneCalcite.rInf.mul(0.82), nubTalc.mul(0.35));
+  nubMat.colorNode = mix(
+    nubBase.mul(float(0.88).add(nubTooth.mul(0.24))),
+    boneCalcite.rInf.mul(0.82),
+    nubTalc.mul(0.35)
+  );
   nubMat.roughnessNode = clamp(float(0.74).add(nubTooth.mul(0.16)).add(nubTalc.mul(0.15)), 0.5, 0.96);
 
   const nubMesh = new THREE.Mesh(nubGeom, nubMat);
@@ -261,7 +296,7 @@ function createStarterCore(): {
 }
 
 /**
- * Builds the shared index buffer for a 4-vertex-per-ring ribbon up to SEGMENTS_PER_BAND.
+ * Builds the shared index buffer for an 8-vertex-per-ring ribbon up to SEGMENTS_PER_BAND.
  */
 function createSharedRibbonIndices(): THREE.BufferAttribute {
   const indices = new Uint16Array(MAX_INDICES_PER_BAND);
@@ -337,22 +372,24 @@ export function createRubberBallVisuals(specs: readonly BandSpec[]): RubberBallV
     const posArr = new Float32Array(MAX_VERTS_PER_BAND * 3);
     const normArr = new Float32Array(MAX_VERTS_PER_BAND * 3);
     const strainArr = new Float32Array(MAX_VERTS_PER_BAND);
-    const crossUvArr = new Float32Array(MAX_VERTS_PER_BAND * 2);
-    const metaArr = new Float32Array(MAX_VERTS_PER_BAND * 3);
+    const crossUvArr = new Float32Array(MAX_VERTS_PER_BAND * 3);
+    const metaArr = new Float32Array(MAX_VERTS_PER_BAND * 4);
 
     // Deterministic batch seed in [0, 1]
-    const batchSeed = ((Math.sin(spec.id * 12.9898 + spec.layer * 78.233) * 43758.5453) % 1 + 1) % 1;
+    const batchSeed = (((Math.sin(spec.id * 12.9898 + spec.layer * 78.233) * 43758.5453) % 1) + 1) % 1;
 
     for (let r = 0; r < MAX_RINGS; r++) {
       const uAlong = r / SEGMENTS_PER_BAND;
       for (let k = 0; k < VERTS_PER_RING; k++) {
         const vIdx = r * VERTS_PER_RING + k;
-        crossUvArr[vIdx * 2] = CORNER_B[k];
-        crossUvArr[vIdx * 2 + 1] = uAlong;
+        crossUvArr[vIdx * 3] = CORNER_B[k];
+        crossUvArr[vIdx * 3 + 1] = uAlong;
+        crossUvArr[vIdx * 3 + 2] = CORNER_R[k];
 
-        metaArr[vIdx * 3] = spec.id;
-        metaArr[vIdx * 3 + 1] = 1.0;
-        metaArr[vIdx * 3 + 2] = batchSeed;
+        metaArr[vIdx * 4] = spec.id;
+        metaArr[vIdx * 4 + 1] = 1.0;
+        metaArr[vIdx * 4 + 2] = batchSeed;
+        metaArr[vIdx * 4 + 3] = 0.0;
       }
     }
 
@@ -365,8 +402,8 @@ export function createRubberBallVisuals(specs: readonly BandSpec[]): RubberBallV
     normAttr.setUsage(THREE.DynamicDrawUsage);
     const strainAttr = new THREE.BufferAttribute(strainArr, 1);
     strainAttr.setUsage(THREE.DynamicDrawUsage);
-    const crossUvAttr = new THREE.BufferAttribute(crossUvArr, 2);
-    const metaAttr = new THREE.BufferAttribute(metaArr, 3);
+    const crossUvAttr = new THREE.BufferAttribute(crossUvArr, 3);
+    const metaAttr = new THREE.BufferAttribute(metaArr, 4);
     metaAttr.setUsage(THREE.DynamicDrawUsage);
 
     geom.setAttribute('position', posAttr);
@@ -401,12 +438,13 @@ export function createRubberBallVisuals(specs: readonly BandSpec[]): RubberBallV
     });
   }
 
-  // 3. Instanced billboarded talcum dust puffs (soft Gaussian + FBM wispy erosion)
+  // 3. Instanced billboarded talcum dust puffs (crisp mineral specks + wispy billowing clouds)
   const puffGeom = new THREE.PlaneGeometry(2.0, 2.0);
-  const puffLifeArr = new Float32Array(MAX_DUST_PUFFS);
-  const puffLifeAttr = new THREE.InstancedBufferAttribute(puffLifeArr, 1);
-  puffLifeAttr.setUsage(THREE.DynamicDrawUsage);
-  puffGeom.setAttribute('aPuffLife', puffLifeAttr);
+  // x: life [0..1], y: isSpeck [0|1], z: per-instance seed [0..1]
+  const puffMetaArr = new Float32Array(MAX_DUST_PUFFS * 3);
+  const puffMetaAttr = new THREE.InstancedBufferAttribute(puffMetaArr, 3);
+  puffMetaAttr.setUsage(THREE.DynamicDrawUsage);
+  puffGeom.setAttribute('aPuffMeta', puffMetaAttr);
 
   const puffMat = new THREE.MeshBasicNodeMaterial({
     transparent: true,
@@ -415,15 +453,33 @@ export function createRubberBallVisuals(specs: readonly BandSpec[]): RubberBallV
   });
   const calcite = createPigmentUniforms('boneCalcite');
   const kaolin = createPigmentUniforms('warmKaolin');
-  const aPuffLife = attribute('aPuffLife', 'float');
+  const aPuffMeta = attribute('aPuffMeta', 'vec3');
+  const puffLife = aPuffMeta.x;
+  const isSpeck = aPuffMeta.y;
+  const puffSeed = aPuffMeta.z;
+
   const uvCentered = uv().sub(0.5).mul(2.0);
   const radialDist = length(uvCentered);
-  const puffWisp = mineralToothFbm(vec3(uvCentered, float(0.35)), float(3.8));
-  const softDisk = exp(radialDist.mul(radialDist).mul(-3.8)).mul(
-    smoothstep(1.0, 0.25, radialDist.add(puffWisp.sub(0.5).mul(0.45)))
+  const puffWisp = mineralToothFbm(
+    vec3(uvCentered, puffSeed.mul(17.3).add(0.35)),
+    float(3.8)
   );
-  puffMat.colorNode = mix(kaolin.rInf, calcite.rInf, puffWisp);
-  puffMat.opacityNode = softDisk.mul(aPuffLife).mul(aPuffLife).mul(0.42);
+
+  // Billowing plume vs crisp talc granule/flake
+  const plumeAlpha = exp(radialDist.mul(radialDist).mul(-2.7))
+    .mul(smoothstep(1.0, 0.16, radialDist.add(puffWisp.sub(0.5).mul(0.58))))
+    .mul(puffLife.mul(puffLife).mul(0.54));
+
+  const speckAlpha = smoothstep(0.68, 0.2, radialDist.add(puffWisp.sub(0.5).mul(0.52)))
+    .mul(puffLife)
+    .mul(0.84);
+
+  puffMat.colorNode = mix(
+    mix(kaolin.rInf, calcite.rInf, puffWisp),
+    calcite.rInf.mul(1.08),
+    isSpeck
+  );
+  puffMat.opacityNode = max(float(0.0), mix(plumeAlpha, speckAlpha, isSpeck));
 
   const puffMesh = new THREE.InstancedMesh(puffGeom, puffMat, MAX_DUST_PUFFS);
   puffMesh.count = 0;
@@ -467,9 +523,11 @@ export function createRubberBallVisuals(specs: readonly BandSpec[]): RubberBallV
 
       const clampedSegs = activeSegments > SEGMENTS_PER_BAND ? SEGMENTS_PER_BAND : activeSegments;
       const ringCount = clampedSegs + 1;
+      const isSnapping = rt.status === 'snapping';
+      const isClosedLoop = !isSnapping && clampedSegs === SEGMENTS_PER_BAND;
 
       rec.mesh.visible = true;
-      rec.geom.setDrawRange(0, clampedSegs * 4 * 6);
+      rec.geom.setDrawRange(0, clampedSegs * VERTS_PER_RING * 6);
 
       const fallX = rt.fallOffset[0];
       const fallY = rt.fallOffset[1];
@@ -477,6 +535,7 @@ export function createRubberBallVisuals(specs: readonly BandSpec[]): RubberBallV
       const halfWBase = spec.width * 0.5;
       const halfTBase = spec.thickness * 0.5;
       const op = rt.opacity;
+      const snapFlash = isSnapping && rt.curlAmount < 0.28 ? 1.0 - rt.curlAmount / 0.28 : 0.0;
 
       const posArr = rec.posArr;
       const normArr = rec.normArr;
@@ -484,14 +543,40 @@ export function createRubberBallVisuals(specs: readonly BandSpec[]): RubberBallV
       const metaArr = rec.metaArr;
 
       for (let r = 0; r < ringCount; r++) {
+        // For closed loops, copy ring 0 verbatim to final ring so the seam is bit-identical
+        if (isClosedLoop && r === ringCount - 1) {
+          const dstStart = r * VERTS_PER_RING;
+          for (let k = 0; k < VERTS_PER_RING; k++) {
+            const dstIdx = dstStart + k;
+            const dst3 = dstIdx * 3;
+            const src3 = k * 3;
+            posArr[dst3] = posArr[src3];
+            posArr[dst3 + 1] = posArr[src3 + 1];
+            posArr[dst3 + 2] = posArr[src3 + 2];
+            normArr[dst3] = normArr[src3];
+            normArr[dst3 + 1] = normArr[src3 + 1];
+            normArr[dst3 + 2] = normArr[src3 + 2];
+            strainArr[dstIdx] = strainArr[k];
+            const dst4 = dstIdx * 4;
+            metaArr[dst4 + 1] = op;
+            metaArr[dst4 + 3] = 0.0;
+          }
+          continue;
+        }
+
         const pIdx = r * 3;
         const px = _posScratch[pIdx];
         const py = _posScratch[pIdx + 1];
         const pz = _posScratch[pIdx + 2];
 
-        // Central-difference tangent T
-        const prevIdx = (r > 0 ? r - 1 : 0) * 3;
-        const nextIdx = (r < ringCount - 1 ? r + 1 : ringCount - 1) * 3;
+        // Central-difference tangent T (wrapped for closed loops to avoid u=0 normal kink)
+        const prevIdx = isClosedLoop
+          ? (r > 0 ? r - 1 : ringCount - 2) * 3
+          : (r > 0 ? r - 1 : 0) * 3;
+        const nextIdx = isClosedLoop
+          ? (r < ringCount - 1 ? r + 1 : 1) * 3
+          : (r < ringCount - 1 ? r + 1 : ringCount - 1) * 3;
+
         let tx = _posScratch[nextIdx] - _posScratch[prevIdx];
         let ty = _posScratch[nextIdx + 1] - _posScratch[prevIdx + 1];
         let tz = _posScratch[nextIdx + 2] - _posScratch[prevIdx + 2];
@@ -550,8 +635,22 @@ export function createRubberBallVisuals(specs: readonly BandSpec[]): RubberBallV
         const extraStrain = strain > spec.restStrain ? strain - spec.restStrain : 0.0;
         const widthScale = Math.max(0.32, 1.0 / Math.sqrt(1.0 + extraStrain * 2.1));
         const thickScale = Math.max(0.45, 1.0 / Math.sqrt(1.0 + extraStrain * 1.2));
-        const hw = halfWBase * widthScale;
-        const ht = halfTBase * thickScale;
+        let hw = halfWBase * widthScale;
+        let ht = halfTBase * thickScale;
+
+        let tipFlash = 0.0;
+        if (isSnapping) {
+          const frac = clampedSegs > 0 ? r / clampedSegs : 0.5;
+          const endDist = Math.abs(frac - 0.5) * 2.0;
+          if (endDist > 0.65) {
+            tipFlash = snapFlash * ((endDist - 0.65) / 0.35);
+          }
+          // Pinch cut ends cleanly so snapping tips look like solid severed rubber
+          if (r === 0 || r === ringCount - 1) {
+            ht *= 0.22;
+            hw *= 0.78;
+          }
+        }
 
         for (let k = 0; k < VERTS_PER_RING; k++) {
           const vIdx = r * VERTS_PER_RING + k;
@@ -570,7 +669,9 @@ export function createRubberBallVisuals(specs: readonly BandSpec[]): RubberBallV
           normArr[v3 + 2] = rz * nr + bz * nb;
 
           strainArr[vIdx] = strain;
-          metaArr[v3 + 1] = op;
+          const v4 = vIdx * 4;
+          metaArr[v4 + 1] = op;
+          metaArr[v4 + 3] = tipFlash;
         }
       }
 
@@ -589,7 +690,10 @@ export function createRubberBallVisuals(specs: readonly BandSpec[]): RubberBallV
       const life = 1.0 - p.ageSec / p.maxAgeSec;
       if (life <= 0.005) continue;
 
-      const s = p.size * (0.75 + (1.0 - life) * 2.1);
+      const isSpeck = p.size < 0.012 ? 1.0 : 0.0;
+      const expand = isSpeck > 0.5 ? 0.9 + (1.0 - life) * 0.6 : 0.8 + (1.0 - life) * 2.5;
+      const s = p.size * expand;
+
       _dummyPos.set(p.pos[0], p.pos[1], p.pos[2]);
       if (cameraQuat) {
         _dummyQuat.copy(cameraQuat);
@@ -599,14 +703,18 @@ export function createRubberBallVisuals(specs: readonly BandSpec[]): RubberBallV
       _dummyScale.set(s, s, s);
       _dummyMat.compose(_dummyPos, _dummyQuat, _dummyScale);
       puffMesh.setMatrixAt(activePuffs, _dummyMat);
-      puffLifeArr[activePuffs] = life;
+
+      const m3 = activePuffs * 3;
+      puffMetaArr[m3] = life;
+      puffMetaArr[m3 + 1] = isSpeck;
+      puffMetaArr[m3 + 2] = ((i * 0.61803398875) % 1 + 1) % 1;
       activePuffs++;
     }
 
     puffMesh.count = activePuffs;
     if (activePuffs > 0) {
       puffMesh.instanceMatrix.needsUpdate = true;
-      puffLifeAttr.needsUpdate = true;
+      puffMetaAttr.needsUpdate = true;
     }
   }
 
