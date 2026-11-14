@@ -17,9 +17,11 @@ import {
 } from '../labyrinthTopology';
 import {
   DEAD_END_RESTITUTION,
+  GROOVE_MAX_LAT_OFFSET,
   LabyrinthBeadSimulator,
   ROLLING_GRAVITY_FACTOR,
 } from '../labyrinthPhysics';
+import { createLabyrinthGeometries } from '../labyrinthGeometry';
 
 describe('Day 13 — Labyrinth: Multi-Face Topology & Geodesic Invariants', () => {
   const topology = createLabyrinthTopology();
@@ -219,8 +221,11 @@ describe('Day 13 — Labyrinth: Physics, Spline Integration & Automated Solve', 
     // Now drive hard in +X into dead end (4,6) and observe speed peaks across bounces
     let maxApproachSpeed = 0;
     let firstBouncePeak = 0;
+    let firstBounceImpact = 0;
     let sawReversal = false;
     let prevEdge = sim.state.edgeId;
+    const bouncePeaks: number[] = [];
+    let wasHeadingToDeadEnd = false;
 
     for (let i = 0; i < 180; i++) {
       sim.step(1 / 60, [9.81, 0.2, 0]);
@@ -241,7 +246,14 @@ describe('Day 13 — Labyrinth: Physics, Spline Integration & Automated Solve', 
       ) {
         sawReversal = true;
         firstBouncePeak = sim.state.speed;
+        firstBounceImpact = sim.state.impactImpulse;
       }
+      const headingIn = curNodeTo.face === 'pz' && curNodeTo.u === 4 && curNodeTo.v === 6;
+      const bouncingOut = curNodeFrom.face === 'pz' && curNodeFrom.u === 4 && curNodeFrom.v === 6;
+      if (wasHeadingToDeadEnd && bouncingOut) {
+        bouncePeaks.push(sim.state.speed);
+      }
+      wasHeadingToDeadEnd = headingIn;
       prevEdge = sim.state.edgeId;
     }
 
@@ -250,27 +262,14 @@ describe('Day 13 — Labyrinth: Physics, Spline Integration & Automated Solve', 
     expect(firstBouncePeak).toBeGreaterThan(0);
     // Immediately after dead-end bounce, rebound speed <= ~e * approachSpeed (with slight drag/accel over 1/60s)
     expect(firstBouncePeak).toBeLessThanOrEqual(maxApproachSpeed * (DEAD_END_RESTITUTION + 0.08));
-    expect(sim.state.impactImpulse).toBeGreaterThan(0);
-
-    // Hold constant gravity into dead-end and verify bounce kinetic peaks decay monotonically
-    const bouncePeaks: number[] = [];
-    let wasHeadingToDeadEnd = false;
-    for (let i = 0; i < 240; i++) {
-      sim.step(1 / 60, [9.81, 0, 0]);
-      const e = topology.edges[sim.state.edgeId];
-      const nFrom = topology.nodes[e.from];
-      const nTo = topology.nodes[e.to];
-      const headingIn = nTo.face === 'pz' && nTo.u === 4 && nTo.v === 6;
-      const bouncingOut = nFrom.face === 'pz' && nFrom.u === 4 && nFrom.v === 6;
-      if (wasHeadingToDeadEnd && bouncingOut) {
-        bouncePeaks.push(sim.state.speed);
-      }
-      wasHeadingToDeadEnd = headingIn;
-    }
-
+    expect(firstBounceImpact).toBeGreaterThan(0);
+    expect(bouncePeaks.length).toBeGreaterThanOrEqual(2);
     for (let k = 1; k < bouncePeaks.length; k++) {
       expect(bouncePeaks[k]).toBeLessThanOrEqual(bouncePeaks[k - 1] + 1e-4);
     }
+    // After bouncing finishes, dead-end settles cleanly with zero chatter or residual impact
+    expect(sim.state.speed).toBe(0);
+    expect(sim.state.impactImpulse).toBe(0);
   });
 
   it('completes an automated end-to-end geodesic solve from startNodeId to goalNodeId', () => {
@@ -693,16 +692,23 @@ describe('Day 13 — Labyrinth: Physics, Spline Integration & Automated Solve', 
     const gMag = 9.81 * Math.sin(tiltRad);
     const gZ = -9.81 * Math.cos(tiltRad);
 
-    // 1. Shallow 18° forward-down tilt from Start rolls straight past pz[3,5] to pz[4,5]
+    // 1. Shallow 18° forward-down tilt from Start rolls straight past pz[3,5] into pz[4,5] -> pz[4,4] decoy
     const simShallow = new LabyrinthBeadSimulator(topology);
     const r18 = (18 * Math.PI) / 180;
+    let shallowEnteredCenter = false;
+    let shallowPassedToPz45 = false;
     for (let i = 0; i < 180; i++) {
       simShallow.step(1 / 60, [gMag * Math.cos(r18), -gMag * Math.sin(r18), gZ]);
+      const nTo = topology.nodes[topology.edges[simShallow.state.edgeId].to];
+      if (nTo.face === 'pz' && nTo.u === 4 && nTo.v === 5) shallowPassedToPz45 = true;
+      if (nTo.face === 'pz' && nTo.u === 3 && nTo.v <= 4) shallowEnteredCenter = true;
     }
     const shallowTo = topology.nodes[topology.edges[simShallow.state.edgeId].to];
+    expect(shallowEnteredCenter).toBe(false);
+    expect(shallowPassedToPz45).toBe(true);
     expect(shallowTo.face).toBe('pz');
     expect(shallowTo.u).toBe(4);
-    expect(shallowTo.v).toBe(5);
+    expect(shallowTo.v).toBe(4);
 
     // 2. Intentional 32° and 40° diagonal tilts from Start enter the pz[3,5]->pz[3,4]->pz[3,3] pass-through underpass
     for (const angDeg of [32, 40]) {
@@ -719,7 +725,23 @@ describe('Day 13 — Labyrinth: Physics, Spline Integration & Automated Solve', 
       expect(enteredPassThrough).toBe(true);
     }
 
-    // 3. Backing out from pz[4,5] at 36° down-left enters the center pass-through channel instead of stalling or jumping past
+    // 3. Steep 55° careless sprint at 30° diagonal vaults past pz[3,5] rim onto pz[4,5] instead of magnetic snap
+    const tilt55 = (55 * Math.PI) / 180;
+    const g55 = 9.81 * Math.sin(tilt55);
+    const gz55 = -9.81 * Math.cos(tilt55);
+    const d30 = (30 * Math.PI) / 180;
+    const simSprint = new LabyrinthBeadSimulator(topology);
+    let skippedToPz45 = false;
+    for (let i = 0; i < 90; i++) {
+      simSprint.step(1 / 60, [g55 * Math.cos(d30), -g55 * Math.sin(d30), gz55]);
+      const nTo = topology.nodes[topology.edges[simSprint.state.edgeId].to];
+      if (nTo.face === 'pz' && nTo.u >= 4 && nTo.v === 5) {
+        skippedToPz45 = true;
+      }
+    }
+    expect(skippedToPz45).toBe(true);
+
+    // 4. Backing out from pz[4,5] at 36° down-left enters pz[3,5]->pz[3,4], then steering down enters pz[3,3] underpass
     const simBack = new LabyrinthBeadSimulator(topology);
     const n28 = topology.nodes.find((n) => n.face === 'pz' && n.u === 4 && n.v === 5 && n.tier === 0)!;
     const n22 = topology.nodes.find((n) => n.face === 'pz' && n.u === 3 && n.v === 5 && n.tier === 0)!;
@@ -729,14 +751,398 @@ describe('Day 13 — Labyrinth: Physics, Spline Integration & Automated Solve', 
     simBack.state.speed = 0;
 
     const r36 = (36 * Math.PI) / 180;
+    let enteredCenterChannel = false;
     let enteredFromBack = false;
     for (let i = 0; i < 180; i++) {
-      simBack.step(1 / 60, [-gMag * Math.cos(r36), -gMag * Math.sin(r36), gZ]);
+      const eCur = topology.edges[simBack.state.edgeId];
+      const nFrom = topology.nodes[eCur.from];
+      const curTo = topology.nodes[eCur.to];
+      if (nFrom.face === 'pz' && nFrom.u === 3 && nFrom.v === 5 && curTo.u === 3 && curTo.v === 4) {
+        enteredCenterChannel = true;
+      }
+      if (enteredCenterChannel) {
+        simBack.step(1 / 60, [0, -gMag, gZ]);
+      } else {
+        simBack.step(1 / 60, [-gMag * Math.cos(r36), -gMag * Math.sin(r36), gZ]);
+      }
       const nTo = topology.nodes[topology.edges[simBack.state.edgeId].to];
       if (nTo.face === 'pz' && nTo.u === 3 && nTo.v <= 3 && nTo.tier === 1) {
         enteredFromBack = true;
       }
     }
+    expect(enteredCenterChannel).toBe(true);
     expect(enteredFromBack).toBe(true);
+  });
+
+  it('preserves corridor floorMask across antipodal bridge projections (px[3,3], ny[2,3], nz[3,2])', () => {
+    const geo = createLabyrinthGeometries(topology).monolithGeometry;
+    const pos = geo.getAttribute('position');
+    const norm = geo.getAttribute('normal');
+    const detail = geo.getAttribute('aStoneDetail');
+
+    const measureFloorRatio = (n: (typeof topology.nodes)[number]) => {
+      let total = 0;
+      let painted = 0;
+      for (let i = 0; i < pos.count; i++) {
+        const dx = pos.getX(i) - n.localPos[0];
+        const dy = pos.getY(i) - n.localPos[1];
+        const dz = pos.getZ(i) - n.localPos[2];
+        if (dx * dx + dy * dy + dz * dz < 0.08 * 0.08) {
+          const dot =
+            norm.getX(i) * n.localNormal[0] +
+            norm.getY(i) * n.localNormal[1] +
+            norm.getZ(i) * n.localNormal[2];
+          if (dot > 0.75) {
+            total++;
+            if (detail.getX(i) >= 0.75) painted++;
+          }
+        }
+      }
+      return { total, ratio: total > 0 ? painted / total : 0 };
+    };
+
+    let zeroedNodes = 0;
+    for (const n of topology.nodes) {
+      const m = measureFloorRatio(n);
+      if (m.total === 0 || m.ratio < 0.8) zeroedNodes++;
+    }
+    expect(zeroedNodes).toBe(0);
+
+    for (const [f, u, v, minRatio] of [
+      ['px', 3, 3, 0.9],
+      ['ny', 2, 3, 0.8],
+      ['nz', 3, 2, 0.95],
+    ] as const) {
+      const node = topology.nodes.find((x) => x.face === f && x.u === u && x.v === v && x.tier === 0)!;
+      const m = measureFloorRatio(node);
+      expect(m.total).toBeGreaterThan(100);
+      expect(m.ratio).toBeGreaterThanOrEqual(minRatio);
+    }
+  });
+
+  it('isolates tier-0 overpass bridge decks (row 0) from tier-1 underpass floors (row 1) in 1536x512 atlas', () => {
+    expect(WET_ATLAS_HEIGHT).toBe(WET_ATLAS_FACE_SIZE * 2);
+    const sim = new LabyrinthBeadSimulator(topology);
+    sim.igniteSolutionPathWave(1.0);
+
+    for (const br of topology.bridges) {
+      const n0 = topology.nodes.find(
+        (n) => n.face === br.face && n.u === br.u && n.v === br.v && n.tier === 0
+      )!;
+      const proj = localPointToFaceUv(n0.localPos, topology.cubeHalfExtent);
+      const dx = Math.round(proj.u01 * (WET_ATLAS_FACE_SIZE - 1));
+      const dy = Math.round(proj.v01 * (WET_ATLAS_FACE_SIZE - 1));
+      const idxRow0 = (dy * WET_ATLAS_WIDTH + proj.faceIndex * WET_ATLAS_FACE_SIZE + dx) * 4;
+      const idxRow1 =
+        ((WET_ATLAS_FACE_SIZE + dy) * WET_ATLAS_WIDTH + proj.faceIndex * WET_ATLAS_FACE_SIZE + dx) * 4;
+
+      expect(sim.wetAtlasData[idxRow0 + 0]).toBe(0);
+      expect(sim.wetAtlasData[idxRow0 + 3]).toBe(0);
+      expect(sim.wetAtlasData[idxRow1 + 0]).toBeGreaterThanOrEqual(220);
+      expect(sim.wetAtlasData[idxRow1 + 3]).toBeGreaterThanOrEqual(220);
+    }
+  });
+
+  it('simulates 2-DOF wall hugging, no-slip rollQuat spin, and 90-degree L-corner jamb deflection', () => {
+    const simLat = new LabyrinthBeadSimulator(topology);
+    let maxAbsLat = 0;
+    for (let i = 0; i < 30; i++) {
+      simLat.step(1 / 60, [4.5, -4.0, -7.5]);
+      if (Math.abs(simLat.state.latOffset) > maxAbsLat) {
+        maxAbsLat = Math.abs(simLat.state.latOffset);
+      }
+    }
+    expect(maxAbsLat).toBeGreaterThan(0.014);
+    expect(maxAbsLat).toBeLessThanOrEqual(GROOVE_MAX_LAT_OFFSET + 1e-6);
+
+    const rq = simLat.state.rollQuat;
+    expect(Math.hypot(rq[0], rq[1], rq[2], rq[3])).toBeCloseTo(1, 5);
+    expect(Math.abs(rq[3])).toBeLessThan(0.999);
+
+    const simL = new LabyrinthBeadSimulator(topology);
+    let preCornerSpeed = 0;
+    let postCornerSpeed = 0;
+    let turnedCorner = false;
+    let prevEdge = simL.state.edgeId;
+
+    for (let i = 0; i < 60; i++) {
+      const before = simL.state.speed;
+      simL.step(1 / 60, [3.2, 9.2, 0]);
+      if (simL.state.edgeId !== prevEdge) {
+        const e = topology.edges[simL.state.edgeId];
+        const fn = topology.nodes[e.from];
+        const tn = topology.nodes[e.to];
+        if (fn.u === 1 && fn.v === 6 && tn.u === 2 && tn.v === 6) {
+          turnedCorner = true;
+          preCornerSpeed = before;
+          postCornerSpeed = simL.state.speed;
+          break;
+        }
+        prevEdge = simL.state.edgeId;
+      }
+    }
+    expect(turnedCorner).toBe(true);
+    expect(preCornerSpeed).toBeGreaterThan(0.8);
+    expect(postCornerSpeed).toBeLessThan(preCornerSpeed * 0.55);
+    expect(simL.state.impactImpulse).toBeGreaterThan(0);
+  });
+
+  it('settles with zero position or spin stutter in degree-2 L-corner and T-junction V-pockets (live-traced nx[2,3] regression)', () => {
+    const dt = 1 / 60;
+    const cornerNode = topology.nodes.find(
+      (n) => n.face === 'nx' && n.u === 2 && n.v === 3 && n.tier === 0
+    )!;
+    const outFromCorner = topology.adjacency[cornerNode.id];
+    expect(outFromCorner.length).toBe(2);
+
+    // Pick incoming edge from nx[2,4] -> nx[2,3] so gravity localG pulls downhill into the corner V-pocket
+    const incomingEdge = topology.edges.find(
+      (e) =>
+        e.to === cornerNode.id &&
+        topology.nodes[e.from].face === 'nx' &&
+        topology.nodes[e.from].u === 2 &&
+        topology.nodes[e.from].v === 4
+    )!;
+    const exitEdge = topology.edges.find(
+      (e) =>
+        e.from === cornerNode.id &&
+        topology.nodes[e.to].face === 'nx' &&
+        topology.nodes[e.to].u === 3 &&
+        topology.nodes[e.to].v === 3
+    )!;
+
+    const sim = new LabyrinthBeadSimulator(topology);
+    (sim.state as { edgeId: number; t: number; speed: number }).edgeId = incomingEdge.id;
+    (sim.state as { t: number }).t = 0.4;
+    (sim.state as { speed: number }).speed = 0;
+
+    // Exact stationary live-traced cube gravity pointing into the nx[2,3] 90-degree V-pocket
+    const pocketGrav: [number, number, number] = [2.19805, -6.14270, -7.32611];
+    for (let i = 0; i < 90; i++) {
+      sim.step(dt, pocketGrav);
+    }
+
+    // Over 120 subsequent frames at rest, zero edge flips, zero position jitter, zero spin jitter
+    let maxPosDelta = 0;
+    let maxQuatDelta = 0;
+    let edgeFlips = 0;
+    let lastEdgeId = sim.state.edgeId;
+    let lastPos = [...sim.state.localPos];
+    let lastQuat = [...sim.state.rollQuat];
+
+    for (let i = 0; i < 120; i++) {
+      sim.step(dt, pocketGrav);
+      if (sim.state.edgeId !== lastEdgeId) edgeFlips++;
+      const dp = Math.hypot(
+        sim.state.localPos[0] - lastPos[0],
+        sim.state.localPos[1] - lastPos[1],
+        sim.state.localPos[2] - lastPos[2]
+      );
+      const dq = Math.hypot(
+        sim.state.rollQuat[0] - lastQuat[0],
+        sim.state.rollQuat[1] - lastQuat[1],
+        sim.state.rollQuat[2] - lastQuat[2],
+        sim.state.rollQuat[3] - lastQuat[3]
+      );
+      if (dp > maxPosDelta) maxPosDelta = dp;
+      if (dq > maxQuatDelta) maxQuatDelta = dq;
+      lastEdgeId = sim.state.edgeId;
+      lastPos = [...sim.state.localPos];
+      lastQuat = [...sim.state.rollQuat];
+    }
+
+    expect(edgeFlips).toBe(0);
+    expect(sim.state.speed).toBe(0);
+    expect(sim.state.latSpeed).toBe(0);
+    expect(maxPosDelta).toBeLessThan(1e-7);
+    expect(maxQuatDelta).toBeLessThan(1e-7);
+
+    // Tilting downhill along the +Z arm launches without any 23mm orthogonal binormal snap
+    const posBeforeLaunch = [...sim.state.localPos];
+    const launchGrav: [number, number, number] = [2.2, -2.0, 7.5];
+    sim.step(dt, launchGrav);
+    const firstFrameJump = Math.hypot(
+      sim.state.localPos[0] - posBeforeLaunch[0],
+      sim.state.localPos[1] - posBeforeLaunch[1],
+      sim.state.localPos[2] - posBeforeLaunch[2]
+    );
+    expect(firstFrameJump).toBeLessThan(0.005);
+
+    for (let i = 1; i < 30; i++) {
+      sim.step(dt, launchGrav);
+    }
+    expect(sim.state.edgeId === exitEdge.id || sim.state.speed > 0.2).toBe(true);
+    expect(sim.state.speed).toBeGreaterThan(0.2);
+
+    // Stem-into-bar degree-3 T-junction held head-on against the crossbar settles with zero jitter
+    const tNode = topology.nodes.find((n) => {
+      if (n.tier !== 0 || n.id === topology.goalNodeId) return false;
+      const out = topology.adjacency[n.id];
+      if (out.length !== 3) return false;
+      return out.some((aid, idxA) =>
+        out.some((bid, idxB) => {
+          if (idxA === idxB) return false;
+          const pa = topology.edges[aid].samplesPos;
+          const pb = topology.edges[bid].samplesPos;
+          const dA = Math.hypot(pa[3] - pa[0], pa[4] - pa[1], pa[5] - pa[2]) || 1;
+          const dB = Math.hypot(pb[3] - pb[0], pb[4] - pb[1], pb[5] - pb[2]) || 1;
+          const dot =
+            ((pa[3] - pa[0]) * (pb[3] - pb[0]) +
+              (pa[4] - pa[1]) * (pb[4] - pb[1]) +
+              (pa[5] - pa[2]) * (pb[5] - pb[2])) /
+            (dA * dB);
+          return dot < -0.95;
+        })
+      );
+    })!;
+    expect(tNode).toBeDefined();
+
+    // Find the orthogonal stem outgoing edge and its incoming twin
+    const tOut = topology.adjacency[tNode.id];
+    const stemOutId = tOut.find((candId) => {
+      let oppDots = 0;
+      const pc = topology.edges[candId].samplesPos;
+      const dc = Math.hypot(pc[3] - pc[0], pc[4] - pc[1], pc[5] - pc[2]) || 1;
+      for (const otherId of tOut) {
+        if (otherId === candId) continue;
+        const po = topology.edges[otherId].samplesPos;
+        const doLen = Math.hypot(po[3] - po[0], po[4] - po[1], po[5] - po[2]) || 1;
+        const dot =
+          ((pc[3] - pc[0]) * (po[3] - po[0]) +
+            (pc[4] - pc[1]) * (po[4] - po[1]) +
+            (pc[5] - pc[2]) * (po[5] - po[2])) /
+          (dc * doLen);
+        if (Math.abs(dot) < 0.2) oppDots++;
+      }
+      return oppDots === 2;
+    })!;
+    const stemOutEdge = topology.edges[stemOutId];
+    const stemInEdge = topology.edges.find(
+      (e) => e.from === stemOutEdge.to && e.to === tNode.id
+    )!;
+    const pS = stemOutEdge.samplesPos;
+    const dS = Math.hypot(pS[3] - pS[0], pS[4] - pS[1], pS[5] - pS[2]) || 1;
+    const stemInDir: [number, number, number] = [
+      -(pS[3] - pS[0]) / dS,
+      -(pS[4] - pS[1]) / dS,
+      -(pS[5] - pS[2]) / dS,
+    ];
+    const tWallGrav: [number, number, number] = [
+      stemInDir[0] * 8.5 - tNode.localNormal[0] * 4.8,
+      stemInDir[1] * 8.5 - tNode.localNormal[1] * 4.8,
+      stemInDir[2] * 8.5 - tNode.localNormal[2] * 4.8,
+    ];
+
+    const simT = new LabyrinthBeadSimulator(topology);
+    (simT.state as { edgeId: number; t: number; speed: number }).edgeId = stemInEdge.id;
+    (simT.state as { t: number }).t = 0.998;
+    (simT.state as { speed: number }).speed = 0.02;
+    for (let i = 0; i < 60; i++) {
+      simT.step(dt, tWallGrav);
+    }
+    let maxTPosDelta = 0;
+    let tEdgeFlips = 0;
+    let tLastEdge = simT.state.edgeId;
+    let tLastPos = [...simT.state.localPos];
+    for (let i = 0; i < 60; i++) {
+      simT.step(dt, tWallGrav);
+      if (simT.state.edgeId !== tLastEdge) tEdgeFlips++;
+      const dp = Math.hypot(
+        simT.state.localPos[0] - tLastPos[0],
+        simT.state.localPos[1] - tLastPos[1],
+        simT.state.localPos[2] - tLastPos[2]
+      );
+      if (dp > maxTPosDelta) maxTPosDelta = dp;
+      tLastEdge = simT.state.edgeId;
+      tLastPos = [...simT.state.localPos];
+    }
+    expect(tEdgeFlips).toBe(0);
+    expect(simT.state.speed).toBe(0);
+    expect(maxTPosDelta).toBeLessThan(1e-7);
+
+    // Locked one-way checkpoint catch-basin held under reverse gravity rests cleanly with zero chatter
+    const simCp = new LabyrinthBeadSimulator(topology);
+    const cpNodeId = simCp.checkpointNodeIds[0];
+    const cpNode = topology.nodes[cpNodeId];
+    const cpSolIdx = CHECKPOINT_SOL_INDICES[0];
+    const nextSolNodeId = topology.solutionNodePath[cpSolIdx + 1];
+    const prevSolNodeId = topology.solutionNodePath[cpSolIdx - 1];
+    const cpFwdEdge = topology.edges.find((e) => e.from === cpNodeId && e.to === nextSolNodeId)!;
+    const pCp = cpFwdEdge.samplesPos;
+    const dCp = Math.hypot(pCp[3] - pCp[0], pCp[4] - pCp[1], pCp[5] - pCp[2]) || 1;
+    const cpFwdDir: [number, number, number] = [
+      (pCp[3] - pCp[0]) / dCp,
+      (pCp[4] - pCp[1]) / dCp,
+      (pCp[5] - pCp[2]) / dCp,
+    ];
+    // Push directly backward against the locked checkpoint while forcing any unblocked side arm neutral/uphill
+    const cpRevGrav: [number, number, number] = [
+      -cpFwdDir[0] * 8.0 - cpNode.localNormal[0] * 4.8,
+      -cpFwdDir[1] * 8.0 - cpNode.localNormal[1] * 4.8,
+      -cpFwdDir[2] * 8.0 - cpNode.localNormal[2] * 4.8,
+    ];
+    expect(topology.adjacency[cpNodeId].filter((eid) => topology.edges[eid].to !== prevSolNodeId).length).toBeGreaterThanOrEqual(1);
+    simCp.state.checkpointsUnlocked = 1;
+    (simCp.state as { edgeId: number; t: number; speed: number }).edgeId = cpFwdEdge.id;
+    (simCp.state as { t: number }).t = 0.25;
+    (simCp.state as { speed: number }).speed = 0;
+    for (let i = 0; i < 90; i++) {
+      simCp.step(dt, cpRevGrav);
+    }
+    let cpEdgeFlips = 0;
+    let maxCpPosDelta = 0;
+    let cpLastEdge = simCp.state.edgeId;
+    let cpLastPos = [...simCp.state.localPos];
+    for (let i = 0; i < 60; i++) {
+      simCp.step(dt, cpRevGrav);
+      if (simCp.state.edgeId !== cpLastEdge) cpEdgeFlips++;
+      const dp = Math.hypot(
+        simCp.state.localPos[0] - cpLastPos[0],
+        simCp.state.localPos[1] - cpLastPos[1],
+        simCp.state.localPos[2] - cpLastPos[2]
+      );
+      if (dp > maxCpPosDelta) maxCpPosDelta = dp;
+      cpLastEdge = simCp.state.edgeId;
+      cpLastPos = [...simCp.state.localPos];
+    }
+    expect(cpEdgeFlips).toBe(0);
+    expect(maxCpPosDelta).toBeLessThan(1e-7);
+  });
+
+  it('preserves C0 3D position continuity across every 90-degree corner and mouth turn during full solve', () => {
+    const sim = new LabyrinthBeadSimulator(topology);
+    const gOut: [number, number, number] = [0, 0, 0];
+    const dt = 1 / 60;
+
+    let maxExcessJump = 0;
+    let steps = 0;
+    while (!sim.state.solved && steps < 2400) {
+      const prevEdge = sim.state.edgeId;
+      const prevPos = [...sim.state.localPos];
+      const prevTotalVel = Math.hypot(sim.state.speed, sim.state.latSpeed);
+      sim.computeDownhillGravityForNextStep(gOut);
+      sim.step(dt, gOut);
+      if (sim.state.solved) break;
+      const curTotalVel = Math.hypot(sim.state.speed, sim.state.latSpeed);
+      const posDelta = Math.hypot(
+        sim.state.localPos[0] - prevPos[0],
+        sim.state.localPos[1] - prevPos[1],
+        sim.state.localPos[2] - prevPos[2]
+      );
+      const isRamp =
+        topology.edges[prevEdge].kind === 'ramp' ||
+        topology.edges[sim.state.edgeId].kind === 'ramp';
+      const isBevel =
+        topology.edges[prevEdge].kind === 'bevel-wrap' ||
+        topology.edges[sim.state.edgeId].kind === 'bevel-wrap';
+      const velScale = isRamp ? 2.2 : isBevel ? 1.48 : 1.12;
+      const allowed = Math.max(prevTotalVel, curTotalVel) * dt * velScale + 0.006;
+      const excess = posDelta - allowed;
+      if (excess > maxExcessJump) maxExcessJump = excess;
+      expect(posDelta).toBeLessThanOrEqual(allowed);
+      steps++;
+    }
+    expect(sim.state.solved).toBe(true);
+    expect(maxExcessJump).toBeLessThanOrEqual(0);
   });
 });

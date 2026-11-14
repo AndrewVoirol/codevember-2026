@@ -708,7 +708,17 @@ function evalCarveEdgeAirAndCoords(
     const fny = edge.norm[1];
     const fnz = edge.norm[2];
     const zRel = dx * fnx + dy * fny + dz * fnz;
-    const cosSlope = Math.max(0.65, nx * fnx + ny * fny + nz * fnz);
+    const j0 = bestSeg * 3;
+    const j1 = (bestSeg + 1) * 3;
+    const seg3DLen = Math.max(
+      1e-6,
+      Math.hypot(
+        edge.pos[j1] - edge.pos[j0],
+        edge.pos[j1 + 1] - edge.pos[j0 + 1],
+        edge.pos[j1 + 2] - edge.pos[j0 + 2]
+      )
+    );
+    const cosSlope = clamp(edge.segLen[bestSeg] / seg3DLen, 0.52, 1.0);
     h = zRel * cosSlope;
     hWall = Math.max(0, zRel);
   } else {
@@ -1981,6 +1991,14 @@ function computeCellAoAndZones(
       let isUnderpassSoffit = false;
       for (let bi = 0; bi < bridgeCount; bi++) {
         const br = bridges[bi];
+        if (
+          br.face.index !== domBasis.index ||
+          px < br.minX || px > br.maxX ||
+          py < br.minY || py > br.maxY ||
+          pz < br.minZ || pz > br.maxZ
+        ) {
+          continue;
+        }
         const rx = px - br.cx;
         const ry = py - br.cy;
         const rz = pz - br.cz;
@@ -2108,6 +2126,7 @@ function writeVertexToBuffers(
   ti: number,
   halfSlot: number,
   faceIdx: number,
+  tierRow: number,
   bux: number,
   buy: number,
   buz: number,
@@ -2173,7 +2192,7 @@ function writeVertexToBuffers(
   const u01 = clamp(0.5 + (px * bux + py * buy + pz * buz) * inv2H, uvPadLo, uvPadHi);
   const v01 = clamp(0.5 + (px * bvx + py * bvy + pz * bvz) * inv2H, uvPadLo, uvPadHi);
   uvs[vIdx * 2] = (faceIdx + u01) / 6;
-  uvs[vIdx * 2 + 1] = v01;
+  uvs[vIdx * 2 + 1] = (tierRow + v01) * 0.5;
 
   const bWeight = sCellBasalt[aid];
   materialZone[vIdx * 4] = 1 - bWeight;
@@ -2212,7 +2231,8 @@ function finalizeGeometryBounds(geom: THREE.BufferGeometry, positions: Float32Ar
 
 function emitFinalMonolithBuffers(
   triCount: number,
-  H: number
+  H: number,
+  surfaceDepth: number
 ): THREE.BufferGeometry {
   const cellVertPos = sCellVertPos;
   const triCellIndices = sTriCellIndices;
@@ -2227,6 +2247,7 @@ function emitFinalMonolithBuffers(
   const uvPadLo = 0.5 / WET_ATLAS_FACE_SIZE;
   const uvPadHi = (WET_ATLAS_FACE_SIZE - 0.5) / WET_ATLAS_FACE_SIZE;
   const inv2H = 0.5 / H;
+  const tierSplitDepth = surfaceDepth + 0.075;
 
   for (let ti = 0; ti < triCount; ti++) {
     const t3 = ti * 3;
@@ -2242,6 +2263,8 @@ function emitFinalMonolithBuffers(
     const cy = (cellVertPos[cA * 3 + 1] + cellVertPos[cB * 3 + 1] + cellVertPos[cC * 3 + 1]) * (1 / 3);
     const cz = (cellVertPos[cA * 3 + 2] + cellVertPos[cB * 3 + 2] + cellVertPos[cC * 3 + 2]) * (1 / 3);
     const basis = dominantFaceBasis(cx, cy, cz);
+    const centroidDepthIn = H - Math.max(Math.abs(cx), Math.abs(cy), Math.abs(cz));
+    const tierRow = centroidDepthIn > tierSplitDepth ? 1 : 0;
 
     for (let k = 0; k < 3; k++) {
       const aid = k === 0 ? cA : k === 1 ? cB : cC;
@@ -2254,6 +2277,7 @@ function emitFinalMonolithBuffers(
         ti,
         0,
         basis.index,
+        tierRow,
         basis.ux,
         basis.uy,
         basis.uz,
@@ -2284,6 +2308,7 @@ function emitFinalMonolithBuffers(
 function emitOctantMonolithRawBuffers(
   triCount: number,
   H: number,
+  surfaceDepth: number,
   halfSlot: number
 ): RawStoneMeshBuffers[] {
   const cellVertPos = sCellVertPos;
@@ -2323,6 +2348,7 @@ function emitOctantMonolithRawBuffers(
   const uvPadLo = 0.5 / WET_ATLAS_FACE_SIZE;
   const uvPadHi = (WET_ATLAS_FACE_SIZE - 0.5) / WET_ATLAS_FACE_SIZE;
   const inv2H = 0.5 / H;
+  const tierSplitDepth = surfaceDepth + 0.075;
 
   for (let ti = 0; ti < triCount; ti++) {
     const oi = sTriOctantId[ti];
@@ -2341,6 +2367,8 @@ function emitOctantMonolithRawBuffers(
     const qyC = gyC >= 0 ? gyC - halfSlot : gyC + halfSlot;
     const qzC = gzC >= 0 ? gzC - halfSlot : gzC + halfSlot;
     const basis = dominantFaceBasis(qxC, qyC, qzC);
+    const centroidDepthIn = H - Math.max(Math.abs(qxC), Math.abs(qyC), Math.abs(qzC));
+    const tierRow = centroidDepthIn > tierSplitDepth ? 1 : 0;
 
     const outTri = sOctantCursors[oi]++;
     const outBase = outTri * 3;
@@ -2355,6 +2383,7 @@ function emitOctantMonolithRawBuffers(
         ti,
         halfSlot,
         basis.index,
+        tierRow,
         basis.ux,
         basis.uy,
         basis.uz,
@@ -2509,7 +2538,7 @@ function runDualContouringPipeline(
 
 function buildMonolithGeometry(topology: LabyrinthTopology): THREE.BufferGeometry {
   const { triCount, H } = runDualContouringPipeline(topology, DC_BOUND, 0);
-  return emitFinalMonolithBuffers(triCount, H);
+  return emitFinalMonolithBuffers(triCount, H, topology.surfaceDepth);
 }
 
 function buildNodeTangentFrame(
@@ -3227,7 +3256,7 @@ function clipSanctumHalfByZRaw(
 
 export function buildVaultOctantRawBuffers(topology: LabyrinthTopology): VaultOctantsRawPayload {
   const { triCount, H } = runDualContouringPipeline(topology, DC_OCTANT_BOUND, OCTANT_HALF_SLOT);
-  const octants = emitOctantMonolithRawBuffers(triCount, H, OCTANT_HALF_SLOT);
+  const octants = emitOctantMonolithRawBuffers(triCount, H, topology.surfaceDepth, OCTANT_HALF_SLOT);
   const fullSanctum = buildSanctumInlayGeometry(topology);
   const sanctumPosZ = clipSanctumHalfByZRaw(fullSanctum, topology, 1);
   const sanctumNegZ = clipSanctumHalfByZRaw(fullSanctum, topology, -1);

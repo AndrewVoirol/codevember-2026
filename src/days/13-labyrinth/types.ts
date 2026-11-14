@@ -4,7 +4,7 @@ export const CUBE_FACES: readonly CubeFaceId[] = ['px', 'nx', 'py', 'ny', 'pz', 
 
 export const WET_ATLAS_FACE_SIZE = 256;
 export const WET_ATLAS_WIDTH = WET_ATLAS_FACE_SIZE * CUBE_FACES.length; // 1536
-export const WET_ATLAS_HEIGHT = WET_ATLAS_FACE_SIZE; // 256
+export const WET_ATLAS_HEIGHT = WET_ATLAS_FACE_SIZE * 2; // 512 (row 0 = tier 0 surface, row 1 = tier 1 underpass)
 export const EDGE_SAMPLE_COUNT = 9;
 export const GRID_PITCH = 0.215;
 export const CHECKPOINT_SOL_INDICES = [15, 31, 45] as const;
@@ -59,9 +59,13 @@ export interface BeadState {
   edgeId: number;
   t: number;
   speed: number;
+  latOffset: number;
+  latSpeed: number;
   localPos: [number, number, number];
   localNormal: [number, number, number];
   localTangent: [number, number, number];
+  localBinormal: [number, number, number];
+  rollQuat: [number, number, number, number];
   impactImpulse: number;
   solved: boolean;
   solveProgress01: number;

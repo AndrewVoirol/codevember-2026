@@ -18,17 +18,19 @@ export const ROLLING_GRAVITY_FACTOR = 5 / 7;
 export const DEAD_END_RESTITUTION = 0.28;
 export const MAX_SUBSTEP_DT = 1 / 180;
 export const SOLVER_GRAVITY_MAGNITUDE = 9.81;
+export const GROOVE_MAX_LAT_OFFSET = 0.0185;
 
-const ROLLING_LINEAR_DRAG = 0.34;
-const ROLLING_QUAD_DRAG = 2.35;
-const WALL_RUB_FRICTION = 0.14;
-const CORNER_RETENTION_BASE = 0.82;
+const ROLLING_LINEAR_DRAG = 0.18;
+const ROLLING_QUAD_DRAG = 1.85;
+const WALL_CONTACT_MU = 0.075;
+const LATERAL_VISCOUS_DRAG = 2.4;
+const WALL_KISS_RESTITUTION = 0.16;
+const L_CORNER_DEFLECT = 0.34;
 const BRUSH_TEXEL_RADIUS = 6.0;
-const RAMP_CLIMB_RESISTANCE_ATTEN = 0.46;
-const JUNCTION_AXIAL_STEER_DT = 0.045;
-const JUNCTION_MOUTH_CAPTURE_NUM = 0.50;
-const JUNCTION_LATERAL_STEER_MIN_DT = 0.30;
-const JUNCTION_LATERAL_STEER_MAX_DT = 1.05;
+const RAMP_CLIMB_RESISTANCE_ATTEN = 0.58;
+const MOUTH_EFF_SPAN = 0.112;
+const MOUTH_BASE_CAPTURE = 0.0218;
+const MOUTH_VAULT_K = 0.0070;
 const IGNITE_SUBSAMPLES_PER_EDGE = 8;
 
 function clamp(v: number, min: number, max: number): number {
@@ -75,10 +77,14 @@ export class LabyrinthBeadSimulator {
   private decayAccumSec = 0;
 
   // Preallocated scratch buffers for strictly zero-allocation step() and solver queries
+  private readonly cornerBlendOffset: [number, number, number] = [0, 0, 0];
+  private readonly scratchSwitchPos: [number, number, number] = [0, 0, 0];
   private readonly scratchUv: [number, number] = [0, 0];
   private readonly scratchPos: [number, number, number] = [0, 0, 0];
   private readonly scratchNorm: [number, number, number] = [0, 0, 0];
   private readonly scratchTan: [number, number, number] = [0, 0, 0];
+  private readonly scratchBin: [number, number, number] = [0, 0, 0];
+  private readonly scratchPrevPos: [number, number, number] = [0, 0, 0];
   private readonly scratchGravityOut: [number, number, number] = [0, 0, 0];
 
   constructor(topology: LabyrinthTopology) {
@@ -105,9 +111,13 @@ export class LabyrinthBeadSimulator {
       edgeId: 0,
       t: 0,
       speed: 0,
+      latOffset: 0,
+      latSpeed: 0,
       localPos: [0, 0, 0],
       localNormal: [0, 0, 1],
       localTangent: [1, 0, 0],
+      localBinormal: [0, 1, 0],
+      rollQuat: [0, 0, 0, 1],
       impactImpulse: 0,
       solved: false,
       solveProgress01: 0,
@@ -296,6 +306,57 @@ export class LabyrinthBeadSimulator {
     outTangent[2] /= tLen;
   }
 
+  private computeRightBinormal(
+    t: readonly [number, number, number],
+    n: readonly [number, number, number],
+    out: [number, number, number]
+  ): void {
+    const bx = t[1] * n[2] - t[2] * n[1];
+    const by = t[2] * n[0] - t[0] * n[2];
+    const bz = t[0] * n[1] - t[1] * n[0];
+    const bLen = Math.hypot(bx, by, bz) || 1;
+    out[0] = bx / bLen;
+    out[1] = by / bLen;
+    out[2] = bz / bLen;
+  }
+
+  private integrateRollQuatFromDisplacement(
+    dx: number,
+    dy: number,
+    dz: number,
+    n: readonly [number, number, number]
+  ): void {
+    const dn = dx * n[0] + dy * n[1] + dz * n[2];
+    const px = dx - dn * n[0];
+    const py = dy - dn * n[1];
+    const pz = dz - dn * n[2];
+    const invR = 1 / Math.max(1e-4, this.topology.beadRadius);
+    const ax = (n[1] * pz - n[2] * py) * invR;
+    const ay = (n[2] * px - n[0] * pz) * invR;
+    const az = (n[0] * py - n[1] * px) * invR;
+    const angle = Math.hypot(ax, ay, az);
+    if (angle <= 1e-7) return;
+
+    const half = 0.5 * angle;
+    const s = Math.sin(half) / angle;
+    const dqx = ax * s;
+    const dqy = ay * s;
+    const dqz = az * s;
+    const dqw = Math.cos(half);
+
+    const rq = this.state.rollQuat;
+    const qx = rq[0], qy = rq[1], qz = rq[2], qw = rq[3];
+    const rx = dqw * qx + dqx * qw + dqy * qz - dqz * qy;
+    const ry = dqw * qy - dqx * qz + dqy * qw + dqz * qx;
+    const rz = dqw * qz + dqx * qy - dqy * qx + dqz * qw;
+    const rw = dqw * qw - dqx * qx - dqy * qy - dqz * qz;
+    const qLen = Math.hypot(rx, ry, rz, rw) || 1;
+    rq[0] = rx / qLen;
+    rq[1] = ry / qLen;
+    rq[2] = rz / qLen;
+    rq[3] = rw / qLen;
+  }
+
   private clearWetAtlas(): void {
     const data = this.wetAtlasData;
     for (let i = 0; i < this.activeTexelCount; i++) {
@@ -324,7 +385,8 @@ export class LabyrinthBeadSimulator {
     wetStrength: number,
     sheenStrength: number,
     thicknessStrength: number,
-    verdigrisStrength = 0
+    verdigrisStrength = 0,
+    tierRow: 0 | 1 = 0
   ): void {
     const faceIndex = getFaceBasis(face).index;
     const faceSize = WET_ATLAS_FACE_SIZE;
@@ -339,11 +401,12 @@ export class LabyrinthBeadSimulator {
     const minY = Math.max(0, Math.floor(cy - rad));
     const maxY = Math.min(faceSize - 1, Math.ceil(cy + rad));
     const faceXOffset = faceIndex * faceSize;
+    const tierYOffset = tierRow * faceSize;
 
     for (let ly = minY; ly <= maxY; ly++) {
       const dy = ly - cy;
       const dy2 = dy * dy;
-      const rowOffset = ly * WET_ATLAS_WIDTH;
+      const rowOffset = (tierYOffset + ly) * WET_ATLAS_WIDTH;
       for (let lx = minX; lx <= maxX; lx++) {
         const dx = lx - cx;
         const d2 = dx * dx + dy2;
@@ -407,6 +470,46 @@ export class LabyrinthBeadSimulator {
   ): void {
     const H = this.topology.cubeHalfExtent;
     const { face, u01, v01 } = localPointToFaceUv(pos, H);
+    const edge = this.topology.edges[edgeId];
+
+    if (edge.kind === 'underpass') {
+      this.stampFaceBrush(
+        face,
+        u01,
+        v01,
+        wetStrength,
+        sheenStrength,
+        thicknessStrength,
+        verdigrisStrength,
+        1
+      );
+      return;
+    }
+
+    if (edge.kind === 'ramp') {
+      this.stampFaceBrush(
+        face,
+        u01,
+        v01,
+        wetStrength,
+        sheenStrength,
+        thicknessStrength,
+        verdigrisStrength,
+        0
+      );
+      this.stampFaceBrush(
+        face,
+        u01,
+        v01,
+        wetStrength,
+        sheenStrength,
+        thicknessStrength,
+        verdigrisStrength,
+        1
+      );
+      return;
+    }
+
     this.stampFaceBrush(
       face,
       u01,
@@ -414,11 +517,11 @@ export class LabyrinthBeadSimulator {
       wetStrength,
       sheenStrength,
       thicknessStrength,
-      verdigrisStrength
+      verdigrisStrength,
+      0
     );
 
     // Dual-stamp adjacent cube faces across bevel-wrap portals and rim transitions for seamless corners
-    const edge = this.topology.edges[edgeId];
     if (edge.kind === 'bevel-wrap') {
       const fromFace = this.topology.nodes[edge.from].face;
       const toFace = this.topology.nodes[edge.to].face;
@@ -431,7 +534,8 @@ export class LabyrinthBeadSimulator {
           wetStrength,
           sheenStrength,
           thicknessStrength,
-          verdigrisStrength
+          verdigrisStrength,
+          0
         );
       }
       if (toFace !== face) {
@@ -443,7 +547,8 @@ export class LabyrinthBeadSimulator {
           wetStrength,
           sheenStrength,
           thicknessStrength,
-          verdigrisStrength
+          verdigrisStrength,
+          0
         );
       }
     }
@@ -608,6 +713,15 @@ export class LabyrinthBeadSimulator {
     this.state.edgeId = startEdgeId;
     this.state.t = 0;
     this.state.speed = 0;
+    this.state.latOffset = 0;
+    this.state.latSpeed = 0;
+    this.cornerBlendOffset[0] = 0;
+    this.cornerBlendOffset[1] = 0;
+    this.cornerBlendOffset[2] = 0;
+    this.state.rollQuat[0] = 0;
+    this.state.rollQuat[1] = 0;
+    this.state.rollQuat[2] = 0;
+    this.state.rollQuat[3] = 1;
     this.state.impactImpulse = 0;
     this.state.solved = false;
     this.state.solveProgress01 = 0;
@@ -621,25 +735,106 @@ export class LabyrinthBeadSimulator {
       this.state.localNormal,
       this.state.localTangent
     );
+    this.computeRightBinormal(
+      this.state.localTangent,
+      this.state.localNormal,
+      this.state.localBinormal
+    );
 
     this.clearWetAtlas();
     this.stampCurrentTrail(0.95, 0.9, 0.9, 0);
   }
 
-  step(dtSec: number, localGravity: readonly [number, number, number]): void {
+  private computeEdgeEffectiveDrive(candId: number, gx: number, gy: number, gz: number): number {
+    const off = candId * 3;
+    const tx = this.edgeStartTan[off + 0];
+    const ty = this.edgeStartTan[off + 1];
+    const tz = this.edgeStartTan[off + 2];
+    let drive = gx * tx + gy * ty + gz * tz;
+    const candEdge = this.topology.edges[candId];
+    if (candEdge.kind === 'ramp') {
+      const faceN = this.topology.nodes[candEdge.from].localNormal;
+      const tDotN = tx * faceN[0] + ty * faceN[1] + tz * faceN[2];
+      const gDotN = gx * faceN[0] + gy * faceN[1] + gz * faceN[2];
+      if (tDotN > 0 && gDotN < 0) {
+        drive -= (1.0 - RAMP_CLIMB_RESISTANCE_ATTEN) * gDotN * tDotN;
+      }
+    }
+    return drive;
+  }
+
+  private captureJunctionBlend(
+    oldEdgeId: number,
+    oldT: number,
+    oldW: number,
+    newEdgeId: number,
+    newT: number,
+    newW: number
+  ): void {
+    this.evalEdgeBeadFrame(oldEdgeId, oldT, this.scratchSwitchPos, this.scratchNorm, this.scratchTan);
+    this.computeRightBinormal(this.scratchTan, this.scratchNorm, this.scratchBin);
+    const oldActualX =
+      this.scratchSwitchPos[0] + oldW * this.scratchBin[0] + this.cornerBlendOffset[0];
+    const oldActualY =
+      this.scratchSwitchPos[1] + oldW * this.scratchBin[1] + this.cornerBlendOffset[1];
+    const oldActualZ =
+      this.scratchSwitchPos[2] + oldW * this.scratchBin[2] + this.cornerBlendOffset[2];
+
+    this.evalEdgeBeadFrame(newEdgeId, newT, this.scratchSwitchPos, this.scratchNorm, this.scratchTan);
+    this.computeRightBinormal(this.scratchTan, this.scratchNorm, this.scratchBin);
+    const newNomX = this.scratchSwitchPos[0] + newW * this.scratchBin[0];
+    const newNomY = this.scratchSwitchPos[1] + newW * this.scratchBin[1];
+    const newNomZ = this.scratchSwitchPos[2] + newW * this.scratchBin[2];
+
+    let rx = oldActualX - newNomX;
+    let ry = oldActualY - newNomY;
+    let rz = oldActualZ - newNomZ;
+    const rDotN = rx * this.scratchNorm[0] + ry * this.scratchNorm[1] + rz * this.scratchNorm[2];
+    rx -= rDotN * this.scratchNorm[0];
+    ry -= rDotN * this.scratchNorm[1];
+    rz -= rDotN * this.scratchNorm[2];
+
+    const rMag = Math.hypot(rx, ry, rz);
+    const maxBlend = GROOVE_MAX_LAT_OFFSET * 1.8;
+    if (rMag > maxBlend && rMag > 1e-9) {
+      const s = maxBlend / rMag;
+      rx *= s;
+      ry *= s;
+      rz *= s;
+    }
+    this.cornerBlendOffset[0] = rx;
+    this.cornerBlendOffset[1] = ry;
+    this.cornerBlendOffset[2] = rz;
+  }
+
+  step(
+    dtSec: number,
+    localGravity: readonly [number, number, number],
+    localAngVel?: readonly [number, number, number],
+    localAngAccel?: readonly [number, number, number]
+  ): void {
     if (!Number.isFinite(dtSec) || dtSec <= 0) return;
-    const gx = Number.isFinite(localGravity[0]) ? localGravity[0] : 0;
-    const gy = Number.isFinite(localGravity[1]) ? localGravity[1] : 0;
-    const gz = Number.isFinite(localGravity[2]) ? localGravity[2] : 0;
+    const baseGx = Number.isFinite(localGravity[0]) ? localGravity[0] : 0;
+    const baseGy = Number.isFinite(localGravity[1]) ? localGravity[1] : 0;
+    const baseGz = Number.isFinite(localGravity[2]) ? localGravity[2] : 0;
+    const hasRotFrame = localAngVel !== undefined && localAngAccel !== undefined;
+    const wx = hasRotFrame && Number.isFinite(localAngVel[0]) ? localAngVel[0] : 0;
+    const wy = hasRotFrame && Number.isFinite(localAngVel[1]) ? localAngVel[1] : 0;
+    const wz = hasRotFrame && Number.isFinite(localAngVel[2]) ? localAngVel[2] : 0;
+    const axRot = hasRotFrame && Number.isFinite(localAngAccel[0]) ? localAngAccel[0] : 0;
+    const ayRot = hasRotFrame && Number.isFinite(localAngAccel[1]) ? localAngAccel[1] : 0;
+    const azRot = hasRotFrame && Number.isFinite(localAngAccel[2]) ? localAngAccel[2] : 0;
 
     const clampedDt = Math.min(dtSec, 0.1);
     const substeps = Math.max(1, Math.ceil(clampedDt / MAX_SUBSTEP_DT));
     const dtSub = clampedDt / substeps;
 
     const { edges, adjacency, goalNodeId } = this.topology;
+    const wMax = GROOVE_MAX_LAT_OFFSET;
 
     if (this.state.solved) {
       this.state.speed *= Math.exp(-14 * clampedDt);
+      this.state.latSpeed *= Math.exp(-14 * clampedDt);
       this.state.impactImpulse *= Math.exp(-9 * clampedDt);
       if (this.state.impactImpulse < 1e-5) this.state.impactImpulse = 0;
       this.state.solveProgress01 = 1.0;
@@ -652,61 +847,138 @@ export class LabyrinthBeadSimulator {
       this.state.impactImpulse *= Math.exp(-9.0 * dtSub);
       if (this.state.impactImpulse < 1e-5) this.state.impactImpulse = 0;
 
+      this.scratchPrevPos[0] = this.state.localPos[0];
+      this.scratchPrevPos[1] = this.state.localPos[1];
+      this.scratchPrevPos[2] = this.state.localPos[2];
+
+      let gx = baseGx;
+      let gy = baseGy;
+      let gz = baseGz;
+      if (hasRotFrame) {
+        const rx = this.state.localPos[0];
+        const ry = this.state.localPos[1];
+        const rz = this.state.localPos[2];
+        const vx = this.state.localTangent[0] * this.state.speed + this.state.localBinormal[0] * this.state.latSpeed;
+        const vy = this.state.localTangent[1] * this.state.speed + this.state.localBinormal[1] * this.state.latSpeed;
+        const vz = this.state.localTangent[2] * this.state.speed + this.state.localBinormal[2] * this.state.latSpeed;
+
+        // alpha x r
+        const eulX = ayRot * rz - azRot * ry;
+        const eulY = azRot * rx - axRot * rz;
+        const eulZ = axRot * ry - ayRot * rx;
+        // omega x r -> omega x (omega x r)
+        const wxrX = wy * rz - wz * ry;
+        const wxrY = wz * rx - wx * rz;
+        const wxrZ = wx * ry - wy * rx;
+        const cenX = wy * wxrZ - wz * wxrY;
+        const cenY = wz * wxrX - wx * wxrZ;
+        const cenZ = wx * wxrY - wy * wxrX;
+        // 2 * (omega x v)
+        const corX = 2 * (wy * vz - wz * vy);
+        const corY = 2 * (wz * vx - wx * vz);
+        const corZ = 2 * (wx * vy - wy * vx);
+
+        let rotAccX = -0.13 * eulX - 0.07 * cenX - 0.12 * corX;
+        let rotAccY = -0.13 * eulY - 0.07 * cenY - 0.12 * corY;
+        let rotAccZ = -0.13 * eulZ - 0.07 * cenZ - 0.12 * corZ;
+        const rotMag = Math.hypot(rotAccX, rotAccY, rotAccZ);
+        if (rotMag > 2.6) {
+          const sc = 2.6 / rotMag;
+          rotAccX *= sc;
+          rotAccY *= sc;
+          rotAccZ *= sc;
+        }
+        gx += rotAccX;
+        gy += rotAccY;
+        gz += rotAccZ;
+      }
+
       let edgeId = this.state.edgeId;
       let t = this.state.t;
       let speed = this.state.speed;
+      let w = clamp(this.state.latOffset, -wMax, wMax);
+      let vw = this.state.latSpeed;
 
-      // Resting-junction launch selection: align with localGravity if resting near edge.from
-      if (t <= 1e-4 && speed < 1e-3) {
-        const fromNode = edges[edgeId].from;
-        this.unlockCheckpointsUpToNode(fromNode);
-        const outEdges = adjacency[fromNode];
+      // Resting-junction launch & V-pocket hold covering both edge.from (t <= 1e-4) and edge.to (t >= 1 - 1e-4)
+      let holdAxialAtPocket = false;
+      const atStart = t <= 1e-4;
+      const atEnd = t >= 1 - 1e-4;
+      if ((atStart || atEnd) && speed < 1e-3) {
+        const restNode = atEnd ? edges[edgeId].to : edges[edgeId].from;
+        this.unlockCheckpointsUpToNode(restNode);
+        const outEdges = adjacency[restNode];
         let bestOut = -1;
-        let bestDot = -Infinity;
+        let bestDrive = -Infinity;
         for (let i = 0; i < outEdges.length; i++) {
           const candId = outEdges[i];
           if (this.isEdgeBlocked(candId)) continue;
-          const off = candId * 3;
-          const d =
-            this.edgeStartTan[off + 0] * gx +
-            this.edgeStartTan[off + 1] * gy +
-            this.edgeStartTan[off + 2] * gz;
-          if (d > bestDot) {
-            bestDot = d;
+          const d = this.computeEdgeEffectiveDrive(candId, gx, gy, gz);
+          if (d > bestDrive) {
+            bestDrive = d;
             bestOut = candId;
           }
         }
-        if (bestOut !== -1 && (this.isEdgeBlocked(edgeId) || (bestDot > 0.02 && bestOut !== edgeId))) {
+        const needSwitch =
+          bestOut !== -1 &&
+          (atEnd
+            ? bestDrive > 0.045
+            : this.isEdgeBlocked(edgeId) || (bestDrive > 0.045 && bestOut !== edgeId));
+        if (needSwitch) {
+          const prevEdgeId = edgeId;
+          const prevW = w;
+          const prevTwin = this.twinEdgeId[prevEdgeId];
+          const prevT = atEnd ? 1 : 0;
+          this.evalEdgeBeadFrame(prevEdgeId, prevT, this.scratchPos, this.scratchNorm, this.scratchTan);
+          this.computeRightBinormal(this.scratchTan, this.scratchNorm, this.scratchBin);
+          const oldBx = this.scratchBin[0];
+          const oldBy = this.scratchBin[1];
+          const oldBz = this.scratchBin[2];
+
           edgeId = bestOut;
           t = 0;
           speed = 0;
+          vw = 0;
+
+          this.evalEdgeBeadFrame(edgeId, 0, this.scratchPos, this.scratchNorm, this.scratchTan);
+          this.computeRightBinormal(this.scratchTan, this.scratchNorm, this.scratchBin);
+          const bAlign = oldBx * this.scratchBin[0] + oldBy * this.scratchBin[1] + oldBz * this.scratchBin[2];
+          w = edgeId === prevTwin ? clamp(-prevW, -wMax, wMax) : clamp(prevW * bAlign, -wMax, wMax);
+          if (edgeId !== prevTwin) {
+            this.captureJunctionBlend(prevEdgeId, prevT, prevW, edgeId, 0, w);
+          }
+        }
+        if (bestOut === -1 || bestDrive <= 0.045) {
+          t = atEnd ? 1.0 : 0.0;
+          speed = 0;
+          holdAxialAtPocket = true;
         }
       }
 
       this.evalEdgeBeadFrame(
         edgeId,
         t,
-        this.state.localPos,
+        this.scratchPos,
         this.state.localNormal,
         this.state.localTangent
+      );
+      this.computeRightBinormal(
+        this.state.localTangent,
+        this.state.localNormal,
+        this.state.localBinormal
       );
 
       const tx = this.state.localTangent[0];
       const ty = this.state.localTangent[1];
       const tz = this.state.localTangent[2];
+      const bx = this.state.localBinormal[0];
+      const by = this.state.localBinormal[1];
+      const bz = this.state.localBinormal[2];
+
       let gTangential = gx * tx + gy * ty + gz * tz;
-      const nx = this.state.localNormal[0];
-      const ny = this.state.localNormal[1];
-      const nz = this.state.localNormal[2];
-      const gNormal = gx * nx + gy * ny + gz * nz;
-      const gLat = Math.hypot(
-        gx - gNormal * nx - gTangential * tx,
-        gy - gNormal * ny - gTangential * ty,
-        gz - gNormal * nz - gTangential * tz
-      );
+      const gSide = gx * bx + gy * by + gz * bz;
 
       // Underpass exit ramp climb ergonomics: attenuate upward face-normal resistance so
-      // a comfortable 24°-35° camera tilt exits stone underpasses while keeping 0° flat rollback
+      // a comfortable tilt exits stone underpasses while keeping 0° flat rollback
       const stepEdge = edges[edgeId];
       if (stepEdge.kind === 'ramp') {
         const faceN = this.topology.nodes[stepEdge.from].localNormal;
@@ -720,40 +992,80 @@ export class LabyrinthBeadSimulator {
         }
       }
 
-      // Static threshold prevents micro-creep when cube is virtually level;
-      // tangent-plane side-wall load adds Coulomb rubbing grip when banking laterally into a turn
-      let accel = 0;
-      if (Math.abs(speed) >= 0.008 || Math.abs(gTangential) >= 0.03) {
-        const drive = ROLLING_GRAVITY_FACTOR * gTangential;
-        const wallRubDecel = WALL_RUB_FRICTION * gLat;
-        let netDrive = drive;
-        if (speed > 0.02) {
-          netDrive -= wallRubDecel;
-        } else if (Math.abs(drive) > wallRubDecel * 0.30) {
-          netDrive -= Math.sign(drive) * wallRubDecel * 0.30;
+      // 2-DOF lateral groove rolling with stone wall seat & pinned-wall micro-bounce guard
+      const pinnedRight = w >= wMax - 1e-6 && vw <= 1e-4 && gSide >= 0;
+      const pinnedLeft = w <= -wMax + 1e-6 && vw >= -1e-4 && gSide <= 0;
+      if (pinnedRight) {
+        w = wMax;
+        vw = 0;
+      } else if (pinnedLeft) {
+        w = -wMax;
+        vw = 0;
+      } else {
+        if (Math.abs(vw) >= 0.004 || Math.abs(gSide) >= 0.04) {
+          const aw = ROLLING_GRAVITY_FACTOR * gSide - LATERAL_VISCOUS_DRAG * vw;
+          vw += aw * dtSub;
+          w += vw * dtSub;
+        } else {
+          vw = 0;
         }
-        accel =
-          netDrive -
-          ROLLING_LINEAR_DRAG * speed -
-          ROLLING_QUAD_DRAG * speed * Math.abs(speed);
+        if (w > wMax) {
+          w = wMax;
+          if (vw > 0.04) {
+            this.state.impactImpulse = Math.min(1.5, this.state.impactImpulse + vw * 0.22);
+            vw = -WALL_KISS_RESTITUTION * vw;
+          } else {
+            vw = 0;
+          }
+        } else if (w < -wMax) {
+          w = -wMax;
+          if (vw < -0.04) {
+            this.state.impactImpulse = Math.min(1.5, this.state.impactImpulse + -vw * 0.22);
+            vw = -WALL_KISS_RESTITUTION * vw;
+          } else {
+            vw = 0;
+          }
+        }
       }
 
-      let newSpeed = speed + accel * dtSub;
-
-      // Velocity reversal mid-edge flips cleanly onto twin reverse edge unless gated by ratchet
-      if (newSpeed < 0) {
-        const twinId = this.twinEdgeId[edgeId];
-        if (twinId !== -1 && !this.isEdgeBlocked(twinId)) {
-          edgeId = twinId;
-          t = 1.0 - t;
-          newSpeed = -newSpeed;
+      // Axial rolling: honed groove beds stay fast while leaning against a stone wall adds Coulomb drag
+      let newSpeed = 0;
+      let edgeLen = this.edgeBeadLen[edgeId];
+      let tNext = t;
+      if (!holdAxialAtPocket) {
+        const onWall = Math.abs(w) >= 0.82 * wMax && gSide * Math.sign(w) > 0;
+        const wallRubDecel = onWall ? WALL_CONTACT_MU * Math.abs(gSide) : 0;
+        let accel = 0;
+        if (Math.abs(speed) >= 0.006 || Math.abs(gTangential) >= 0.04) {
+          const drive = ROLLING_GRAVITY_FACTOR * gTangential;
+          const netDrive = drive - (speed > 0.015 ? wallRubDecel : 0);
+          accel =
+            netDrive -
+            ROLLING_LINEAR_DRAG * speed -
+            ROLLING_QUAD_DRAG * speed * Math.abs(speed);
+          newSpeed = speed + accel * dtSub;
         } else {
           newSpeed = 0;
         }
-      }
 
-      let edgeLen = this.edgeBeadLen[edgeId];
-      let tNext = t + (newSpeed * dtSub) / edgeLen;
+        // Velocity reversal mid-edge flips cleanly onto twin reverse edge unless gated by ratchet.
+        // Because twin reverse binormal = -localBinormal, negating (w, vw) preserves exact 3D position.
+        if (newSpeed < 0) {
+          const twinId = this.twinEdgeId[edgeId];
+          if (twinId !== -1 && !this.isEdgeBlocked(twinId)) {
+            edgeId = twinId;
+            t = 1.0 - t;
+            newSpeed = -newSpeed;
+            w = -w;
+            vw = -vw;
+          } else {
+            newSpeed = 0;
+          }
+        }
+
+        edgeLen = this.edgeBeadLen[edgeId];
+        tNext = t + (newSpeed * dtSub) / edgeLen;
+      }
 
       // Check immediate Goal Sanctum capture
       const curEdge = edges[edgeId];
@@ -766,6 +1078,11 @@ export class LabyrinthBeadSimulator {
         this.state.t = goalSideT;
         this.state.impactImpulse = Math.min(1.5, this.state.impactImpulse + newSpeed * 0.45);
         this.state.speed = 0;
+        this.state.latOffset = 0;
+        this.state.latSpeed = 0;
+        this.cornerBlendOffset[0] = 0;
+        this.cornerBlendOffset[1] = 0;
+        this.cornerBlendOffset[2] = 0;
         this.state.solved = true;
         this.state.solveProgress01 = 1.0;
         this.state.checkpointsUnlocked = 3;
@@ -777,32 +1094,61 @@ export class LabyrinthBeadSimulator {
           this.state.localNormal,
           this.state.localTangent
         );
+        this.computeRightBinormal(
+          this.state.localTangent,
+          this.state.localNormal,
+          this.state.localBinormal
+        );
+        this.integrateRollQuatFromDisplacement(
+          this.state.localPos[0] - this.scratchPrevPos[0],
+          this.state.localPos[1] - this.scratchPrevPos[1],
+          this.state.localPos[2] - this.scratchPrevPos[2],
+          this.state.localNormal
+        );
         this.stampCurrentTrail(1.0, 1.0, 1.0, 0.96);
         return;
       }
 
-      // Junction transitions, catch-basin stops & dead-end bounces (cap hops per substep)
+      // Ballistic junction routing, jamb deflection, and physical mouth transit
       let hopGuard = 0;
-      while (tNext >= 1.0 && hopGuard < 8) {
+      while (!holdAxialAtPocket && tNext >= 1.0 && hopGuard < 8) {
         hopGuard++;
         const overshootDist = (tNext - 1.0) * edgeLen;
-        const arrivedNode = edges[edgeId].to;
+        const inEdgeId = edgeId;
+        const wBeforeHop = w;
+        const arrivedNode = edges[inEdgeId].to;
 
         if (arrivedNode === goalNodeId) {
-          this.state.edgeId = edgeId;
+          this.state.edgeId = inEdgeId;
           this.state.t = 1.0;
           this.state.impactImpulse = Math.min(1.5, this.state.impactImpulse + newSpeed * 0.45);
           this.state.speed = 0;
+          this.state.latOffset = 0;
+          this.state.latSpeed = 0;
+          this.cornerBlendOffset[0] = 0;
+          this.cornerBlendOffset[1] = 0;
+          this.cornerBlendOffset[2] = 0;
           this.state.solved = true;
           this.state.solveProgress01 = 1.0;
           this.state.checkpointsUnlocked = 3;
           this.state.dowsingHint01 = 0;
           this.evalEdgeBeadFrame(
-            edgeId,
+            inEdgeId,
             1.0,
             this.state.localPos,
             this.state.localNormal,
             this.state.localTangent
+          );
+          this.computeRightBinormal(
+            this.state.localTangent,
+            this.state.localNormal,
+            this.state.localBinormal
+          );
+          this.integrateRollQuatFromDisplacement(
+            this.state.localPos[0] - this.scratchPrevPos[0],
+            this.state.localPos[1] - this.scratchPrevPos[1],
+            this.state.localPos[2] - this.scratchPrevPos[2],
+            this.state.localNormal
           );
           this.stampCurrentTrail(1.0, 1.0, 1.0, 0.96);
           return;
@@ -811,91 +1157,300 @@ export class LabyrinthBeadSimulator {
         this.unlockCheckpointsUpToNode(arrivedNode);
 
         const outEdges = adjacency[arrivedNode];
-        const twinId = this.twinEdgeId[edgeId];
-        const inOff = edgeId * 3;
+        const twinId = this.twinEdgeId[inEdgeId];
+        const inOff = inEdgeId * 3;
         const inDirX = this.edgeEndTan[inOff + 0];
         const inDirY = this.edgeEndTan[inOff + 1];
         const inDirZ = this.edgeEndTan[inOff + 2];
+        const arrNorm = this.topology.nodes[arrivedNode].localNormal;
+        const bRawX = inDirY * arrNorm[2] - inDirZ * arrNorm[1];
+        const bRawY = inDirZ * arrNorm[0] - inDirX * arrNorm[2];
+        const bRawZ = inDirX * arrNorm[1] - inDirY * arrNorm[0];
+        const bRawLen = Math.hypot(bRawX, bRawY, bRawZ) || 1;
+        const inBinX = bRawX / bRawLen;
+        const inBinY = bRawY / bRawLen;
+        const inBinZ = bRawZ / bRawLen;
+
+        const gDotFaceN = gx * arrNorm[0] + gy * arrNorm[1] + gz * arrNorm[2];
+        const gPlaneX = gx - gDotFaceN * arrNorm[0];
+        const gPlaneY = gy - gDotFaceN * arrNorm[1];
+        const gPlaneZ = gz - gDotFaceN * arrNorm[2];
 
         let unblockedCount = 0;
         let onlyUnblockedId = -1;
+        let nonTwinCount = 0;
+        let firstNonTwinId = -1;
+        let fwdId = -1;
+        let maxUnblockedDrive = -Infinity;
+
         for (let i = 0; i < outEdges.length; i++) {
           const candId = outEdges[i];
-          if (!this.isEdgeBlocked(candId)) {
-            unblockedCount++;
-            onlyUnblockedId = candId;
+          if (this.isEdgeBlocked(candId)) continue;
+          unblockedCount++;
+          onlyUnblockedId = candId;
+          const drive = this.computeEdgeEffectiveDrive(candId, gx, gy, gz);
+          if (drive > maxUnblockedDrive) {
+            maxUnblockedDrive = drive;
+          }
+          if (candId !== twinId) {
+            if (nonTwinCount === 0) firstNonTwinId = candId;
+            nonTwinCount++;
+            const cOff = candId * 3;
+            const align =
+              inDirX * this.edgeStartTan[cOff + 0] +
+              inDirY * this.edgeStartTan[cOff + 1] +
+              inDirZ * this.edgeStartTan[cOff + 2];
+            if (align > 0.75) {
+              fwdId = candId;
+            }
           }
         }
 
+        const vIn = newSpeed;
+        let nextEdgeId = -1;
+        let cosTurn = 1;
+
+        const applyForcedOrLCorner = (chosenId: number): boolean => {
+          const bOff = chosenId * 3;
+          const outUx = this.edgeStartTan[bOff + 0];
+          const outUy = this.edgeStartTan[bOff + 1];
+          const outUz = this.edgeStartTan[bOff + 2];
+          cosTurn = clamp(inDirX * outUx + inDirY * outUy + inDirZ * outUz, -1, 1);
+
+          this.evalEdgeBeadFrame(chosenId, 0, this.scratchPos, this.scratchNorm, this.scratchTan);
+          this.computeRightBinormal(this.scratchTan, this.scratchNorm, this.scratchBin);
+          const outBx = this.scratchBin[0];
+          const outBy = this.scratchBin[1];
+          const outBz = this.scratchBin[2];
+
+          if (cosTurn > 0.85) {
+            newSpeed = vIn * (0.97 + 0.03 * cosTurn);
+            const bAlign = inBinX * outBx + inBinY * outBy + inBinZ * outBz;
+            w = clamp(w * bAlign, -wMax, wMax);
+            vw = vw * bAlign;
+          } else {
+            // 90-degree jamb deflection checks perpendicular momentum against the far stone wall
+            const vLatCarry = Math.max(0, vw * (inBinX * outUx + inBinY * outUy + inBinZ * outUz));
+            const deflectedSpeed = vLatCarry + L_CORNER_DEFLECT * vIn;
+            if (deflectedSpeed < 0.045 && maxUnblockedDrive <= 0.045) {
+              edgeId = inEdgeId;
+              tNext = 1.0;
+              newSpeed = 0;
+              vw = 0;
+              return true;
+            }
+            newSpeed = deflectedSpeed;
+            if (vIn > 0.16) {
+              this.state.impactImpulse = Math.min(1.5, this.state.impactImpulse + vIn * 0.36);
+            }
+            const tDotOutBin = inDirX * outBx + inDirY * outBy + inDirZ * outBz;
+            w = clamp(tDotOutBin * wMax * 0.88, -wMax, wMax);
+            vw = 0;
+          }
+          nextEdgeId = chosenId;
+          edgeLen = this.edgeBeadLen[nextEdgeId];
+          tNext = overshootDist / edgeLen;
+          return false;
+        };
+
+        // Universal low-speed gravitational V-pocket rest seat across any node degree
+        if (vIn < 0.055 && maxUnblockedDrive <= 0.045) {
+          edgeId = inEdgeId;
+          tNext = 1.0;
+          newSpeed = 0;
+          vw = 0;
+          break;
+        }
+
         if (outEdges.length === 1) {
+          if (vIn < 0.045) {
+            edgeId = inEdgeId;
+            tNext = 1.0;
+            newSpeed = 0;
+            vw = 0;
+            break;
+          }
           // Physical dead-end impact bounce with restitution e = 0.28
-          const bouncedSpeed = newSpeed * DEAD_END_RESTITUTION;
+          const bouncedSpeed = vIn * DEAD_END_RESTITUTION;
           this.state.impactImpulse = Math.min(
             1.5,
-            this.state.impactImpulse + newSpeed * (1.0 + DEAD_END_RESTITUTION) * 0.5
+            this.state.impactImpulse + vIn * (1.0 + DEAD_END_RESTITUTION) * 0.5
           );
-          edgeId = outEdges[0];
+          nextEdgeId = outEdges[0];
           newSpeed = bouncedSpeed;
-          edgeLen = this.edgeBeadLen[edgeId];
+          w = -w;
+          vw = -vw;
+          cosTurn = -1;
+          edgeLen = this.edgeBeadLen[nextEdgeId];
           tNext = Math.min(0.99, overshootDist / edgeLen);
         } else if (unblockedCount === 1 && onlyUnblockedId !== -1) {
           // Degree-2 one-way checkpoint catch-basin: free forward passage, cushioned stop if reversing
-          const bOff = onlyUnblockedId * 3;
-          const cosTurn = clamp(
-            inDirX * this.edgeStartTan[bOff + 0] +
-              inDirY * this.edgeStartTan[bOff + 1] +
-              inDirZ * this.edgeStartTan[bOff + 2],
-            -1,
-            1
-          );
-          edgeId = onlyUnblockedId;
-          edgeLen = this.edgeBeadLen[edgeId];
           if (onlyUnblockedId === twinId) {
-            if (newSpeed > 0.08) {
-              this.state.impactImpulse = Math.min(1.5, this.state.impactImpulse + newSpeed * 0.35);
+            if (vIn > 0.08) {
+              this.state.impactImpulse = Math.min(1.5, this.state.impactImpulse + vIn * 0.35);
             }
+            if (maxUnblockedDrive <= 0.045) {
+              edgeId = inEdgeId;
+              tNext = 1.0;
+              newSpeed = 0;
+              vw = 0;
+              break;
+            }
+            nextEdgeId = twinId;
+            edgeLen = this.edgeBeadLen[nextEdgeId];
             newSpeed = 0;
+            w = -w;
+            vw = 0;
+            cosTurn = -1;
             tNext = 0;
           } else {
-            const cornerFactor = CORNER_RETENTION_BASE + (1.0 - CORNER_RETENTION_BASE) * Math.max(0, cosTurn);
-            newSpeed *= cornerFactor;
-            tNext = overshootDist / edgeLen;
+            if (applyForcedOrLCorner(onlyUnblockedId)) break;
+          }
+        } else if (nonTwinCount === 1 && firstNonTwinId !== -1) {
+          // Forced L-corner or straight segment; allow tiny arrival stall under strong reverse tilt
+          const gIntoIn = gx * inDirX + gy * inDirY + gz * inDirZ;
+          if (vIn < 0.06 && gIntoIn < -1.2 && twinId !== -1 && !this.isEdgeBlocked(twinId)) {
+            nextEdgeId = twinId;
+            edgeLen = this.edgeBeadLen[nextEdgeId];
+            newSpeed = 0;
+            w = -w;
+            vw = 0;
+            cosTurn = -1;
+            tNext = 0;
+          } else {
+            if (applyForcedOrLCorner(firstNonTwinId)) break;
+          }
+        } else if (fwdId !== -1) {
+          // Pass-through T-junction or 4-way crossroads: ballistic mouth capture vs kinetic rim vault
+          const gAxial = gPlaneX * inDirX + gPlaneY * inDirY + gPlaneZ * inDirZ;
+          if (vIn < 0.05) {
+            let bestStartId = fwdId;
+            let bestDot = -Infinity;
+            for (let i = 0; i < outEdges.length; i++) {
+              const candId = outEdges[i];
+              if (this.isEdgeBlocked(candId)) continue;
+              const cOff = candId * 3;
+              let d =
+                this.edgeStartTan[cOff + 0] * gx +
+                this.edgeStartTan[cOff + 1] * gy +
+                this.edgeStartTan[cOff + 2] * gz;
+              const candEdge = edges[candId];
+              if (
+                candEdge.kind === 'ramp' &&
+                this.topology.nodes[candEdge.to].tier > this.topology.nodes[candEdge.from].tier
+              ) {
+                d += -Math.min(0, gDotFaceN) * 0.14;
+              }
+              if (d > bestDot) {
+                bestDot = d;
+                bestStartId = candId;
+              }
+            }
+            nextEdgeId = bestStartId;
+            edgeLen = this.edgeBeadLen[nextEdgeId];
+            newSpeed = bestStartId === twinId ? 0 : Math.min(vIn, 0.04);
+            this.evalEdgeBeadFrame(nextEdgeId, 0, this.scratchPos, this.scratchNorm, this.scratchTan);
+            this.computeRightBinormal(this.scratchTan, this.scratchNorm, this.scratchBin);
+            const bAlign =
+              inBinX * this.scratchBin[0] +
+              inBinY * this.scratchBin[1] +
+              inBinZ * this.scratchBin[2];
+            w = clamp(w * bAlign, -wMax, wMax);
+            vw = 0;
+            tNext = nextEdgeId === twinId ? 0 : overshootDist / edgeLen;
+          } else {
+            const tMouth = Math.min(0.32, MOUTH_EFF_SPAN / Math.max(vIn, 0.10));
+            const captureThresh = MOUTH_BASE_CAPTURE + MOUTH_VAULT_K * vIn * vIn;
+            let capturedSideId = -1;
+            let bestCapturedDy = -Infinity;
+            let bestCapturedSideSign = 1;
+            let bestCapturedGSide = 0;
+
+            let bestSkimSideSign = 1;
+            let bestSkimDy = -Infinity;
+            let bestSkimGSide = 0;
+
+            for (let i = 0; i < outEdges.length; i++) {
+              const candId = outEdges[i];
+              if (candId === twinId || candId === fwdId || this.isEdgeBlocked(candId)) continue;
+              const cOff = candId * 3;
+              const ux = this.edgeStartTan[cOff + 0];
+              const uy = this.edgeStartTan[cOff + 1];
+              const uz = this.edgeStartTan[cOff + 2];
+
+              const binDot = ux * inBinX + uy * inBinY + uz * inBinZ;
+              const sideSign = binDot >= 0 ? 1 : -1;
+              const wS = sideSign * w;
+              const vwS = sideSign * vw;
+
+              let gS = gPlaneX * ux + gPlaneY * uy + gPlaneZ * uz;
+              const candEdge = edges[candId];
+              if (
+                candEdge.kind === 'ramp' &&
+                this.topology.nodes[candEdge.to].tier > this.topology.nodes[candEdge.from].tier
+              ) {
+                gS += -Math.min(0, gDotFaceN) * 0.16;
+              }
+
+              const dyInto = wS + vwS * tMouth + 0.5 * (ROLLING_GRAVITY_FACTOR * gS) * tMouth * tMouth;
+              if (dyInto > bestSkimDy) {
+                bestSkimDy = dyInto;
+                bestSkimSideSign = sideSign;
+                bestSkimGSide = gS;
+              }
+
+              const highSpeedAxialFlyby = vIn > 1.18 && gAxial > 2.4 * gS;
+              if (gS > 0.35 && dyInto >= captureThresh && !highSpeedAxialFlyby) {
+                if (dyInto > bestCapturedDy) {
+                  bestCapturedDy = dyInto;
+                  capturedSideId = candId;
+                  bestCapturedSideSign = sideSign;
+                  bestCapturedGSide = gS;
+                }
+              }
+            }
+
+            if (capturedSideId !== -1) {
+              // Marble arcs cleanly into side mouth with jamb deflection & inner-wall seating
+              nextEdgeId = capturedSideId;
+              cosTurn = 0;
+              const vwS = bestCapturedSideSign * vw;
+              newSpeed =
+                Math.max(0, vwS) +
+                ROLLING_GRAVITY_FACTOR * Math.max(0, bestCapturedGSide) * tMouth * 0.50 +
+                0.28 * vIn;
+              if (vIn > 0.14) {
+                this.state.impactImpulse = Math.min(1.5, this.state.impactImpulse + vIn * 0.28);
+              }
+
+              this.evalEdgeBeadFrame(nextEdgeId, 0, this.scratchPos, this.scratchNorm, this.scratchTan);
+              this.computeRightBinormal(this.scratchTan, this.scratchNorm, this.scratchBin);
+              const tDotOutBin =
+                inDirX * this.scratchBin[0] +
+                inDirY * this.scratchBin[1] +
+                inDirZ * this.scratchBin[2];
+              w = clamp(tDotOutBin * wMax * 0.85, -wMax, wMax);
+              vw = 0;
+              edgeLen = this.edgeBeadLen[nextEdgeId];
+              tNext = overshootDist / edgeLen;
+            } else {
+              // Straight roll past mouth; apply subtle arris rim-skip tick if hugging open mouth wall
+              nextEdgeId = fwdId;
+              cosTurn = 1;
+              if (bestSkimDy > wMax * 0.72 && bestSkimGSide > 0.25) {
+                newSpeed = vIn * 0.90;
+                this.state.impactImpulse = Math.min(1.5, this.state.impactImpulse + vIn * 0.16);
+                w = bestSkimSideSign * wMax * 0.82;
+                vw = 0;
+              } else {
+                newSpeed = vIn * 0.985;
+              }
+              edgeLen = this.edgeBeadLen[nextEdgeId];
+              tNext = overshootDist / edgeLen;
+            }
           }
         } else {
-          // Junction routing: project gravity onto corridor face tangent plane (excluding floor normal).
-          // Intentional diagonal banking scales lateral mouth capture inversely with approach speed
-          // while high-speed forward sprints and shallow axial tilts roll cleanly past 90° mouths.
-          const faceN = this.topology.nodes[arrivedNode].localNormal;
-          const gDotFaceN = gx * faceN[0] + gy * faceN[1] + gz * faceN[2];
-          const gPlaneX = gx - gDotFaceN * faceN[0];
-          const gPlaneY = gy - gDotFaceN * faceN[1];
-          const gPlaneZ = gz - gDotFaceN * faceN[2];
-          const gAxial = gPlaneX * inDirX + gPlaneY * inDirY + gPlaneZ * inDirZ;
-          const gLatX = gPlaneX - gAxial * inDirX;
-          const gLatY = gPlaneY - gAxial * inDirY;
-          const gLatZ = gPlaneZ - gAxial * inDirZ;
-          const gLatMag = Math.hypot(gLatX, gLatY, gLatZ);
-
-          const axialSteerDt = Math.max(dtSub, JUNCTION_AXIAL_STEER_DT);
-          const intentionalBank = gLatMag >= Math.max(0.38, gAxial * 0.52);
-          const fastForwardFlyby =
-            (newSpeed > 1.12 && gAxial > gLatMag) ||
-            (gDotFaceN > 0.5 && gAxial > gLatMag);
-          const vEff = Math.max(0.26, newSpeed);
-          const lateralSteerDt =
-            intentionalBank && !fastForwardFlyby
-              ? clamp(
-                  JUNCTION_MOUTH_CAPTURE_NUM / vEff,
-                  JUNCTION_LATERAL_STEER_MIN_DT,
-                  JUNCTION_LATERAL_STEER_MAX_DT
-                )
-              : axialSteerDt;
-
-          const axialMag = Math.max(0, newSpeed + axialSteerDt * gAxial);
-          const momX = axialMag * inDirX + lateralSteerDt * gLatX;
-          const momY = axialMag * inDirY + lateralSteerDt * gLatY;
-          const momZ = axialMag * inDirZ + lateralSteerDt * gLatZ;
-
+          // Stem-into-bar T-junction (head-on stone T-wall): choose side arm and check speed
           let bestOutId = -1;
           let bestScore = -Infinity;
           let bestBlockedScore = -Infinity;
@@ -905,19 +1460,17 @@ export class LabyrinthBeadSimulator {
             const ux = this.edgeStartTan[cOff + 0];
             const uy = this.edgeStartTan[cOff + 1];
             const uz = this.edgeStartTan[cOff + 2];
-            let score = ux * momX + uy * momY + uz * momZ;
+            const candLat = ux * inBinX + uy * inBinY + uz * inBinZ;
+            let score =
+              candLat * vw +
+              0.24 * (ux * gPlaneX + uy * gPlaneY + uz * gPlaneZ) +
+              0.028 * candLat * (w / wMax);
             const candEdge = edges[candId];
             if (
               candEdge.kind === 'ramp' &&
-              this.topology.nodes[candEdge.to].tier >
-                this.topology.nodes[candEdge.from].tier &&
-              gDotFaceN < -2.0 &&
-              gAxial > 0.15
+              this.topology.nodes[candEdge.to].tier > this.topology.nodes[candEdge.from].tier
             ) {
-              const alignIn = inDirX * ux + inDirY * uy + inDirZ * uz;
-              if (alignIn > 0.7) {
-                score += -gDotFaceN * 0.22;
-              }
+              score += -Math.min(0, gDotFaceN) * 0.16;
             }
             if (this.isEdgeBlocked(candId)) {
               if (score > bestBlockedScore) bestBlockedScore = score;
@@ -934,60 +1487,164 @@ export class LabyrinthBeadSimulator {
           }
 
           if (unblockedCount < outEdges.length && bestBlockedScore > bestScore && bestScore <= 0.005) {
-            // Momentum presses directly into the locked catch-basin stop -> park smoothly at basin lip
-            if (newSpeed > 0.08) {
-              this.state.impactImpulse = Math.min(1.5, this.state.impactImpulse + newSpeed * 0.35);
+            if (vIn > 0.08) {
+              this.state.impactImpulse = Math.min(1.5, this.state.impactImpulse + vIn * 0.35);
             }
-            edgeId = bestOutId;
-            edgeLen = this.edgeBeadLen[edgeId];
+            if (maxUnblockedDrive <= 0.045) {
+              edgeId = inEdgeId;
+              tNext = 1.0;
+              newSpeed = 0;
+              vw = 0;
+              break;
+            }
+            nextEdgeId = bestOutId;
+            edgeLen = this.edgeBeadLen[nextEdgeId];
             newSpeed = 0;
+            vw = 0;
             tNext = 0;
+            if (nextEdgeId === twinId) {
+              w = -w;
+            } else if (nextEdgeId !== inEdgeId) {
+              this.evalEdgeBeadFrame(nextEdgeId, 0, this.scratchPos, this.scratchNorm, this.scratchTan);
+              this.computeRightBinormal(this.scratchTan, this.scratchNorm, this.scratchBin);
+              const bAlign =
+                inBinX * this.scratchBin[0] +
+                inBinY * this.scratchBin[1] +
+                inBinZ * this.scratchBin[2];
+              w = clamp(w * bAlign, -wMax, wMax);
+              this.captureJunctionBlend(inEdgeId, 1.0, wBeforeHop, nextEdgeId, 0.0, w);
+            }
+            edgeId = nextEdgeId;
             break;
           }
 
           const bOff = bestOutId * 3;
-          const cosTurn = clamp(
-            inDirX * this.edgeStartTan[bOff + 0] +
-              inDirY * this.edgeStartTan[bOff + 1] +
-              inDirZ * this.edgeStartTan[bOff + 2],
-            -1,
-            1
-          );
+          const outUx = this.edgeStartTan[bOff + 0];
+          const outUy = this.edgeStartTan[bOff + 1];
+          const outUz = this.edgeStartTan[bOff + 2];
+          cosTurn = clamp(inDirX * outUx + inDirY * outUy + inDirZ * outUz, -1, 1);
 
           if (bestOutId === twinId) {
-            if (newSpeed > 0.05) {
-              this.state.impactImpulse = Math.min(1.5, this.state.impactImpulse + newSpeed * 0.55);
-              newSpeed *= DEAD_END_RESTITUTION;
+            if (vIn > 0.05) {
+              this.state.impactImpulse = Math.min(1.5, this.state.impactImpulse + vIn * 0.55);
+              newSpeed = vIn * DEAD_END_RESTITUTION;
             } else {
               newSpeed = 0;
             }
+            w = -w;
+            vw = -vw;
           } else {
-            const cornerFactor = CORNER_RETENTION_BASE + (1.0 - CORNER_RETENTION_BASE) * Math.max(0, cosTurn);
-            if (cosTurn < 0.35 && newSpeed > 0.25) {
-              this.state.impactImpulse = Math.min(
-                1.5,
-                this.state.impactImpulse + newSpeed * (1.0 - Math.max(0, cosTurn)) * 0.22
-              );
+            const vLatCarry = Math.max(0, vw * (inBinX * outUx + inBinY * outUy + inBinZ * outUz));
+            const deflectedSpeed = vLatCarry + 0.28 * vIn;
+            if (cosTurn <= 0.85 && deflectedSpeed < 0.045 && maxUnblockedDrive <= 0.045) {
+              edgeId = inEdgeId;
+              tNext = 1.0;
+              newSpeed = 0;
+              vw = 0;
+              break;
             }
-            newSpeed *= cornerFactor;
+            newSpeed = deflectedSpeed;
+            if (vIn > 0.14) {
+              this.state.impactImpulse = Math.min(1.5, this.state.impactImpulse + vIn * 0.40);
+            }
+            this.evalEdgeBeadFrame(bestOutId, 0, this.scratchPos, this.scratchNorm, this.scratchTan);
+            this.computeRightBinormal(this.scratchTan, this.scratchNorm, this.scratchBin);
+            const tDotOutBin =
+              inDirX * this.scratchBin[0] +
+              inDirY * this.scratchBin[1] +
+              inDirZ * this.scratchBin[2];
+            w = clamp(tDotOutBin * wMax * 0.88, -wMax, wMax);
+            vw = 0;
           }
-
-          edgeId = bestOutId;
-          edgeLen = this.edgeBeadLen[edgeId];
+          nextEdgeId = bestOutId;
+          edgeLen = this.edgeBeadLen[nextEdgeId];
           tNext = overshootDist / edgeLen;
+        }
+
+        if (cosTurn < 0.85) {
+          this.evalEdgeBeadFrame(inEdgeId, 1.0, this.scratchPos, this.scratchNorm, this.scratchTan);
+          this.stampPositionWithEdge(
+            this.scratchPos,
+            inEdgeId,
+            1.0,
+            1.0,
+            0.96,
+            this.state.dowsingHint01 * 0.20
+          );
+        }
+        if (nextEdgeId !== -1 && nextEdgeId !== inEdgeId && nextEdgeId !== twinId) {
+          this.captureJunctionBlend(inEdgeId, 1.0, wBeforeHop, nextEdgeId, 0.0, w);
+        }
+        edgeId = nextEdgeId;
+        if (newSpeed <= 0 && tNext <= 0) {
+          break;
         }
       }
 
       this.state.edgeId = edgeId;
       this.state.t = clamp(tNext, 0, 1);
       this.state.speed = newSpeed;
+      this.state.latOffset = clamp(w, -wMax, wMax);
+      this.state.latSpeed = vw;
 
       this.evalEdgeBeadFrame(
         edgeId,
         this.state.t,
-        this.state.localPos,
+        this.scratchPos,
         this.state.localNormal,
         this.state.localTangent
+      );
+      this.computeRightBinormal(
+        this.state.localTangent,
+        this.state.localNormal,
+        this.state.localBinormal
+      );
+
+      const blendN =
+        this.cornerBlendOffset[0] * this.state.localNormal[0] +
+        this.cornerBlendOffset[1] * this.state.localNormal[1] +
+        this.cornerBlendOffset[2] * this.state.localNormal[2];
+      this.cornerBlendOffset[0] -= blendN * this.state.localNormal[0];
+      this.cornerBlendOffset[1] -= blendN * this.state.localNormal[1];
+      this.cornerBlendOffset[2] -= blendN * this.state.localNormal[2];
+
+      const distRolled = (Math.abs(newSpeed) + Math.abs(vw)) * dtSub;
+      if (distRolled > 0) {
+        const blendDecay = Math.exp(-distRolled / 0.018);
+        this.cornerBlendOffset[0] *= blendDecay;
+        this.cornerBlendOffset[1] *= blendDecay;
+        this.cornerBlendOffset[2] *= blendDecay;
+        if (
+          Math.hypot(
+            this.cornerBlendOffset[0],
+            this.cornerBlendOffset[1],
+            this.cornerBlendOffset[2]
+          ) < 1e-6
+        ) {
+          this.cornerBlendOffset[0] = 0;
+          this.cornerBlendOffset[1] = 0;
+          this.cornerBlendOffset[2] = 0;
+        }
+      }
+
+      this.state.localPos[0] =
+        this.scratchPos[0] +
+        this.state.latOffset * this.state.localBinormal[0] +
+        this.cornerBlendOffset[0];
+      this.state.localPos[1] =
+        this.scratchPos[1] +
+        this.state.latOffset * this.state.localBinormal[1] +
+        this.cornerBlendOffset[1];
+      this.state.localPos[2] =
+        this.scratchPos[2] +
+        this.state.latOffset * this.state.localBinormal[2] +
+        this.cornerBlendOffset[2];
+
+      this.integrateRollQuatFromDisplacement(
+        this.state.localPos[0] - this.scratchPrevPos[0],
+        this.state.localPos[1] - this.scratchPrevPos[1],
+        this.state.localPos[2] - this.scratchPrevPos[2],
+        this.state.localNormal
       );
 
       const postEdge = edges[edgeId];
@@ -1056,6 +1713,14 @@ export class LabyrinthBeadSimulator {
         gy = this.edgeStartTan[off + 1];
         gz = this.edgeStartTan[off + 2];
       }
+    } else if (this.state.t >= 1 - 1e-4 && this.state.speed < 1e-3) {
+      const idealToEdge = this.nextEdgeToGoal[curEdge.to];
+      if (idealToEdge !== -1) {
+        const off = idealToEdge * 3;
+        gx = this.edgeStartTan[off + 0];
+        gy = this.edgeStartTan[off + 1];
+        gz = this.edgeStartTan[off + 2];
+      }
     }
 
     if (gx === 0 && gy === 0 && gz === 0) {
@@ -1088,13 +1753,13 @@ export class LabyrinthBeadSimulator {
             const deg = this.topology.adjacency[curEdge.to].length;
             if (deg >= 3 && cosTurn < 0.65) {
               if (isClimbingRamp) {
-                if (this.state.t > 0.55) {
+                if (this.state.t > 0.20) {
                   gx = tx * 0.35 + nx * 0.95;
                   gy = ty * 0.35 + ny * 0.95;
                   gz = tz * 0.35 + nz * 0.95;
                 }
               } else {
-                const checkAxial = this.state.speed > 0.65 ? -0.35 : 0.30;
+                const checkAxial = this.state.speed > 0.55 ? -0.42 : 0.26;
                 gx = tx * checkAxial + nx * 0.95;
                 gy = ty * checkAxial + ny * 0.95;
                 gz = tz * checkAxial + nz * 0.95;
@@ -1110,16 +1775,16 @@ export class LabyrinthBeadSimulator {
                     this.edgeEndTan[n1EndOff + 0] * this.edgeStartTan[n2Off + 0] +
                     this.edgeEndTan[n1EndOff + 1] * this.edgeStartTan[n2Off + 1] +
                     this.edgeEndTan[n1EndOff + 2] * this.edgeStartTan[n2Off + 2];
-                  if (cosTurn2 < 0.65 && this.state.t > 0.40) {
-                    const preW = ((this.state.t - 0.40) / 0.60) * 0.55;
+                  if (cosTurn2 < 0.65 && this.state.t > 0.25) {
+                    const preW = ((this.state.t - 0.25) / 0.75) * 0.55;
                     gx = tx * (1 - preW * 0.4) + this.edgeStartTan[n2Off + 0] * preW;
                     gy = ty * (1 - preW * 0.4) + this.edgeStartTan[n2Off + 1] * preW;
                     gz = tz * (1 - preW * 0.4) + this.edgeStartTan[n2Off + 2] * preW;
                   }
                 }
               }
-            } else if (this.state.t > 0.65) {
-              const blend = (this.state.t - 0.65) / 0.35;
+            } else if (this.state.t > 0.55) {
+              const blend = (this.state.t - 0.55) / 0.45;
               const wNext = 0.35 + 0.65 * blend;
               gx = tx * (1 - wNext * 0.45) + nx * wNext;
               gy = ty * (1 - wNext * 0.45) + ny * wNext;

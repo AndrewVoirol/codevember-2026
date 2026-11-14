@@ -16,7 +16,7 @@ import { createLabyrinthCenterpiece } from './labyrinthCenterpiece';
 const DEFAULT_CAM_POS: readonly [number, number, number] = [0, 0.12, 4.35];
 const MIN_CAM_DIST = 2.45;
 const MAX_CAM_DIST = 6.8;
-const MAX_HOVER_BIAS_RAD = (6 * Math.PI) / 180;
+const MAX_HOVER_BIAS_RAD = 0.035;
 const TRACKBALL_RADIUS = 0.82;
 
 // Pre-allocated module-scope math scratch objects (strictly zero per-frame allocations)
@@ -42,9 +42,17 @@ const _axisCam = new THREE.Vector3();
 const _axisWorld = new THREE.Vector3();
 const _instOmega = new THREE.Vector3();
 const _angVelWorld = new THREE.Vector3();
+const _prevMonolithQuat = new THREE.Quaternion();
+const _rotFrameDeltaQuat = new THREE.Quaternion();
+const _rotFrameVec = new THREE.Vector3();
+const _rotFrameLocalVelVec = new THREE.Vector3();
+const _rotFramePrevLocalVelVec = new THREE.Vector3();
+const _rotFrameAccelVec = new THREE.Vector3();
 const _worldGravity = new THREE.Vector3(0, -9.81, 0);
 const _localGravityVec = new THREE.Vector3();
 const _localGravityArr: [number, number, number] = [0, -9.81, 0];
+const _localAngVelArr: [number, number, number] = [0, 0, 0];
+const _localAngAccelArr: [number, number, number] = [0, 0, 0];
 const _stepGravArr: [number, number, number] = [0, -9.81, 0];
 const _beadVelScratch: [number, number, number] = [0, 0, 0];
 const _clickRaycaster = new THREE.Raycaster();
@@ -246,6 +254,8 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
   let lastMoveMs = 0;
   let hoverYaw = 0;
   let hoverPitch = 0;
+  let hoverAnchorNdcX = 0;
+  let hoverAnchorNdcY = 0;
 
   let victoryPhase: LabyrinthVictoryPhase = 'playing';
   let victoryElapsedSec = 0;
@@ -335,19 +345,27 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
   }, 60);
 
   monolithGroup.quaternion.copy(baseQuat);
+  _prevMonolithQuat.copy(monolithGroup.quaternion);
+  _rotFrameLocalVelVec.set(0, 0, 0);
+  _rotFramePrevLocalVelVec.set(0, 0, 0);
+  _rotFrameAccelVec.set(0, 0, 0);
 
   const syncVisualFromSimulator = (dtSec: number) => {
     const st = simulator.state;
     beadMesh.position.set(st.localPos[0], st.localPos[1], st.localPos[2]);
-    _beadVelScratch[0] = st.localTangent[0] * st.speed;
-    _beadVelScratch[1] = st.localTangent[1] * st.speed;
-    _beadVelScratch[2] = st.localTangent[2] * st.speed;
+    _beadVelScratch[0] =
+      st.localTangent[0] * st.speed + st.localBinormal[0] * st.latSpeed;
+    _beadVelScratch[1] =
+      st.localTangent[1] * st.speed + st.localBinormal[1] * st.latSpeed;
+    _beadVelScratch[2] =
+      st.localTangent[2] * st.speed + st.localBinormal[2] * st.latSpeed;
     optics.updateBeadUniforms(
       _beadVelScratch,
       st.localNormal,
       st.impactImpulse,
       st.solveProgress01,
-      dtSec
+      dtSec,
+      st.rollQuat
     );
     optics.setProgressUniforms(st.checkpointsUnlocked, st.dowsingHint01);
     if (simulator.wetAtlasDirty) {
@@ -385,14 +403,27 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
 
     baseQuat.copy(defaultIsoQuat);
     _angVelWorld.set(0, 0, 0);
+    _hoverQuat.identity();
     hoverYaw = 0;
     hoverPitch = 0;
+    hoverAnchorNdcX = 0;
+    hoverAnchorNdcY = 0;
     targetCamDist = defaultCamDist;
     camDist = defaultCamDist;
     stage.camera.position.copy(baseCamDir).multiplyScalar(camDist);
     stage.camera.lookAt(0, 0, 0);
     stage.camera.updateMatrixWorld();
     monolithGroup.quaternion.copy(baseQuat);
+    _prevMonolithQuat.copy(monolithGroup.quaternion);
+    _rotFrameLocalVelVec.set(0, 0, 0);
+    _rotFramePrevLocalVelVec.set(0, 0, 0);
+    _rotFrameAccelVec.set(0, 0, 0);
+    _localAngVelArr[0] = 0;
+    _localAngVelArr[1] = 0;
+    _localAngVelArr[2] = 0;
+    _localAngAccelArr[0] = 0;
+    _localAngAccelArr[1] = 0;
+    _localAngAccelArr[2] = 0;
     if (stage.shell.canvas.style.cursor !== '') {
       stage.shell.canvas.style.cursor = '';
     }
@@ -442,6 +473,13 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
 
   const onPointerDown = (ev: PointerEvent) => {
     if (ev.button !== 0) return;
+    // Fold active hover bias seamlessly into baseQuat so grab produces zero orientation snap
+    if (Math.abs(hoverYaw) > 1e-6 || Math.abs(hoverPitch) > 1e-6) {
+      baseQuat.premultiply(_hoverQuat).normalize();
+      _hoverQuat.identity();
+      hoverYaw = 0;
+      hoverPitch = 0;
+    }
     isDragging = true;
     if (simulator.state.solved) {
       userDraggedDuringVictory = true;
@@ -506,6 +544,9 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
     if (performance.now() - lastMoveMs > 75) {
       _angVelWorld.set(0, 0, 0);
     }
+    clientToNdc(ev.clientX, ev.clientY, _ndcPair);
+    hoverAnchorNdcX = _ndcPair[0];
+    hoverAnchorNdcY = _ndcPair[1];
     isDragging = false;
     activePointerId = null;
 
@@ -697,14 +738,14 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
       }
     }
 
-    // 3. Subtle ±6° camera-aligned hover gravity-tip bias (monotonic tanh, zero quadrant jumps)
+    // 3. Subtle ±2° camera-aligned hover gravity-tip bias relative to release anchor (zero snaps)
     const targetHoverX =
       !isDragging && pointer.isActive
-        ? Math.tanh(pointer.ndc.x * 1.45) * MAX_HOVER_BIAS_RAD
+        ? Math.tanh((pointer.ndc.x - hoverAnchorNdcX) * 1.2) * MAX_HOVER_BIAS_RAD
         : 0;
     const targetHoverY =
       !isDragging && pointer.isActive
-        ? Math.tanh(pointer.ndc.y * 1.45) * MAX_HOVER_BIAS_RAD
+        ? Math.tanh((pointer.ndc.y - hoverAnchorNdcY) * 1.2) * MAX_HOVER_BIAS_RAD
         : 0;
     const hoverAlpha = 1 - Math.exp(-dt * 7.5);
     hoverYaw += (targetHoverX - hoverYaw) * hoverAlpha;
@@ -717,7 +758,51 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
 
     monolithGroup.quaternion.copy(_hoverQuat).multiply(baseQuat).normalize();
 
-    // 4. Transform world gravity into cube-local frame & advance bead or 4-phase victory choreography
+    // 4. Compute cube-local rotational angular velocity & acceleration, then step physics
+    _invMonolithQuat.copy(_prevMonolithQuat).invert();
+    _rotFrameDeltaQuat.copy(_invMonolithQuat).multiply(monolithGroup.quaternion).normalize();
+    if (_rotFrameDeltaQuat.w < 0) {
+      _rotFrameDeltaQuat.set(
+        -_rotFrameDeltaQuat.x,
+        -_rotFrameDeltaQuat.y,
+        -_rotFrameDeltaQuat.z,
+        -_rotFrameDeltaQuat.w
+      );
+    }
+    const sinHalfRot = Math.hypot(
+      _rotFrameDeltaQuat.x,
+      _rotFrameDeltaQuat.y,
+      _rotFrameDeltaQuat.z
+    );
+    if (sinHalfRot > 1e-6) {
+      const rotAngle = 2 * Math.atan2(sinHalfRot, _rotFrameDeltaQuat.w);
+      const angSpeed = Math.min(14.0, rotAngle / dt);
+      const invSinScale = angSpeed / sinHalfRot;
+      _rotFrameLocalVelVec.set(
+        _rotFrameDeltaQuat.x * invSinScale,
+        _rotFrameDeltaQuat.y * invSinScale,
+        _rotFrameDeltaQuat.z * invSinScale
+      );
+    } else {
+      _rotFrameLocalVelVec.set(0, 0, 0);
+    }
+    const accelAlpha = 1 - Math.exp(-dt * 22);
+    _rotFrameVec
+      .copy(_rotFrameLocalVelVec)
+      .sub(_rotFramePrevLocalVelVec)
+      .divideScalar(dt)
+      .clampLength(0, 48);
+    _rotFrameAccelVec.lerp(_rotFrameVec, accelAlpha);
+    _rotFramePrevLocalVelVec.copy(_rotFrameLocalVelVec);
+    _prevMonolithQuat.copy(monolithGroup.quaternion);
+
+    _localAngVelArr[0] = _rotFrameLocalVelVec.x;
+    _localAngVelArr[1] = _rotFrameLocalVelVec.y;
+    _localAngVelArr[2] = _rotFrameLocalVelVec.z;
+    _localAngAccelArr[0] = _rotFrameAccelVec.x;
+    _localAngAccelArr[1] = _rotFrameAccelVec.y;
+    _localAngAccelArr[2] = _rotFrameAccelVec.z;
+
     _invMonolithQuat.copy(monolithGroup.quaternion).invert();
     _localGravityVec.copy(_worldGravity).applyQuaternion(_invMonolithQuat);
     _localGravityArr[0] = _localGravityVec.x;
@@ -727,7 +812,7 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
     if (!simulator.state.solved) {
       victoryPhase = 'playing';
       vaultOpen01 = 0;
-      simulator.step(dt, _localGravityArr);
+      simulator.step(dt, _localGravityArr, _localAngVelArr, _localAngAccelArr);
       syncVisualFromSimulator(dt);
     } else {
       victoryElapsedSec += dt;

@@ -62,7 +62,8 @@ export interface LabyrinthOpticsBundle {
     normalLocalVec: readonly [number, number, number] | THREE.Vector3,
     impactImpulse: number,
     solveProgress01?: number,
-    dtSec?: number
+    dtSec?: number,
+    rollQuat?: readonly [number, number, number, number] | THREE.Quaternion
   ) => void;
   setProgressUniforms: (checkpointsUnlocked: number, dowsingHint01: number) => void;
   setVictoryUniforms: (
@@ -272,7 +273,7 @@ export function createLabyrinthOptics(
   );
 
   // -------------------------------------------------------------------------
-  // Live 1536x256 Wet Yellow Ochre Trail DataTexture (linear scalar RGBA channels)
+  // Live 1536x512 Wet Yellow Ochre Trail DataTexture (2 tier rows x 6 faces)
   // -------------------------------------------------------------------------
   const wetTrailTexture = new THREE.DataTexture(
     wetAtlasData,
@@ -820,6 +821,7 @@ export function createLabyrinthOptics(
   const uBeadVelocityLocal = uniform(new THREE.Vector3(0, 0, 0));
   const uBeadNormalLocal = uniform(new THREE.Vector3(0, 1, 0));
   const uBeadImpact = uniform(0.0);
+  const uBeadRollQuat = uniform(new THREE.Vector4(0, 0, 0, 1));
 
   const beadRadiusFloat = float(beadRadius);
 
@@ -890,8 +892,22 @@ export function createLabyrinthOptics(
     ).toVarying('vBeadDeformedNormalLocal');
     beadMaterial.normalNode = transformNormalToView(normalize(deformedNormalVarying));
 
+    // Rotate sphere coordinates into bead-intrinsic frame via conjugate of uBeadRollQuat so no-slip spin reads cleanly
+    const pBeadUnit = normalize(positionGeometry);
+    const qConj = uBeadRollQuat.xyz.negate();
+    const tCross = cross(qConj, pBeadUnit).mul(2.0);
+    const pRolled = normalize(
+      pBeadUnit.add(tCross.mul(uBeadRollQuat.w)).add(cross(qConj, tCross))
+    );
+    const uvwBeadRoll = pRolled.mul(0.55).add(vec3(0.37, 0.71, 0.19));
+    const beadMicro = texture3DLevel(petroVolumeTex, fract(uvwBeadRoll.add(10.0)), float(0.0));
+    const rollGrain = beadMicro.r.mul(0.58).add(beadMicro.g.mul(0.42));
+    const rollMicroBand = smoothstep(float(0.28), float(0.76), rollGrain);
+    const rollLuster = mix(float(0.94), float(1.06), rollMicroBand);
+
     // Silver-quicksilver metallic albedo anchored strictly in boneCalcite neutrality
-    beadMaterial.colorNode = boneCalcite.rInf.mul(1.04);
+    beadMaterial.colorNode = boneCalcite.rInf.mul(1.04).mul(mix(float(0.97), float(1.03), rollMicroBand));
+    beadMaterial.roughnessNode = mix(float(0.042), float(0.115), rollMicroBand);
 
     // Procedural Studio Softbox Tent & Ochre/Cinnabar Trench Reflection Sheen
     const V = normalize(cameraPosition.sub(positionWorld));
@@ -960,7 +976,7 @@ export function createLabyrinthOptics(
       .add(softboxColor.mul(softboxMain.mul(1.18).add(zenithStrip).add(backRimStrip)))
       .add(coolSlateColor.mul(leftFillStrip));
 
-    beadMaterial.emissiveNode = studioEnv.mul(mercuryFresnel).mul(0.90);
+    beadMaterial.emissiveNode = studioEnv.mul(mercuryFresnel).mul(0.90).mul(rollLuster);
   }
 
   // -------------------------------------------------------------------------
@@ -974,7 +990,8 @@ export function createLabyrinthOptics(
     normalLocalVec,
     impactImpulse,
     solveProgress01 = 0,
-    dtSec = 1 / 60
+    dtSec = 1 / 60,
+    rollQuat
   ) => {
     const dt = Math.max(0.0005, Math.min(0.05, dtSec));
 
@@ -1003,6 +1020,16 @@ export function createLabyrinthOptics(
 
     uBeadImpact.value = ringAmplitude;
     uSolveProgress.value = Math.max(0, Math.min(1, solveProgress01));
+    if (rollQuat !== undefined) {
+      if (Array.isArray(rollQuat)) {
+        uBeadRollQuat.value.set(rollQuat[0], rollQuat[1], rollQuat[2], rollQuat[3]);
+      } else {
+        const rq = rollQuat as THREE.Quaternion;
+        uBeadRollQuat.value.set(rq.x, rq.y, rq.z, rq.w);
+      }
+    } else {
+      uBeadRollQuat.value.set(0, 0, 0, 1);
+    }
   };
 
   const setProgressUniforms: LabyrinthOpticsBundle['setProgressUniforms'] = (
