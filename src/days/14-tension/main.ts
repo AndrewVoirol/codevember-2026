@@ -215,13 +215,16 @@ export async function bootDay14Tension(): Promise<SpecimenStage> {
 
   stage.onTick(({ dtSec }) => {
     sim.step(dtSec);
+    const recoil = sim.getBallRecoil();
+    visuals.group.position.set(recoil[0], recoil[1], recoil[2]);
     visuals.syncFromSim(
       sim.getBandSpecs(),
       sim.getBandRuntimes(),
       sim.getDustPuffs(),
       sim,
       hoveredBandId,
-      dtSec
+      dtSec,
+      stage.camera.quaternion
     );
   });
 

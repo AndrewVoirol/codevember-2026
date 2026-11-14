@@ -11,14 +11,14 @@ const TOTAL_BANDS = 180;
 const NUM_LAYERS = 12;
 const CORE_RADIUS = 0.28;
 const OUTER_RADIUS = 0.95;
-const MAX_DUST_PUFFS = 64;
+const MAX_DUST_PUFFS = 384;
 const MAX_CASCADE_QUEUE = 16;
 
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
 const TWO_PI = Math.PI * 2;
-const STRAIN_PER_UNIT_PULL = 1.4;
-const TWANG_FREQ = 48.0;
-const TWANG_DAMP = 7.2;
+const STRAIN_PER_UNIT_PULL = 0.62;
+const TWANG_FREQ = 54.0;
+const TWANG_DAMP = 6.2;
 const GRAVITY = 4.8;
 
 const BAND_PIGMENTS: readonly PigmentKey[] = [
@@ -69,8 +69,13 @@ export class RubberBandBallSim {
 
   private activePullBandId: number | null = null;
   private snapCount = 0;
+  private simTimeSec = 0;
   private rng = createRng(20261114);
   private readonly seed: number;
+
+  // Damped spring recoil of the whole ball on each band pop
+  private readonly recoilPos: [number, number, number] = [0, 0, 0];
+  private readonly recoilVel: [number, number, number] = [0, 0, 0];
 
   // Pre-allocated scratch for zero-GC raycast & pull tracking
   private readonly scratchPoint: [number, number, number] = [0, 0, 0];
@@ -449,8 +454,8 @@ export class RubberBandBallSim {
     rt.snapU = uNorm;
     rt.leftArc = 0.5;
     rt.rightArc = 0.5;
-    rt.leftVel = (1.9 + strainFactor * 1.4) * (0.9 + this.rng() * 0.25);
-    rt.rightVel = (1.9 + strainFactor * 1.4) * (0.9 + this.rng() * 0.25);
+    rt.leftVel = (1.55 + strainFactor * 1.1) * (0.9 + this.rng() * 0.25);
+    rt.rightVel = (1.55 + strainFactor * 1.1) * (0.9 + this.rng() * 0.25);
     rt.curlAmount = 0;
     rt.pullAmount = 0;
     rt.twangAmp = 0;
@@ -463,13 +468,19 @@ export class RubberBandBallSim {
     const radY = this.scratchPoint[1] / pLen;
     const radZ = this.scratchPoint[2] / pLen;
 
-    const kick = fromPull ? 1.15 : 0.75;
+    const kick = fromPull ? 1.45 : 0.95;
     rt.fallOffset[0] = 0;
     rt.fallOffset[1] = 0;
     rt.fallOffset[2] = 0;
-    rt.fallVel[0] = -radX * kick + (this.rng() - 0.5) * 0.45;
-    rt.fallVel[1] = -radY * kick + 0.55;
-    rt.fallVel[2] = -radZ * kick + (this.rng() - 0.5) * 0.45;
+    rt.fallVel[0] = -radX * kick + (this.rng() - 0.5) * 0.55;
+    rt.fallVel[1] = -radY * kick + 0.65;
+    rt.fallVel[2] = -radZ * kick + (this.rng() - 0.5) * 0.55;
+
+    // Crisp recoil jolt on the whole ball opposite the snap point
+    const recoilImp = (fromPull ? 0.34 : 0.22) * (0.7 + strainFactor * 0.5);
+    this.recoilVel[0] -= radX * recoilImp;
+    this.recoilVel[1] -= radY * recoilImp;
+    this.recoilVel[2] -= radZ * recoilImp;
 
     this.spawnDustPuffs(
       this.scratchPoint[0],
@@ -480,6 +491,28 @@ export class RubberBandBallSim {
       radZ,
       spec.width
     );
+
+    // Sympathetic elastic shockwave twang across nearby intact bands
+    for (let i = 0; i < TOTAL_BANDS; i++) {
+      if (i === bandId) continue;
+      const nrt = this.runtimes[i];
+      if (nrt.status !== 'intact') continue;
+      const nspec = this.specs[i];
+      if (Math.abs(nspec.layer - spec.layer) > 3) continue;
+      const align = Math.abs(
+        nspec.normal[0] * spec.normal[0] +
+          nspec.normal[1] * spec.normal[1] +
+          nspec.normal[2] * spec.normal[2]
+      );
+      if (align > 0.35) {
+        nrt.twangAmp = Math.max(nrt.twangAmp, 0.032 + 0.028 * strainFactor * align);
+        nrt.twangPhase = 0;
+        nrt.pullU = uNorm;
+        nrt.pullDir[0] = radX;
+        nrt.pullDir[1] = radY;
+        nrt.pullDir[2] = radZ;
+      }
+    }
 
     this.snapCount++;
     this.recomputeCompression(bandId);
@@ -495,24 +528,27 @@ export class RubberBandBallSim {
     bandWidth: number
   ): void {
     let spawned = 0;
-    const targetCount = 5;
+    const targetCount = 24;
     for (let i = 0; i < MAX_DUST_PUFFS && spawned < targetCount; i++) {
       const puff = this.dustPuffs[i];
       if (puff.active) continue;
 
+      const isFineSpeck = spawned >= 16;
       puff.active = true;
-      puff.pos[0] = px + (this.rng() - 0.5) * bandWidth;
-      puff.pos[1] = py + (this.rng() - 0.5) * bandWidth;
-      puff.pos[2] = pz + (this.rng() - 0.5) * bandWidth;
+      const spread = bandWidth * (isFineSpeck ? 0.9 : 1.4);
+      puff.pos[0] = px + (this.rng() - 0.5) * spread;
+      puff.pos[1] = py + (this.rng() - 0.5) * spread;
+      puff.pos[2] = pz + (this.rng() - 0.5) * spread;
 
-      const speed = 0.45 + this.rng() * 0.75;
-      puff.vel[0] = nx * speed + (this.rng() - 0.5) * 0.5;
-      puff.vel[1] = ny * speed + (this.rng() - 0.5) * 0.5 + 0.2;
-      puff.vel[2] = nz * speed + (this.rng() - 0.5) * 0.5;
+      const speed = isFineSpeck ? 0.9 + this.rng() * 1.1 : 0.35 + this.rng() * 0.85;
+      const jitter = isFineSpeck ? 0.95 : 0.65;
+      puff.vel[0] = nx * speed + (this.rng() - 0.5) * jitter;
+      puff.vel[1] = ny * speed + (this.rng() - 0.5) * jitter + 0.12;
+      puff.vel[2] = nz * speed + (this.rng() - 0.5) * jitter;
 
       puff.ageSec = 0;
-      puff.maxAgeSec = 0.45 + this.rng() * 0.35;
-      puff.size = 0.025 + this.rng() * 0.03;
+      puff.maxAgeSec = isFineSpeck ? 0.28 + this.rng() * 0.25 : 0.55 + this.rng() * 0.45;
+      puff.size = isFineSpeck ? 0.005 + this.rng() * 0.006 : 0.016 + this.rng() * 0.022;
       spawned++;
     }
   }
@@ -520,6 +556,23 @@ export class RubberBandBallSim {
   public step(dtSec: number): void {
     const dt = Math.min(Math.max(dtSec, 0), 0.05);
     if (dt <= 0) return;
+    this.simTimeSec += dt;
+
+    // Damped spring recoil of the ball (leans toward active pull, snaps back on release/pop)
+    const kSpring = 180.0;
+    const kDamp = 15.0;
+    const activePull =
+      this.activePullBandId !== null ? this.runtimes[this.activePullBandId] : null;
+    const leanAmt =
+      activePull && activePull.status === 'pulled'
+        ? Math.min(0.09, activePull.pullAmount * 0.085)
+        : 0;
+    for (let a = 0; a < 3; a++) {
+      const targetPos = activePull ? activePull.pullDir[a] * leanAmt : 0;
+      const acc = -kSpring * (this.recoilPos[a] - targetPos) - kDamp * this.recoilVel[a];
+      this.recoilVel[a] += acc * dt;
+      this.recoilPos[a] += this.recoilVel[a] * dt;
+    }
 
     // 1. Process sympathetic cascade pops
     for (let i = 0; i < MAX_CASCADE_QUEUE; i++) {
@@ -585,8 +638,8 @@ export class RubberBandBallSim {
       }
     }
 
-    // 3. Update talcum dust puffs
-    const drag = Math.exp(-3.5 * dt);
+    // 3. Update talcum dust puffs (strong air drag so fine powder bursts then hangs)
+    const drag = Math.exp(-6.5 * dt);
     for (let i = 0; i < MAX_DUST_PUFFS; i++) {
       const puff = this.dustPuffs[i];
       if (!puff.active) continue;
@@ -651,9 +704,10 @@ export class RubberBandBallSim {
         const c = Math.cos(theta);
         const s = Math.sin(theta);
 
-        // Free ends curl away from the sphere into a relaxed C-loop
+        // Free ends whip radially outward off the sphere with a traveling elastic lash wave
         const endDist = Math.abs(frac - 0.5) * 2; // 0 at center, 1 at tips
-        const curlLift = curl * endDist * endDist * 0.14;
+        const whipWave = Math.sin(endDist * 7.0 - curl * 18.0) * 0.12 * endDist * (1 - curl * 0.45);
+        const curlLift = curl * endDist * endDist * 0.55 + Math.max(0, whipWave);
         const rad = r + curlLift;
 
         const base = k * 3;
@@ -670,6 +724,12 @@ export class RubberBandBallSim {
     const isPulled = rt.status === 'pulled' && rt.pullAmount > 0;
     const hasTwang = rt.twangAmp > 1e-4;
     const twangSin = hasTwang ? Math.sin(rt.twangPhase) * rt.twangAmp : 0;
+    const nearBreak = isPulled
+      ? Math.max(0, (rt.currentStrain - spec.breakStrain * 0.68) / (spec.breakStrain * 0.32 + 1e-4))
+      : 0;
+    const tremble = nearBreak > 0
+      ? Math.sin(this.simTimeSec * 72.0 + bandIndex * 2.1) * 0.015 * nearBreak
+      : 0;
 
     for (let k = 0; k <= SEGMENTS_PER_BAND; k++) {
       const u = k / SEGMENTS_PER_BAND;
@@ -677,16 +737,20 @@ export class RubberBandBallSim {
       const c = Math.cos(theta);
       const s = Math.sin(theta);
 
-      let px = r * (c * tu[0] + s * tv[0]);
-      let py = r * (c * tu[1] + s * tv[1]);
-      let pz = r * (c * tu[2] + s * tv[2]);
+      // Subtle crossing-bite indentation so bands visibly cinch into underlying layers
+      const bite = 1.0 - 0.016 * (0.5 + 0.5 * Math.sin(theta * 5.0 + bandIndex * 1.7)) * Math.cos(theta * 3.0 - bandIndex * 0.9);
+      const rBite = r * bite;
+
+      let px = rBite * (c * tu[0] + s * tv[0]);
+      let py = rBite * (c * tu[1] + s * tv[1]);
+      let pz = rBite * (c * tu[2] + s * tv[2]);
       let strain = rt.currentStrain;
 
       if (isPulled) {
         const d = shortestArcDist(u, rt.pullU);
-        const tent = Math.max(0, 1 - d / 0.22);
-        const vShape = Math.pow(tent, 1.35);
-        const disp = rt.pullAmount * vShape;
+        const tent = Math.max(0, 1 - d / 0.34);
+        const vShape = Math.pow(tent, 1.08);
+        const disp = (rt.pullAmount + tremble) * vShape;
         px += rt.pullDir[0] * disp;
         py += rt.pullDir[1] * disp;
         pz += rt.pullDir[2] * disp;
@@ -798,6 +862,10 @@ export class RubberBandBallSim {
 
   public getDustPuffs(): readonly DustPuff[] {
     return this.dustPuffs;
+  }
+
+  public getBallRecoil(): readonly [number, number, number] {
+    return this.recoilPos;
   }
 
   public getDiagnostics(): RubberBallDiagnostics {

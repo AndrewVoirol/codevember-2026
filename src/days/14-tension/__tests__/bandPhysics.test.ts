@@ -78,7 +78,7 @@ describe('RubberBandBallSim', () => {
     expect(rt.currentStrain).toBeGreaterThan(spec.restStrain);
 
     // Drag further in XY until it snaps
-    const snappedFar = sim.updatePull([0.5, 0.2, 0]);
+    const snappedFar = sim.updatePull([0.9, 0.3, 0]);
     expect(snappedFar).toBe(true);
     expect(rt.status).toBe('snapping');
     expect(sim.getDiagnostics().snapCount).toBe(1);

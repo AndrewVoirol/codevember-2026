@@ -200,11 +200,11 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
   createDay(
     14,
     'Tension',
-    'in-progress',
+    'complete',
     'tsl',
     'cinnabarVermilion',
     'rawUmber',
-    'Multi-layer mineral-dyed natural rubber band ball wrapped in 120 stratified great-circle straps around a knotted Raw Umber and Bone Calcite starter core, with stress-whitening stretch, compressive breathing, sympathetic cascade pops, and talcum bloom',
+    'Multi-layer mineral-dyed natural rubber band ball wrapped in 180 stratified great-circle straps around a knotted Raw Umber and Bone Calcite starter core, with stress-whitening stretch, compressive breathing, sympathetic cascade pops, and talcum bloom',
     'Drag any rubber band outward to stretch and whiten it until it snaps or release to twang back; click a band to nick and whip-curl it away in a burst of talcum dust; double-click or click the bare core to re-wrap'
   ),
   createDay(

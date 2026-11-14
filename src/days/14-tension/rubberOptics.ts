@@ -3,13 +3,16 @@ import {
   abs,
   attribute,
   clamp,
+  exp,
   float,
+  length,
   mix,
   positionLocal,
   select,
   smoothstep,
   step,
   uniform,
+  uv,
   vec3,
 } from 'three/tsl';
 import { CHALKY_SLATE_LINEAR, type PigmentKey } from '../../core/palette';
@@ -33,7 +36,7 @@ const VERTS_PER_RING = 4;
 const MAX_RINGS = SEGMENTS_PER_BAND + 1;
 const MAX_VERTS_PER_BAND = MAX_RINGS * VERTS_PER_RING;
 const MAX_INDICES_PER_BAND = SEGMENTS_PER_BAND * 4 * 6;
-const MAX_DUST_PUFFS = 256;
+const MAX_DUST_PUFFS = 384;
 
 // Pre-allocated scratch buffers for zero-GC syncFromSim
 const _posScratch = new Float32Array(MAX_RINGS * 3);
@@ -63,7 +66,8 @@ export interface RubberBallVisuals {
     puffs: readonly DustPuff[],
     sim: RubberBallSimReader,
     hoveredBandId: number | null,
-    dtSec: number
+    dtSec: number,
+    cameraQuat?: THREE.Quaternion
   ) => void;
   dispose: () => void;
 }
@@ -124,12 +128,12 @@ function createRubberBandMaterial(
   const grainedBody = baseBody.mul(float(0.92).add(crepeGrain.mul(0.16)));
 
   // Natural latex stress-whitening: paler & warmer with longitudinal stretch streaks
-  const strainFactor = smoothstep(0.16, 0.98, aStrain);
-  const stretchStreak = smoothstep(0.32, 0.78, stretchFiber);
+  const strainFactor = smoothstep(0.12, 0.88, aStrain);
+  const stretchStreak = smoothstep(0.28, 0.74, stretchFiber);
   const whitenMix = clamp(
-    strainFactor.mul(0.52).add(strainFactor.mul(stretchStreak).mul(0.24)),
+    strainFactor.mul(0.58).add(strainFactor.mul(stretchStreak).mul(0.28)),
     0.0,
-    0.76
+    0.84
   );
   const strainColor = mix(grainedBody, kaolin.rInf.mul(0.94), whitenMix);
 
@@ -397,25 +401,29 @@ export function createRubberBallVisuals(specs: readonly BandSpec[]): RubberBallV
     });
   }
 
-  // 3. Instanced talcum dust puffs
-  const puffGeom = new THREE.IcosahedronGeometry(1.0, 1);
+  // 3. Instanced billboarded talcum dust puffs (soft Gaussian + FBM wispy erosion)
+  const puffGeom = new THREE.PlaneGeometry(2.0, 2.0);
   const puffLifeArr = new Float32Array(MAX_DUST_PUFFS);
   const puffLifeAttr = new THREE.InstancedBufferAttribute(puffLifeArr, 1);
   puffLifeAttr.setUsage(THREE.DynamicDrawUsage);
   puffGeom.setAttribute('aPuffLife', puffLifeAttr);
 
-  const puffMat = new THREE.MeshStandardNodeMaterial({
-    roughness: 0.95,
-    metalness: 0.0,
+  const puffMat = new THREE.MeshBasicNodeMaterial({
     transparent: true,
     depthWrite: false,
+    side: THREE.DoubleSide,
   });
   const calcite = createPigmentUniforms('boneCalcite');
   const kaolin = createPigmentUniforms('warmKaolin');
   const aPuffLife = attribute('aPuffLife', 'float');
-  const puffGrain = mineralToothFbm(positionLocal, float(6.0));
-  puffMat.colorNode = mix(kaolin.rInf, calcite.rInf, puffGrain);
-  puffMat.opacityNode = aPuffLife.mul(aPuffLife).mul(0.65);
+  const uvCentered = uv().sub(0.5).mul(2.0);
+  const radialDist = length(uvCentered);
+  const puffWisp = mineralToothFbm(vec3(uvCentered, float(0.35)), float(3.8));
+  const softDisk = exp(radialDist.mul(radialDist).mul(-3.8)).mul(
+    smoothstep(1.0, 0.25, radialDist.add(puffWisp.sub(0.5).mul(0.45)))
+  );
+  puffMat.colorNode = mix(kaolin.rInf, calcite.rInf, puffWisp);
+  puffMat.opacityNode = softDisk.mul(aPuffLife).mul(aPuffLife).mul(0.42);
 
   const puffMesh = new THREE.InstancedMesh(puffGeom, puffMat, MAX_DUST_PUFFS);
   puffMesh.count = 0;
@@ -432,7 +440,8 @@ export function createRubberBallVisuals(specs: readonly BandSpec[]): RubberBallV
     puffs: readonly DustPuff[],
     sim: RubberBallSimReader,
     hoveredBandId: number | null,
-    dtSec: number
+    dtSec: number,
+    cameraQuat?: THREE.Quaternion
   ): void {
     elapsedSec += dtSec;
     uTime.value = elapsedSec;
@@ -536,11 +545,11 @@ export function createRubberBallVisuals(specs: readonly BandSpec[]): RubberBallV
         ry /= rOrthoLen;
         rz /= rOrthoLen;
 
-        // Poisson necking: width and thickness thin smoothly as strain rises above rest
+        // Poisson necking: width and thickness thin noticeably as strain rises above rest
         const strain = _strainScratch[r];
         const extraStrain = strain > spec.restStrain ? strain - spec.restStrain : 0.0;
-        const widthScale = Math.max(0.42, 1.0 / Math.sqrt(1.0 + extraStrain * 1.45));
-        const thickScale = Math.max(0.55, 1.0 / Math.sqrt(1.0 + extraStrain * 0.9));
+        const widthScale = Math.max(0.32, 1.0 / Math.sqrt(1.0 + extraStrain * 2.1));
+        const thickScale = Math.max(0.45, 1.0 / Math.sqrt(1.0 + extraStrain * 1.2));
         const hw = halfWBase * widthScale;
         const ht = halfTBase * thickScale;
 
@@ -580,9 +589,13 @@ export function createRubberBallVisuals(specs: readonly BandSpec[]): RubberBallV
       const life = 1.0 - p.ageSec / p.maxAgeSec;
       if (life <= 0.005) continue;
 
-      const s = p.size * (0.65 + (1.0 - life) * 1.35);
+      const s = p.size * (0.75 + (1.0 - life) * 2.1);
       _dummyPos.set(p.pos[0], p.pos[1], p.pos[2]);
-      _dummyQuat.identity();
+      if (cameraQuat) {
+        _dummyQuat.copy(cameraQuat);
+      } else {
+        _dummyQuat.identity();
+      }
       _dummyScale.set(s, s, s);
       _dummyMat.compose(_dummyPos, _dummyQuat, _dummyScale);
       puffMesh.setMatrixAt(activePuffs, _dummyMat);

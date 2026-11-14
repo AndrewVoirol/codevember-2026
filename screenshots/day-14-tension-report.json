@@ -1,0 +1,54 @@
+{
+  "day": 14,
+  "slug": "14-tension",
+  "expectedHeader": "Day 14 - Tension",
+  "domAudit": {
+    "headerText": "Day 14 - Tension",
+    "bodyBg": "rgb(33, 37, 41)",
+    "drawerCount": 30
+  },
+  "telemetry": {
+    "frameCount": 397,
+    "avgFrameMs": 8.34,
+    "p95FrameMs": 9.2,
+    "sceneState": {
+      "day": 14,
+      "slug": "14-tension",
+      "headerLabel": "Day 14 - Tension",
+      "frameCount": 397,
+      "cameraPos": [
+        0,
+        0.15000000000000005,
+        3.6
+      ],
+      "pointerWorld": [
+        0.2780473870405615,
+        -0.2193207949572115,
+        0.009138366456550528
+      ],
+      "pointerSpeed": 0,
+      "pointerDwellSec": 2.4557,
+      "pointerImpulse": 0.0006,
+      "totalBands": 180,
+      "intactCount": 180,
+      "snappingCount": 0,
+      "goneCount": 0,
+      "avgStrain": 0.3515480518434122,
+      "ballRadius": 0.9519743919372559,
+      "activePullBandId": null,
+      "snapCount": 0
+    }
+  },
+  "metrics": {
+    "specimenCoverageRatio": 0.3285,
+    "interactionMad": 7.079
+  },
+  "gpuErrors": [],
+  "gateFailures": [],
+  "artifacts": {
+    "contactSheet": "screenshots/day-14-tension-contact-sheet.png",
+    "initial": "screenshots/day-14-tension-initial.png",
+    "drawer": "screenshots/day-14-tension-drawer.png"
+  },
+  "passed": true
+}
