@@ -22,8 +22,9 @@ Always read `/Users/andrewvoirol/.gemini/config/skills/webgpu-interactive-simula
 2. **Rapid 1-Question Alignment (Only If Needed)**:
    - If the user already specified what they want to build, proceed directly to **Step 2**.
    - If the user only said `"Let's do Day 01 - Fold"`, present the pre-seeded concept from `SPECIMEN_CATALOG.md` alongside 1–2 tactile variations using `ask_question` (unbiased framing, no `(Recommended)` prefix, max 3 options).
-3. **Concept-Render Pivot Gate (Before Full Rewrites or Crowded Tropes)**:
-   - When a theme risks a cliché trope (e.g., rusty gears) or a first build doesn't land aesthetically, **do not jump straight into another 1,500-line 3D build**. Spawn 3–5 parallel `image-generator` concept renders framed on the `#212529` Chalky Slate studio stage and present them in a markdown carousel artifact first; once one resonates, treat that render as the locked anatomical/silhouette reference for the 3D specimen.
+3. **Visual-First Concept Renders & Fused Mockup Lock (Before `/plan`, `/swarm`, or Rewrites)**:
+   - When exploring multiple architectural directions, avoiding crowded tropes, or pivoting a build, spawn 3–5 parallel `image-generator` renders on the `#212529` Chalky Slate studio stage rather than pitching text-only descriptions or jumping straight into a 1,500-line 3D build.
+   - Whenever the user fuses two concepts (`Concept A + Concept B`) or invokes `/plan` + `/swarm`, generate a dedicated **fused Hero + Macro Detail mockup pair** *first* and embed it at the top of `implementation_plan.md` + every `/swarm` worker brief so geometry, material relief, and verifier parity share one locked visual reference.
 
 ---
 
@@ -77,6 +78,10 @@ npm run bench:optical -- --day <XX>
 ```
 
 Inspect the generated contact sheet at `screenshots/day-<XX>-<slug>-contact-sheet.png` using `read_file` to visually verify the specimen framing, mineral palette contrast against `#212529`, and unpaused pointer interaction response.
+- **Additional Gates for Multi-Face / Puzzle / `/swarm` Builds**:
+  1. **`1:1` Native-Pixel Material & Seam Crop**: Alongside `2×2` full-specimen contact sheets (which hide smooth/bitmap stone and octant DC seams), capture at least one `1:1` Retina micro-crop across carved ridges, vertical walls, and chamfers.
+  2. **Bounded-Rate Playability vs. BFS Teleport**: Verify interactive puzzles under bounded angular-rate tilting (`<= 2.5 rad/s`), never solely via instantaneous per-substep gravity-teleport helpers (`stepTowardSolution`).
+  3. **Multi-Orientation Corner/Junction Rest Settle**: Run `>= 90` unpaused frames with gravity parked into L-corners, T-junctions, and catch-basins asserting `edgeFlips === 0`, `maxPosDelta === 0`, and `speed === 0` after settling (`C^0` continuous position across all junction handoffs).
 
 ---
 

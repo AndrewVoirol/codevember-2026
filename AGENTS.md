@@ -53,6 +53,10 @@
    - Disable `receiveShadow` on porous hanging drapery/stalactites directly beneath overhanging bars when directional shadow maps would stamp a hard horizontal cutoff shelf across the organic form.
 6. **Hardware Metal Verification Before Marking Complete**:
    - Before setting a day's `status: 'complete'` in `src/core/manifest.ts`, run `npm run bench:optical -- --day <XX>` and visually inspect `screenshots/day-<XX>-<slug>-contact-sheet.png` to confirm `0` WebGPU/console errors, `avgFrameMs <= 16.6 ms`, and clear tactile pointer response.
+7. **3D Carved Stone Relief, Signed Cube-Face Masks & Multi-Tier Atlas Isolation**:
+   - Give carved stone/mineral monoliths authentic material weight via periodic **3D object-space petrography** (`Data3DTexture` / 3D triplanar clasts + normal-mapped ridge fracture) gated by a **surface-vs-groove relief mask**: rough chiseled outer blocks and wall faces paired with **honed, low-relief corridor/optical beds** so routes and wet glazes stay readable (never stretch 2D face-UV noise down vertical trench walls, and weld/overlap octant Dual-Contouring chunk boundaries so seams never appear on flat faces).
+   - Never project per-face bridge/feature masks onto a cube with unsigned `Math.abs(dot(axis, normal))`, which bleeds masks onto the antipodal opposite face (`+X <-> -X`, `+Y <-> -Y`, `+Z <-> -Z`) and punches holes in floor trails; always enforce signed `featureFace === domFace`.
+   - Whenever multi-tier geometry (e.g., `tier = 0` overpass bridge decks above `tier = 1` underpass tunnels) overlaps at the same `(face, u, v)`, split surface state/paint `DataTexture`s into **tier-isolated UV rows** (`tier = 0 -> v ∈ [0, 0.5]`, `tier = 1 -> [0.5, 1.0]`).
 
 ---
 
@@ -64,6 +68,12 @@
 2. **Gravitational Acceleration vs. `smoothstep` Braking**:
    - Never use `smoothstep` (`t²(3 - 2t)`) for gravity-driven falls, pendulums, or sequential hinge cascades—`smoothstep` brakes velocity to `0` right before contact (`t = 1`), creating robotic start-stop pauses.
    - Use gravitational acceleration curves ($\theta(t) = \pi \, t^\gamma$ with $\gamma \in [1.4, 1.7]$) that accelerate all the way into impact, paired with cascade overlap (`CASCADE_OVERLAP > 1.0`) and damped contact rebound so momentum transfers continuously across segments.
-3. **Zero Runaway Background Tasks**:
+3. **2-DOF Groove Tribology, Orthogonal Junction Continuity & V-Pocket Corner Rest**:
+   - Never fake perpendicular T-junction capture on a 1D spline with velocity-inverse score multipliers (which feel like magnetic/assisted steering) or apply global NDC pointer tilt while dragging. Simulate **2-DOF lateral groove play** (`latOffset`, `latSpeed`), wall-contact Coulomb drag, parabolic mouth capture vs. high-speed rim-skip ($w_{\text{cap}} = w_0 + k v^2$), rotating-frame inertial coupling, release-anchored hover bias, and no-slip `rollQuat` 3D surface luster spin.
+   - When combining a 1D edge graph with lateral offset (`centerline + latOffset * localBinormal`): (a) seat low-speed contacts (`vIn` and `maxUnblockedDrive` below threshold) in a **universal gravitational V-pocket rest** across **all** node degrees (`t = 0` and `t = 1` symmetric hold + `else { newSpeed = 0; }` axial static stop) so corners/T-walls never chatter across `edgeId` at `60–180 Hz`, and (b) bridge `90°` orthogonal `localBinormal` switches (`b_in ⊥ b_out`) with a tangent-plane `cornerBlendOffset` decayed strictly by **rolled arc-length** ($\exp(-d / L)$, never wall-clock `dt`).
+4. **Diegetic Puzzle Wayfinding & Non-Invasive Live Playtest Telemetry**:
+   - Keep zero-chrome puzzle specimens free of artificial keyboard brakes (`Space` hold) or HUD hints. Prevent punishing multi-face rollback diegetically via **one-way physical catch-basins/waystones**, subtle pigment temperature shifts (cool Celadon proximity wake), and a multi-stage kinetic/optical victory payoff.
+   - Expose read-only `window.__<SPECIMEN>__.getState()` diagnostics (exact node/edge, `localPos`, `quaternion`, velocities) and attach non-invasively via Chrome DevTools MCP `evaluate_script` (`0` reloads or state mutations) to observe live user bottlenecks directly when playtesting.
+5. **Zero Runaway Background Tasks**:
    - Only the local Vite dev server (`npm run dev`, `IsDaemon: true`) should remain running in the background. If any synchronous command (`git`, `curl`, `grep`, `bench:optical`) exceeds `WaitMsBeforeAsync` and backgrounds unexpectedly, immediately inspect or `kill` it via `manage_task` on the next turn.
    - Always pass `--exclude-dir={node_modules,.git,dist}` to recursive `grep`, and verify HTTP/DNS endpoints with `curl -sI --max-time 5` or `dig +short` rather than interactive `npx vercel` inspect commands.
