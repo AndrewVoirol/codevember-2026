@@ -93,10 +93,24 @@ describe('Day 13 — Labyrinth: Multi-Face Topology & Geodesic Invariants', () =
     expect(queue.length).toBe(topology.nodes.length);
   });
 
-  it('requires >= 22 edges, >= 4 cube faces, and >= 2 underpasses on the shortest geodesic', () => {
+  it('requires >= 22 edges, >= 4 cube faces, >= 2 underpasses, and >= 15 decision junctions across all acts', () => {
     expect(topology.solutionEdgePath.length).toBeGreaterThanOrEqual(22);
     expect(report.solutionFacesCount).toBeGreaterThanOrEqual(4);
     expect(report.solutionUnderpassCount).toBeGreaterThanOrEqual(2);
+    expect(report.solutionDecisionJunctions).toBeGreaterThanOrEqual(15);
+
+    const mid = Math.floor(topology.solutionNodePath.length / 2);
+    let secondHalfJunctions = 0;
+    let pyJunctions = 0;
+    for (let i = 0; i < topology.solutionNodePath.length - 1; i++) {
+      const nId = topology.solutionNodePath[i];
+      if (topology.adjacency[nId].length >= 3) {
+        if (i >= mid) secondHalfJunctions++;
+        if (topology.nodes[nId].face === 'py') pyJunctions++;
+      }
+    }
+    expect(secondHalfJunctions).toBeGreaterThanOrEqual(6);
+    expect(pyJunctions).toBeGreaterThanOrEqual(3);
 
     // Verify solutionNodePath & solutionEdgePath consistency
     expect(topology.solutionNodePath[0]).toBe(topology.startNodeId);
@@ -353,7 +367,7 @@ describe('Day 13 — Labyrinth: Physics, Spline Integration & Automated Solve', 
 
     const visitedUnderpasses = new Set<number>();
     let steps = 0;
-    const maxSteps = 2800; // <= 46.7 s real play time
+    const maxSteps = 4000; // <= 66.7 s real play time
 
     while (!sim.state.solved && steps < maxSteps) {
       const curEdge = topology.edges[sim.state.edgeId];
@@ -408,6 +422,29 @@ describe('Day 13 — Labyrinth: Physics, Spline Integration & Automated Solve', 
       if (maxR > 180) paintedFaces++;
     }
     expect(paintedFaces).toBe(6);
+  });
+
+  it('diverts passive boot gravity and pure -Y drop into decoy loops rather than auto-solving', () => {
+    const simHero = new LabyrinthBeadSimulator(topology);
+    const yaw = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -0.62);
+    const pitch = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), 0.7);
+    const roll = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), -0.52);
+    const heroInv = new THREE.Quaternion().copy(roll).multiply(pitch).multiply(yaw).normalize().invert();
+    const heroLocalG = new THREE.Vector3(0, -9.81, 0).applyQuaternion(heroInv);
+    const heroGrav: [number, number, number] = [heroLocalG.x, heroLocalG.y, heroLocalG.z];
+
+    for (let i = 0; i < 180; i++) {
+      simHero.step(1 / 60, heroGrav);
+    }
+    expect(simHero.state.solved).toBe(false);
+    expect(simHero.state.solveProgress01).toBeLessThan(0.12);
+
+    const simDown = new LabyrinthBeadSimulator(topology);
+    for (let i = 0; i < 180; i++) {
+      simDown.step(1 / 60, [0, -9.81, 0]);
+    }
+    expect(simDown.state.solved).toBe(false);
+    expect(simDown.state.solveProgress01).toBeLessThan(0.12);
   });
 
   it('maintains C1 tangent and normal continuity across surface, bevel-wrap, ramp, and underpass joints', () => {

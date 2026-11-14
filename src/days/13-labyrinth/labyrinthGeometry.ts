@@ -195,6 +195,8 @@ interface CarveEdgeData {
   segBz: Float32Array;
   extStart: number;
   extEnd: number;
+  colinearStart: boolean;
+  colinearEnd: boolean;
   minX: number;
   minY: number;
   minZ: number;
@@ -343,6 +345,7 @@ function buildBridgeVolumes(topology: LabyrinthTopology, gridPitch: number): Bri
 function getEdgeSampleTangentAtNode(
   edge: LabyrinthEdge,
   nodeId: number,
+  nodeNormal: readonly [number, number, number],
   out: [number, number, number]
 ): boolean {
   const kCount = Math.floor(edge.samplesPos.length / 3);
@@ -363,6 +366,10 @@ function getEdgeSampleTangentAtNode(
   } else {
     return false;
   }
+  const dn = dx * nodeNormal[0] + dy * nodeNormal[1] + dz * nodeNormal[2];
+  dx -= dn * nodeNormal[0];
+  dy -= dn * nodeNormal[1];
+  dz -= dn * nodeNormal[2];
   const len = Math.hypot(dx, dy, dz);
   if (len < 1e-6) return false;
   out[0] = dx / len;
@@ -406,27 +413,33 @@ function buildCarveEdges(
 
     let extStart = hw;
     let extEnd = hw;
-    if (getEdgeSampleTangentAtNode(e, e.from, tSelf)) {
+    let colinearStart = false;
+    let colinearEnd = false;
+    const fromNormal = topology.nodes[e.from].localNormal;
+    if (getEdgeSampleTangentAtNode(e, e.from, fromNormal, tSelf)) {
       const inc = nodeIncident[e.from];
       for (let j = 0; j < inc.length; j++) {
         const other = inc[j];
         if (other.id === e.id || (other.from === e.to && other.to === e.from)) continue;
-        if (getEdgeSampleTangentAtNode(other, e.from, tOther)) {
+        if (getEdgeSampleTangentAtNode(other, e.from, fromNormal, tOther)) {
           if (tSelf[0] * tOther[0] + tSelf[1] * tOther[1] + tSelf[2] * tOther[2] < -0.82) {
-            extStart = 0.004;
+            colinearStart = true;
+            extStart = 0.026;
             break;
           }
         }
       }
     }
-    if (getEdgeSampleTangentAtNode(e, e.to, tSelf)) {
+    const toNormal = topology.nodes[e.to].localNormal;
+    if (getEdgeSampleTangentAtNode(e, e.to, toNormal, tSelf)) {
       const inc = nodeIncident[e.to];
       for (let j = 0; j < inc.length; j++) {
         const other = inc[j];
         if (other.id === e.id || (other.from === e.to && other.to === e.from)) continue;
-        if (getEdgeSampleTangentAtNode(other, e.to, tOther)) {
+        if (getEdgeSampleTangentAtNode(other, e.to, toNormal, tOther)) {
           if (tSelf[0] * tOther[0] + tSelf[1] * tOther[1] + tSelf[2] * tOther[2] < -0.82) {
-            extEnd = 0.004;
+            colinearEnd = true;
+            extEnd = 0.026;
             break;
           }
         }
@@ -498,18 +511,28 @@ function buildCarveEdges(
       const dx = pos[b] - pos[a];
       const dy = pos[b + 1] - pos[a + 1];
       const dz = pos[b + 2] - pos[a + 2];
-      const len = Math.max(1e-6, Math.hypot(dx, dy, dz));
-      const tx = dx / len;
-      const ty = dy / len;
-      const tz = dz / len;
+
+      const nx = e.kind === 'ramp' ? n0x : 0.5 * (norm[a] + norm[b]);
+      const ny = e.kind === 'ramp' ? n0y : 0.5 * (norm[a + 1] + norm[b + 1]);
+      const nz = e.kind === 'ramp' ? n0z : 0.5 * (norm[a + 2] + norm[b + 2]);
+      let pdx = dx;
+      let pdy = dy;
+      let pdz = dz;
+      if (e.kind === 'ramp') {
+        const dn = pdx * nx + pdy * ny + pdz * nz;
+        pdx -= dn * nx;
+        pdy -= dn * ny;
+        pdz -= dn * nz;
+      }
+      const len = Math.max(1e-6, Math.hypot(pdx, pdy, pdz));
+      const tx = pdx / len;
+      const ty = pdy / len;
+      const tz = pdz / len;
       segTx[s] = tx;
       segTy[s] = ty;
       segTz[s] = tz;
       segLen[s] = len;
 
-      const nx = 0.5 * (norm[a] + norm[b]);
-      const ny = 0.5 * (norm[a + 1] + norm[b + 1]);
-      const nz = 0.5 * (norm[a + 2] + norm[b + 2]);
       const bvx = ny * tz - nz * ty;
       const bvy = nz * tx - nx * tz;
       const bvz = nx * ty - ny * tx;
@@ -581,6 +604,8 @@ function buildCarveEdges(
       segBz,
       extStart,
       extEnd,
+      colinearStart,
+      colinearEnd,
       minX,
       minY,
       minZ,
@@ -631,9 +656,15 @@ function evalCarveEdgeAirAndCoords(
       const vy = py - ay;
       const vz = pz - az;
       const sAlong = clamp(vx * tx + vy * ty + vz * tz, 0, len);
-      const rx = vx - sAlong * tx;
-      const ry = vy - sAlong * ty;
-      const rz = vz - sAlong * tz;
+      let rx = vx - sAlong * tx;
+      let ry = vy - sAlong * ty;
+      let rz = vz - sAlong * tz;
+      if (edge.kind === 'ramp') {
+        const rn = rx * edge.norm[0] + ry * edge.norm[1] + rz * edge.norm[2];
+        rx -= rn * edge.norm[0];
+        ry -= rn * edge.norm[1];
+        rz -= rn * edge.norm[2];
+      }
       const dSq = rx * rx + ry * ry + rz * rz;
       if (dSq < bestDistSq) {
         bestDistSq = dSq;
@@ -662,16 +693,31 @@ function evalCarveEdgeAirAndCoords(
   const dy = py - cy;
   const dz = pz - cz;
 
-  const h = dx * nx + dy * ny + dz * nz;
+  let h: number;
+  let hWall: number;
+  if (edge.kind === 'ramp') {
+    const fnx = edge.norm[0];
+    const fny = edge.norm[1];
+    const fnz = edge.norm[2];
+    const zRel = dx * fnx + dy * fny + dz * fnz;
+    const cosSlope = Math.max(0.65, nx * fnx + ny * fny + nz * fnz);
+    h = zRel * cosSlope;
+    hWall = Math.max(0, zRel);
+  } else {
+    h = dx * nx + dy * ny + dz * nz;
+    hWall = Math.max(0, h);
+  }
   const w = Math.abs(dx * edge.segBx[bestSeg] + dy * edge.segBy[bestSeg] + dz * edge.segBz[bestSeg]);
 
   let sOvershoot = 0;
   let extAllowed = 1.0;
+  let overshootColinear = false;
   if (bestSeg === 0 && bestT <= 0.0001) {
     const proj = -(dx * edge.segTx[0] + dy * edge.segTy[0] + dz * edge.segTz[0]);
     if (proj > 0) {
       sOvershoot = proj;
       extAllowed = edge.extStart;
+      overshootColinear = edge.colinearStart;
     }
   } else if (bestSeg === segCount - 1 && bestT >= 0.9999) {
     const last = segCount - 1;
@@ -679,19 +725,28 @@ function evalCarveEdgeAirAndCoords(
     if (proj > 0) {
       sOvershoot = proj;
       extAllowed = edge.extEnd;
+      overshootColinear = edge.colinearEnd;
     }
   }
 
   const flatDist = Math.hypot(w, sOvershoot);
+  const maxAbs = Math.max(Math.abs(px), Math.abs(py), Math.abs(pz));
+  const nearOuterRim = maxAbs - (H - 0.015);
+  const lipFlare = nearOuterRim > 0 ? Math.min(0.003, nearOuterRim * 0.45) : 0;
+  const hwFloor = hw - 0.003;
+  const hwProfile = Math.min(hw + 0.003, hwFloor + 0.015 * hWall + lipFlare);
 
   if (edge.kind === 'underpass') {
-    const hwArch = hw - 0.0035;
+    const hwArch = hw - 0.003;
     const wNorm = Math.min(1.0, w / hwArch);
     const hCeil = ARCH_SPRING_H + (ARCH_CROWN_H - ARCH_SPRING_H) * Math.sqrt(Math.max(0, 1 - wNorm * wNorm));
 
-    const hwProfile = hw - 0.0035 + 0.015 * Math.max(0, h);
     const latAir = hwProfile - w;
-    const endAir = extAllowed === 1.0 ? 1.0 : extAllowed - sOvershoot;
+    const endProfileU =
+      extAllowed > 0.03
+        ? Math.min(extAllowed + 0.003, extAllowed - 0.003 + 0.015 * hWall + lipFlare)
+        : extAllowed + 0.015 * hWall + lipFlare;
+    const endAir = extAllowed === 1.0 ? 1.0 : endProfileU - sOvershoot;
     const wallAir = sOvershoot > 0 && extAllowed < 0.99 ? Math.min(latAir, endAir) : latAir;
     const openTrenchAir = smin(wallAir, h, 0.004);
 
@@ -722,27 +777,28 @@ function evalCarveEdgeAirAndCoords(
     return { air, h, flatDist };
   }
 
-  const hwFloor = hw - 0.003;
-  const hPos = Math.max(0, h);
-  const maxAbs = Math.max(Math.abs(px), Math.abs(py), Math.abs(pz));
-  const nearOuterRim = maxAbs - (H - 0.015);
-  const lipFlare = nearOuterRim > 0 ? Math.min(0.003, nearOuterRim * 0.45) : 0;
-  const hwProfile = Math.min(hw + 0.003, hwFloor + 0.015 * hPos + lipFlare);
-
   const dLat = hwProfile - w;
   let dHoriz = dLat;
   if (sOvershoot > 0) {
-    const endProfile = extAllowed + (extAllowed > 0.02 ? 0.015 * hPos + lipFlare : 0);
-    const dEnd = endProfile - sOvershoot;
-    if (dLat < 0 && dEnd < 0) {
-      dHoriz = -Math.sqrt(dLat * dLat + dEnd * dEnd);
+    if (overshootColinear) {
+      const endProfile = extAllowed + 0.015 * hWall + lipFlare;
+      dHoriz = Math.min(dLat, endProfile - sOvershoot);
     } else {
-      const rCorner = 0.005;
-      const qx = -dLat - rCorner;
-      const qy = -dEnd - rCorner;
-      const qxp = qx > 0 ? qx : 0;
-      const qyp = qy > 0 ? qy : 0;
-      dHoriz = -(Math.sqrt(qxp * qxp + qyp * qyp) + Math.min(Math.max(qx, qy), 0) - rCorner);
+      const endProfile =
+        extAllowed > 0.03
+          ? Math.min(extAllowed + 0.003, extAllowed - 0.003 + 0.015 * hWall + lipFlare)
+          : extAllowed;
+      const dEnd = endProfile - sOvershoot;
+      if (dLat < 0 && dEnd < 0) {
+        dHoriz = -Math.sqrt(dLat * dLat + dEnd * dEnd);
+      } else {
+        const rCorner = 0.005;
+        const qx = -dLat - rCorner;
+        const qy = -dEnd - rCorner;
+        const qxp = qx > 0 ? qx : 0;
+        const qyp = qy > 0 ? qy : 0;
+        dHoriz = -(Math.sqrt(qxp * qxp + qyp * qyp) + Math.min(Math.max(qx, qy), 0) - rCorner);
+      }
     }
   }
 
@@ -918,13 +974,13 @@ function evalPocketCarveAirForBasis(
 ): number {
   const uCoord = px * basis.ux + py * basis.uy + pz * basis.uz;
   const vCoord = px * basis.vx + py * basis.vy + pz * basis.vz;
-  const dClear = samplePocketClearance(grid, uCoord, vCoord);
-  if (dClear <= -0.025) return -1.0;
+  const dPocket = samplePocketClearance(grid, uCoord, vCoord) - 0.056;
+  if (dPocket <= -0.025) return -1.0;
 
   const faceCoord = px * basis.nx + py * basis.ny + pz * basis.nz;
   const depthFromSurface = H - faceCoord;
-  const shelfAir = Math.min(dClear, 0.075 - depthFromSurface);
-  const wellAir = Math.min(dClear - 0.038, 0.135 - depthFromSurface);
+  const shelfAir = smin(dPocket, 0.075 - depthFromSurface, 0.005);
+  const wellAir = smin(dPocket - 0.036, 0.135 - depthFromSurface, 0.005);
   return Math.max(shelfAir, wellAir);
 }
 
@@ -951,7 +1007,7 @@ function solveQef3x3(
   out: Float32Array,
   outOffset: number
 ): void {
-  const reg = 0.0004 * Math.max(1, count);
+  const reg = 0.028 * Math.max(1, count);
   const m00 = axx + reg;
   const m01 = axy;
   const m02 = axz;
@@ -1183,7 +1239,8 @@ function evalExactLocalFiltered(
     const h = dx * s.nx + dy * s.ny + dz * s.nz;
     const r = Math.sqrt(Math.max(0, dx * dx + dy * dy + dz * dz - h * h));
     const air = Math.min(s.radius + Math.max(0, h - s.flareStartH) * s.coneSlope - r, h - s.depthOffset);
-    if (air > sdf) sdf = air;
+    const smaxAir = -smin(-sdf, -air, 0.009);
+    if (smaxAir > sdf) sdf = smaxAir;
   }
 
   return sdf;
@@ -1365,7 +1422,8 @@ function bakeMonolithSdf(
           const h = dx * s.nx + dy * s.ny + dz * s.nz;
           const r = Math.sqrt(Math.max(0, dx * dx + dy * dy + dz * dz - h * h));
           const air = Math.min(s.radius + Math.max(0, h - s.flareStartH) * s.coneSlope - r, h - s.depthOffset);
-          if (air > sdfGrid[idx]) sdfGrid[idx] = air;
+          const smaxAir = -smin(-sdfGrid[idx], -air, 0.009);
+          if (smaxAir > sdfGrid[idx]) sdfGrid[idx] = smaxAir;
         }
       }
     }
@@ -1509,7 +1567,7 @@ function solveQefCells(
   qefBuf.fill(0, 0, activeCellCount * 13);
   const n2 = EDGE_BIN_N * EDGE_BIN_N;
   const invBinStep = EDGE_BIN_N / DC_SPAN;
-  const cellPad = dcStep * 0.015;
+  const cellPad = dcStep * 0.12;
   const h = 0.002 * INV_SQRT3;
   const hPad = h + 0.0002;
   const inv4h = 0.25 / h;
@@ -1924,38 +1982,25 @@ function computeCellAoAndZones(
           const dotFace = nx * br.face.nx + ny * br.face.ny + nz * br.face.nz;
           if (depthIn < underpassDepth - 0.035) {
             isBridgeArchBody = true;
-            if (dotFace < 0.25) isUnderpassSoffit = true;
+            if (dotFace < -0.55 && aUnder <= br.halfSpan - 0.012 && aOver <= hw + 0.02) {
+              isUnderpassSoffit = true;
+            }
           }
         }
       }
 
-      if (pocketClr > -0.028 && depthIn > 0.042) {
+      const pocketD = pocketClr - 0.056;
+      if (pocketD > -0.004 && depthIn > 0.042) {
         const depthFade = clamp((depthIn - 0.040) / 0.014, 0, 1);
-        const clrFade = clamp((pocketClr + 0.028) / 0.014, 0, 1);
+        const clrFade = clamp((pocketD + 0.004) / 0.014, 0, 1);
         basalt = Math.max(basalt, depthFade * clrFade);
       }
-      if (!isBridgeArchBody && depthIn > surfaceDepth + 0.016) {
-        const s = clamp((depthIn - (surfaceDepth + 0.012) + (fNoise - 0.5) * 0.020) / 0.024, 0, 1);
+      if (!isBridgeArchBody && depthIn > surfaceDepth + 0.055) {
+        const s = clamp((depthIn - (surfaceDepth + 0.048) + (fNoise - 0.5) * 0.018) / 0.032, 0, 1);
         basalt = Math.max(basalt, s);
       }
-      if (!isBridgeArchBody && depthIn > 0.055 && fNoise > 0.66) {
-        const outcrop = clamp((fNoise - 0.66) / 0.16, 0, 1) * clamp((depthIn - 0.055) / 0.045, 0, 1);
-        basalt = Math.max(basalt, outcrop * 0.85);
-      }
 
-      const recessFactor = clamp((depthIn - 0.065) / 0.070, 0, 1);
-      const cornerAoMask = clamp((0.50 - ao) / 0.22, 0, 1);
-      const seamMask = ao < 0.62 ? clamp((0.022 - dNear) / 0.008, 0, 1) * 0.75 : 0;
-      const organicVein = clamp(fNoise * 1.65 - 0.30, 0, 1);
-      patina = Math.max(cornerAoMask, seamMask) * recessFactor * organicVein;
-      if (ao >= 0.62 && !isUnderpassSoffit) {
-        patina = Math.min(patina, 0.08);
-      }
-      if (isUnderpassSoffit) {
-        patina = Math.max(patina, 0.45 + 0.55 * organicVein);
-      }
-
-      // Compute strict corridor floorMask so wet Yellow Ochre trail stays off walls & top plateaus
+      // Compute strict corridor floorMask first so wet Yellow Ochre trail stays off walls and floor suppresses cyan patina
       if (depthIn >= 0.085 && !isUnderpassSoffit) {
         const bxIdx = clamp(Math.floor((px - DC_MIN) * invBinStep), 0, EDGE_BIN_N - 1);
         const byIdx = clamp(Math.floor((py - DC_MIN) * invBinStep), 0, EDGE_BIN_N - 1);
@@ -1980,6 +2025,19 @@ function computeCellAoAndZones(
             if (fM > floorMask) floorMask = fM;
           }
         }
+      }
+
+      const floorSuppress = 1.0 - clamp(floorMask * 1.35, 0, 1);
+      const recessFactor = clamp((depthIn - 0.075) / 0.065, 0, 1);
+      const cornerAoMask = clamp((0.46 - ao) / 0.20, 0, 1);
+      const seamMask = ao < 0.54 ? clamp((0.018 - dNear) / 0.007, 0, 1) * 0.65 : 0;
+      const organicVein = clamp(fNoise * 1.45 - 0.22, 0, 1);
+      patina = Math.max(cornerAoMask, seamMask) * recessFactor * organicVein * 0.52 * floorSuppress;
+      if (ao >= 0.54 && !isUnderpassSoffit) {
+        patina = Math.min(patina, 0.03);
+      }
+      if (isUnderpassSoffit) {
+        patina = Math.max(patina, 0.16 + 0.22 * organicVein);
       }
     }
 
@@ -2331,9 +2389,9 @@ function buildSockets(topology: LabyrinthTopology): SocketRecess[] {
       nx: goalNode.localNormal[0],
       ny: goalNode.localNormal[1],
       nz: goalNode.localNormal[2],
-      radius: 0.106,
-      flareStartH: 0.025,
-      coneSlope: 0.41,
+      radius: 0.082,
+      flareStartH: 0.045,
+      coneSlope: 0.10,
       depthOffset: -0.024,
       minX: goalNode.localPos[0] - 0.180,
       minY: goalNode.localPos[1] - 0.180,
@@ -2349,8 +2407,8 @@ function buildSockets(topology: LabyrinthTopology): SocketRecess[] {
       nx: startNode.localNormal[0],
       ny: startNode.localNormal[1],
       nz: startNode.localNormal[2],
-      radius: 0.094,
-      flareStartH: 0.0,
+      radius: 0.074,
+      flareStartH: 0.010,
       coneSlope: 0.08,
       depthOffset: -0.020,
       minX: startNode.localPos[0] - 0.120,
@@ -2644,8 +2702,8 @@ function buildStartSpringGeometry(topology: LabyrinthTopology): THREE.BufferGeom
     [0.046, 0.018, 0.35, 0.65],
     [0.052, 0.022, 0.85, 0.15],
     [0.066, 0.021, 1.0, 0.0],
-    [0.074, 0.008, 1.0, 0.0],
-    [0.076, -0.024, 1.0, 0.0],
+    [0.076, 0.009, 1.0, 0.0],
+    [0.079, -0.024, 1.0, 0.0],
     [0.0, -0.024, 1.0, 0.0],
   ];
 

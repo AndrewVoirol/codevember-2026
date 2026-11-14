@@ -18,13 +18,13 @@ export const DEAD_END_RESTITUTION = 0.28;
 export const MAX_SUBSTEP_DT = 1 / 180;
 export const SOLVER_GRAVITY_MAGNITUDE = 9.81;
 
-const ROLLING_LINEAR_DRAG = 0.20;
-const ROLLING_QUAD_DRAG = 1.65;
+const ROLLING_LINEAR_DRAG = 0.22;
+const ROLLING_QUAD_DRAG = 2.15;
 const CORNER_RETENTION_BASE = 0.82;
 const BRUSH_TEXEL_RADIUS = 6.0;
-const RAMP_CLIMB_RESISTANCE_ATTEN = 0.36;
+const RAMP_CLIMB_RESISTANCE_ATTEN = 0.46;
 const JUNCTION_AXIAL_STEER_DT = 0.045;
-const JUNCTION_LATERAL_STEER_DT = 0.25;
+const JUNCTION_LATERAL_STEER_DT = 0.30;
 const IGNITE_SUBSAMPLES_PER_EDGE = 8;
 
 function clamp(v: number, min: number, max: number): number {
@@ -704,7 +704,7 @@ export class LabyrinthBeadSimulator {
 
           const axialSteerDt = Math.max(dtSub, JUNCTION_AXIAL_STEER_DT);
           const lateralSteerDt =
-            gPerp > 1.6 && gAxial < gPerp * 1.15
+            gPerp > 2.2 && gAxial < gPerp * 0.85
               ? Math.max(dtSub, JUNCTION_LATERAL_STEER_DT)
               : axialSteerDt;
 
@@ -833,11 +833,10 @@ export class LabyrinthBeadSimulator {
         gy = ty;
         gz = tz;
 
-        // Look ahead 1-2 edges for T-junction / multi-way turns so approach speed stays controllable
-        let needsBrake = false;
-        let turnX = tx;
-        let turnY = ty;
-        let turnZ = tz;
+        // Look ahead 1-2 edges for T-junction / multi-way turns with smooth corner banking
+        const isClimbingRamp =
+          curEdge.kind === 'ramp' &&
+          this.topology.nodes[curEdge.from].tier > this.topology.nodes[curEdge.to].tier;
 
         if (curEdge.to !== goalNodeId) {
           const nextEdgeId = this.nextEdgeToGoal[curEdge.to];
@@ -854,17 +853,19 @@ export class LabyrinthBeadSimulator {
 
             const deg = this.topology.adjacency[curEdge.to].length;
             if (deg >= 3 && cosTurn < 0.65) {
-              // Multi-way junction turn: keep speed <= 0.24 so steerDt * g dominates straight decoys
-              turnX = nx;
-              turnY = ny;
-              turnZ = nz;
-              const distLeft = (1.0 - this.state.t) * this.edgeBeadLen[this.state.edgeId];
-              const stopDist = (this.state.speed * this.state.speed) / (2 * ROLLING_GRAVITY_FACTOR * SOLVER_GRAVITY_MAGNITUDE);
-              if (this.state.speed > 0.24 && (stopDist * 1.35 >= distLeft || this.state.t > 0.35)) {
-                needsBrake = true;
+              if (isClimbingRamp) {
+                if (this.state.t > 0.55) {
+                  gx = tx * 0.35 + nx * 0.95;
+                  gy = ty * 0.35 + ny * 0.95;
+                  gz = tz * 0.35 + nz * 0.95;
+                }
+              } else {
+                const checkAxial = this.state.speed > 0.65 ? -0.35 : 0.30;
+                gx = tx * checkAxial + nx * 0.95;
+                gy = ty * checkAxial + ny * 0.95;
+                gz = tz * checkAxial + nz * 0.95;
               }
-            } else {
-              // Check one node further ahead in case high speed needs braking before entering the edge before a T-turn
+            } else if (!isClimbingRamp) {
               const nextEdge = edges[nextEdgeId];
               if (nextEdge.to !== goalNodeId) {
                 const next2Id = this.nextEdgeToGoal[nextEdge.to];
@@ -875,17 +876,14 @@ export class LabyrinthBeadSimulator {
                     this.edgeEndTan[n1EndOff + 0] * this.edgeStartTan[n2Off + 0] +
                     this.edgeEndTan[n1EndOff + 1] * this.edgeStartTan[n2Off + 1] +
                     this.edgeEndTan[n1EndOff + 2] * this.edgeStartTan[n2Off + 2];
-                  if (cosTurn2 < 0.65 && this.state.speed > 1.25) {
-                    needsBrake = true;
+                  if (cosTurn2 < 0.65 && this.state.t > 0.40) {
+                    const preW = ((this.state.t - 0.40) / 0.60) * 0.55;
+                    gx = tx * (1 - preW * 0.4) + this.edgeStartTan[n2Off + 0] * preW;
+                    gy = ty * (1 - preW * 0.4) + this.edgeStartTan[n2Off + 1] * preW;
+                    gz = tz * (1 - preW * 0.4) + this.edgeStartTan[n2Off + 2] * preW;
                   }
                 }
               }
-            }
-
-            if (needsBrake) {
-              gx = -tx + turnX * 0.25;
-              gy = -ty + turnY * 0.25;
-              gz = -tz + turnZ * 0.25;
             } else if (this.state.t > 0.65) {
               const blend = (this.state.t - 0.65) / 0.35;
               const wNext = 0.35 + 0.65 * blend;
