@@ -3,8 +3,15 @@ import { getDayByNumber } from '../../core/manifest';
 import { SpecimenStage } from '../../core/stage/SpecimenStage';
 import { createLabyrinthTopology } from './labyrinthTopology';
 import { LabyrinthBeadSimulator } from './labyrinthPhysics';
-import { createLabyrinthGeometries } from './labyrinthGeometry';
+import {
+  buildVaultOctantGeometries,
+  createLabyrinthGeometries,
+  hydrateVaultOctantGeometries,
+  type VaultOctantsRawPayload,
+  type VaultOctantsResult,
+} from './labyrinthGeometry';
 import { createLabyrinthOptics } from './labyrinthOptics';
+import { createLabyrinthCenterpiece } from './labyrinthCenterpiece';
 
 const DEFAULT_CAM_POS: readonly [number, number, number] = [0, 0.12, 4.35];
 const MIN_CAM_DIST = 2.45;
@@ -43,6 +50,13 @@ const _beadVelScratch: [number, number, number] = [0, 0, 0];
 const _clickRaycaster = new THREE.Raycaster();
 const _clickNdc = new THREE.Vector2();
 const _sanctumHits: THREE.Intersection[] = [];
+const _octTiltAxis = new THREE.Vector3();
+const _orbitTargetPos = new THREE.Vector3();
+const _orbitTargetVel = new THREE.Vector3();
+const _orbitNormal = new THREE.Vector3();
+const _descentStartPos = new THREE.Vector3();
+
+export type LabyrinthVictoryPhase = 'playing' | 'ignition' | 'opening' | 'revealed';
 
 export interface LabyrinthTelemetryState {
   edgeId: number;
@@ -54,6 +68,8 @@ export interface LabyrinthTelemetryState {
   impactImpulse: number;
   solved: boolean;
   solveProgress01: number;
+  victoryPhase: LabyrinthVictoryPhase;
+  vaultOpen01: number;
   startNodeId: number;
   goalNodeId: number;
   nearestNodeId: number;
@@ -82,6 +98,14 @@ function buildDefaultIsoQuaternion(out: THREE.Quaternion): THREE.Quaternion {
   return out.copy(_rollQuat).multiply(_pitchQuat).multiply(_yawQuat).normalize();
 }
 
+function buildVictoryWindowQuaternion(out: THREE.Quaternion): THREE.Quaternion {
+  // Look into the front crux aperture so all 8 parting stone octants frame the astrolabe unobstructed
+  _yawQuat.setFromAxisAngle(_yAxis, -0.20);
+  _pitchQuat.setFromAxisAngle(_xAxis, 0.20);
+  _rollQuat.setFromAxisAngle(_zAxis, -0.32);
+  return out.copy(_rollQuat).multiply(_pitchQuat).multiply(_yawQuat).normalize();
+}
+
 function projectToTrackball(nx: number, ny: number, out: THREE.Vector3): THREE.Vector3 {
   const r2 = TRACKBALL_RADIUS * TRACKBALL_RADIUS;
   const d2 = nx * nx + ny * ny;
@@ -107,20 +131,28 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
   stage.camera.updateMatrixWorld();
 
   // Tighten shadow frustum, shift key light toward +Z/+Y, and boost +Z/-X fill light so bead & trail read brightly
+  let keyDirLight: THREE.DirectionalLight | null = null;
+  let shadowHalfSpan = 1.48;
+  const applyShadowHalfSpan = (span: number): void => {
+    if (!keyDirLight) return;
+    shadowHalfSpan = span;
+    keyDirLight.shadow.camera.left = -span;
+    keyDirLight.shadow.camera.right = span;
+    keyDirLight.shadow.camera.top = span;
+    keyDirLight.shadow.camera.bottom = -span;
+    keyDirLight.shadow.camera.updateProjectionMatrix();
+    keyDirLight.shadow.needsUpdate = true;
+  };
+
   stage.scene.traverse((obj) => {
     if (obj instanceof THREE.DirectionalLight) {
       if (obj.castShadow) {
+        keyDirLight = obj;
         obj.position.set(0.6, 4.4, 4.2);
-        obj.shadow.mapSize.set(2048, 2048);
-        const halfSpan = 1.48;
-        obj.shadow.camera.left = -halfSpan;
-        obj.shadow.camera.right = halfSpan;
-        obj.shadow.camera.top = halfSpan;
-        obj.shadow.camera.bottom = -halfSpan;
+        obj.shadow.mapSize.set(1024, 1024);
         obj.shadow.bias = -0.0003;
         obj.shadow.normalBias = 0.006;
-        obj.shadow.camera.updateProjectionMatrix();
-        obj.shadow.needsUpdate = true;
+        applyShadowHalfSpan(1.48);
       } else if (obj.position.z > 0) {
         obj.intensity = 1.15;
       }
@@ -159,6 +191,23 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
   startSpringMesh.receiveShadow = true;
   monolithGroup.add(startSpringMesh);
 
+  const centerpiece = createLabyrinthCenterpiece(stage, optics.beadMaterial);
+  centerpiece.group.visible = false;
+  monolithGroup.add(centerpiece.group);
+
+  const vaultGroup = new THREE.Group();
+  vaultGroup.name = 'VaultCleavageOctants';
+  vaultGroup.visible = false;
+  monolithGroup.add(vaultGroup);
+
+  const octantGroups: THREE.Group[] = [];
+  for (let oi = 0; oi < 8; oi++) {
+    const octG = new THREE.Group();
+    octG.name = `VaultOctant_${oi}`;
+    vaultGroup.add(octG);
+    octantGroups.push(octG);
+  }
+
   const beadMesh = new THREE.Mesh(beadGeometry, optics.beadMaterial);
   beadMesh.name = 'QuicksilverBead';
   beadMesh.castShadow = true;
@@ -172,6 +221,7 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
   let targetCamDist = defaultCamDist;
 
   const defaultIsoQuat = buildDefaultIsoQuaternion(new THREE.Quaternion());
+  const victoryWindowQuat = buildVictoryWindowQuaternion(new THREE.Quaternion());
   const baseQuat = defaultIsoQuat.clone();
   let isDragging = false;
   let activePointerId: number | null = null;
@@ -181,7 +231,84 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
   let hoverYaw = 0;
   let hoverPitch = 0;
 
+  let victoryPhase: LabyrinthVictoryPhase = 'playing';
+  let victoryElapsedSec = 0;
+  let vaultOpen01 = 0;
+  let waveCompleted = false;
+  let camEasedOnOpen = false;
+  let userDraggedDuringVictory = false;
+  let disposed = false;
+  let octantsBuilt = false;
+  let octantsResult: VaultOctantsResult | null = null;
+  let octantWorker: Worker | null = null;
+  let workerTimerId: ReturnType<typeof setTimeout> | null = null;
+
   const sanctumClickTargets: THREE.Object3D[] = [sanctumMesh, beadMesh];
+
+  const mountVaultOctants = (result: VaultOctantsResult): void => {
+    if (disposed || octantsBuilt) return;
+    octantsBuilt = true;
+    octantsResult = result;
+    for (let oi = 0; oi < result.octantGeometries.length; oi++) {
+      const m = new THREE.Mesh(result.octantGeometries[oi], optics.stoneMaterial);
+      m.castShadow = true;
+      m.receiveShadow = true;
+      octantGroups[oi].add(m);
+    }
+
+    const sanctumHalfPosZMesh = new THREE.Mesh(result.sanctumHalfPosZGeometry, optics.sanctumMaterial);
+    sanctumHalfPosZMesh.castShadow = false;
+    sanctumHalfPosZMesh.receiveShadow = true;
+    octantGroups[7].add(sanctumHalfPosZMesh);
+
+    const sanctumHalfNegZMesh = new THREE.Mesh(result.sanctumHalfNegZGeometry, optics.sanctumMaterial);
+    sanctumHalfNegZMesh.castShadow = false;
+    sanctumHalfNegZMesh.receiveShadow = true;
+    octantGroups[6].add(sanctumHalfNegZMesh);
+
+    const startSpringVaultMesh = new THREE.Mesh(startSpringGeometry, optics.startSpringMaterial);
+    startSpringVaultMesh.castShadow = false;
+    startSpringVaultMesh.receiveShadow = true;
+    octantGroups[3].add(startSpringVaultMesh);
+
+    sanctumClickTargets.push(sanctumHalfPosZMesh, sanctumHalfNegZMesh, ...centerpiece.clickTargets);
+  };
+
+  const ensureVaultOctantsBuiltSync = (): void => {
+    if (!octantsBuilt && !disposed) {
+      mountVaultOctants(buildVaultOctantGeometries(topology));
+    }
+  };
+
+  workerTimerId = setTimeout(() => {
+    workerTimerId = null;
+    if (disposed || octantsBuilt) return;
+    if (typeof Worker !== 'undefined') {
+      try {
+        octantWorker = new Worker(new URL('./vaultOctants.worker.ts', import.meta.url), {
+          type: 'module',
+        });
+        octantWorker.onmessage = (
+          ev: MessageEvent<{ type: string; payload: VaultOctantsRawPayload }>
+        ) => {
+          if (ev.data?.type === 'ready') {
+            if (!disposed && !octantsBuilt) {
+              mountVaultOctants(hydrateVaultOctantGeometries(ev.data.payload));
+            }
+            octantWorker?.terminate();
+            octantWorker = null;
+          }
+        };
+        octantWorker.onerror = () => {
+          octantWorker?.terminate();
+          octantWorker = null;
+        };
+        octantWorker.postMessage({ type: 'build' });
+      } catch {
+        octantWorker = null;
+      }
+    }
+  }, 60);
 
   monolithGroup.quaternion.copy(baseQuat);
 
@@ -206,8 +333,29 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
 
   const resetAll = () => {
     simulator.reset();
+    victoryPhase = 'playing';
+    victoryElapsedSec = 0;
+    vaultOpen01 = 0;
+    waveCompleted = false;
+    camEasedOnOpen = false;
+    userDraggedDuringVictory = false;
+    optics.setVictoryUniforms(0, 0);
     optics.wetTrailTexture.needsUpdate = true;
     simulator.wetAtlasDirty = false;
+
+    monolithGroup.position.set(0, 0, 0);
+    monolithMesh.visible = true;
+    sanctumMesh.visible = true;
+    startSpringMesh.visible = true;
+    vaultGroup.visible = false;
+    centerpiece.group.visible = false;
+    centerpiece.update(0, 0, 0);
+    for (let oi = 0; oi < 8; oi++) {
+      octantGroups[oi].position.set(0, 0, 0);
+      octantGroups[oi].quaternion.identity();
+    }
+    applyShadowHalfSpan(1.48);
+
     baseQuat.copy(defaultIsoQuat);
     _angVelWorld.set(0, 0, 0);
     hoverYaw = 0;
@@ -251,7 +399,7 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
     );
     _clickRaycaster.setFromCamera(_clickNdc, stage.camera);
     _sanctumHits.length = 0;
-    _clickRaycaster.intersectObjects(sanctumClickTargets, false, _sanctumHits);
+    _clickRaycaster.intersectObjects(sanctumClickTargets, true, _sanctumHits);
     return _sanctumHits.length > 0;
   };
   const clientToNdc = (clientX: number, clientY: number, out: [number, number]): void => {
@@ -268,6 +416,9 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
   const onPointerDown = (ev: PointerEvent) => {
     if (ev.button !== 0) return;
     isDragging = true;
+    if (simulator.state.solved) {
+      userDraggedDuringVictory = true;
+    }
     activePointerId = ev.pointerId;
     pointerDownX = ev.clientX;
     pointerDownY = ev.clientY;
@@ -361,6 +512,15 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
   canvas.addEventListener('dblclick', onDoubleClick);
 
   stage.shell.registerDispose(() => {
+    disposed = true;
+    if (workerTimerId !== null) {
+      clearTimeout(workerTimerId);
+      workerTimerId = null;
+    }
+    if (octantWorker) {
+      octantWorker.terminate();
+      octantWorker = null;
+    }
     setCanvasCursor('');
     _sanctumHits.length = 0;
     canvas.removeEventListener('pointerdown', onPointerDown);
@@ -373,6 +533,15 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
     sanctumInlayGeometry.dispose();
     startSpringGeometry.dispose();
     beadGeometry.dispose();
+    if (octantsResult) {
+      for (let oi = 0; oi < octantsResult.octantGeometries.length; oi++) {
+        octantsResult.octantGeometries[oi].dispose();
+      }
+      octantsResult.sanctumHalfPosZGeometry.dispose();
+      octantsResult.sanctumHalfNegZGeometry.dispose();
+      octantsResult = null;
+    }
+    centerpiece.dispose();
     optics.dispose();
   });
 
@@ -427,6 +596,8 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
       impactImpulse: Number(st.impactImpulse.toFixed(4)),
       solved: st.solved,
       solveProgress01: Number(st.solveProgress01.toFixed(4)),
+      victoryPhase,
+      vaultOpen01: Number(vaultOpen01.toFixed(4)),
       startNodeId: topology.startNodeId,
       goalNodeId: topology.goalNodeId,
       nearestNodeId,
@@ -471,8 +642,12 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
       stage.camera.updateMatrixWorld();
     }
 
-    // 2. Rotational SO(3) inertia carry when released
+    // 2. Rotational SO(3) inertia carry when released + auto-frame victory crux until user drags
     if (!isDragging) {
+      if (simulator.state.solved && victoryElapsedSec >= 0.65 && !userDraggedDuringVictory) {
+        _angVelWorld.multiplyScalar(Math.exp(-dt * 10));
+        baseQuat.slerp(victoryWindowQuat, 1 - Math.exp(-dt * 3.6));
+      }
       const omegaMag = _angVelWorld.length();
       if (omegaMag > 1e-4) {
         _inertiaAxis.copy(_angVelWorld).divideScalar(omegaMag);
@@ -504,15 +679,136 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
 
     monolithGroup.quaternion.copy(_hoverQuat).multiply(baseQuat).normalize();
 
-    // 4. Transform world gravity into cube-local frame & advance bead physics
+    // 4. Transform world gravity into cube-local frame & advance bead or 4-phase victory choreography
     _invMonolithQuat.copy(monolithGroup.quaternion).invert();
     _localGravityVec.copy(_worldGravity).applyQuaternion(_invMonolithQuat);
     _localGravityArr[0] = _localGravityVec.x;
     _localGravityArr[1] = _localGravityVec.y;
     _localGravityArr[2] = _localGravityVec.z;
 
-    simulator.step(dt, _localGravityArr);
-    syncVisualFromSimulator(dt);
+    if (!simulator.state.solved) {
+      victoryPhase = 'playing';
+      vaultOpen01 = 0;
+      simulator.step(dt, _localGravityArr);
+      syncVisualFromSimulator(dt);
+    } else {
+      victoryElapsedSec += dt;
+      const t = victoryElapsedSec;
+
+      if (t < 0.75) {
+        victoryPhase = 'ignition';
+        vaultOpen01 = 0;
+        simulator.igniteSolutionPathWave(Math.min(1, t / 0.72));
+        if (simulator.wetAtlasDirty) {
+          optics.wetTrailTexture.needsUpdate = true;
+          simulator.wetAtlasDirty = false;
+        }
+        const igniteU = Math.min(1, t / 0.55);
+        optics.setVictoryUniforms(1, igniteU);
+
+        // Pre-unlatch mechanical tremor right before octants part
+        if (t > 0.58) {
+          const frac = (t - 0.58) / 0.17;
+          const amp = 0.0045 * frac;
+          monolithGroup.position.set(
+            amp * Math.sin(t * 78.0),
+            amp * Math.cos(t * 93.0),
+            0
+          );
+        }
+        beadMesh.position.set(
+          simulator.state.localPos[0],
+          simulator.state.localPos[1],
+          simulator.state.localPos[2]
+        );
+        optics.updateBeadUniforms([0, 0, 0], simulator.state.localNormal, 0, 1, dt);
+      } else {
+        monolithGroup.position.set(0, 0, 0);
+        if (!waveCompleted) {
+          waveCompleted = true;
+          simulator.igniteSolutionPathWave(1);
+          if (simulator.wetAtlasDirty) {
+            optics.wetTrailTexture.needsUpdate = true;
+            simulator.wetAtlasDirty = false;
+          }
+        }
+        const postIgnite = t < 1.25 ? 1.0 : Math.max(0.35, 1.0 - (t - 1.25) * 0.55);
+        optics.setVictoryUniforms(1, postIgnite);
+
+        ensureVaultOctantsBuiltSync();
+        monolithMesh.visible = false;
+        sanctumMesh.visible = false;
+        startSpringMesh.visible = false;
+        vaultGroup.visible = true;
+        centerpiece.group.visible = true;
+
+        if (!camEasedOnOpen) {
+          camEasedOnOpen = true;
+          targetCamDist = Math.max(targetCamDist, 5.20);
+        }
+
+        // Gravitational power acceleration into damped mechanical pin-stop rebound (zero smoothstep braking)
+        const tOpen = t - 0.75;
+        let openVal: number;
+        if (tOpen < 0.78) {
+          openVal = Math.pow(tOpen / 0.78, 1.55);
+        } else {
+          const s = tOpen - 0.78;
+          openVal = 1.0 + 0.048 * Math.exp(-6.2 * s) * Math.sin(14.5 * s);
+        }
+        vaultOpen01 = Math.max(0, openVal);
+        victoryPhase = t < 2.45 ? 'opening' : 'revealed';
+
+        const invSqrt3 = 1 / Math.sqrt(3);
+        const radialStep = 0.56 * invSqrt3 * openVal;
+        const tiltBase = Math.max(0, (openVal - 0.18) / 0.82) * 0.105;
+        for (let oi = 0; oi < 8; oi++) {
+          const sx = (oi & 4) !== 0 ? 1 : -1;
+          const sy = (oi & 2) !== 0 ? 1 : -1;
+          const sz = (oi & 1) !== 0 ? 1 : -1;
+          octantGroups[oi].position.set(sx * radialStep, sy * radialStep, sz * radialStep);
+          _octTiltAxis.set(sz * Math.SQRT1_2, 0, -sx * Math.SQRT1_2);
+          octantGroups[oi].quaternion.setFromAxisAngle(_octTiltAxis, tiltBase * sy);
+        }
+
+        centerpiece.update(dt, t, openVal);
+
+        // Smoothly carry quicksilver bead from parted Sanctum down into inner astrolabe orbit
+        const goalPos = topology.nodes[topology.goalNodeId].localPos;
+        if (t < 0.85) {
+          beadMesh.position.set(goalPos[0] + radialStep, goalPos[1] + radialStep, goalPos[2]);
+          optics.updateBeadUniforms([0, 0, 0], simulator.state.localNormal, 0, 1, dt);
+        } else {
+          const startStep = 0.56 * invSqrt3 * Math.pow(0.10 / 0.78, 1.55);
+          _descentStartPos.set(goalPos[0] + startStep, goalPos[1] + startStep, goalPos[2]);
+          const descend = Math.min(1, Math.pow((t - 0.85) / 0.95, 1.45));
+          centerpiece.getBeadOrbitTarget(t, _orbitTargetPos, _orbitTargetVel);
+          beadMesh.position.copy(_descentStartPos).lerp(_orbitTargetPos, descend);
+
+          _beadVelScratch[0] = _orbitTargetVel.x * descend;
+          _beadVelScratch[1] = _orbitTargetVel.y * descend;
+          _beadVelScratch[2] = _orbitTargetVel.z * descend;
+          _orbitNormal.copy(beadMesh.position);
+          if (_orbitNormal.lengthSq() > 1e-6) {
+            _orbitNormal.normalize();
+          } else {
+            _orbitNormal.set(0, 1, 0);
+          }
+          optics.updateBeadUniforms(_beadVelScratch, _orbitNormal, 0, 1, dt);
+        }
+      }
+    }
+
+    // 5. Smoothly expand directional shadow frustum when cleavage vault opens
+    const targetHalfSpan = victoryPhase === 'opening' || victoryPhase === 'revealed' ? 2.28 : 1.48;
+    const spanDiff = targetHalfSpan - shadowHalfSpan;
+    if (Math.abs(spanDiff) > 1e-4) {
+      const nextSpan =
+        Math.abs(spanDiff) < 0.002
+          ? targetHalfSpan
+          : shadowHalfSpan + spanDiff * (1 - Math.exp(-dt * 8));
+      applyShadowHalfSpan(nextSpan);
+    }
   });
 
   return stage;

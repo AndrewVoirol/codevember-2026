@@ -1,6 +1,7 @@
 import * as THREE from 'three/webgpu';
 import {
   CUBE_FACES,
+  WET_ATLAS_FACE_SIZE,
   type CubeFaceId,
   type LabyrinthEdge,
   type LabyrinthNode,
@@ -10,7 +11,7 @@ import {
 
 /**
  * Day 13 — Labyrinth
- * Procedural Watertight Carved Stone Monolith, Inlays & Liquid Mercury Bead Geometry
+ * Procedural Watertight Carved Stone Monolith, Split Vault Octants, Inlays & Mercury Bead Geometry
  *
  * Uses Sharp-Feature Hermite Dual Contouring (regularized QEF) on an exact
  * 1-Lipschitz 3D Signed Distance Field built directly from `LabyrinthTopology`:
@@ -18,9 +19,10 @@ import {
  * - Crisp chiseled `tier = 0` corridor trenches, smooth C1 `bevel-wrap` edge troughs,
  *   and sloped `ramp` chutes descending to `tier = 1`
  * - Hollowed `tier = 1` vaulted stone underpass arches beneath intact `tier = 0` bridge decks
- * - Safe island-gated stepped dark vesicular basalt core pockets
- * - UV seams split cleanly per dominant cube face into the `6x1` (`384x64`) atlas strip
- * - Crease-angle-aware vertex normals and 100% outward `FrontSide` triangle winding
+ * - Safe island-gated stepped dark vesicular basalt core pockets + regional basalt outcrops
+ * - UV seams split cleanly per dominant cube face into the `6x1` (`1536x256`) atlas strip
+ * - Crease-aware CSR attribute smoothing (`aMaterialZone`), `aStoneDetail` (`[floorMask, edgeWear]`),
+ *   and single-pass shifted-octant Dual Contouring for solid-walled 8-piece vault separation.
  */
 
 export interface LabyrinthMeshesResult {
@@ -28,6 +30,32 @@ export interface LabyrinthMeshesResult {
   sanctumInlayGeometry: THREE.BufferGeometry;
   startSpringGeometry: THREE.BufferGeometry;
   beadGeometry: THREE.BufferGeometry;
+}
+
+export interface VaultOctantsResult {
+  octantGeometries: THREE.BufferGeometry[];
+  sanctumHalfPosZGeometry: THREE.BufferGeometry;
+  sanctumHalfNegZGeometry: THREE.BufferGeometry;
+}
+
+export interface RawStoneMeshBuffers {
+  positions: Float32Array;
+  normals: Float32Array;
+  uvs: Float32Array;
+  materialZone: Float32Array;
+  stoneDetail: Float32Array;
+}
+
+export interface RawSanctumHalfBuffers {
+  positions: Float32Array;
+  normals: Float32Array;
+  sanctumZone: Float32Array;
+}
+
+export interface VaultOctantsRawPayload {
+  octants: RawStoneMeshBuffers[];
+  sanctumPosZ: RawSanctumHalfBuffers;
+  sanctumNegZ: RawSanctumHalfBuffers;
 }
 
 interface FaceBasis {
@@ -65,14 +93,15 @@ const FACE_BY_ID: Record<CubeFaceId, FaceBasis> = {
 const INV_SQRT2 = Math.SQRT1_2;
 const INV_SQRT3 = 1 / Math.sqrt(3);
 
-// Dual Contouring voxel grid (`N = 84`, bound = `0.92` -> outer border `i = 1, N - 1` sits strictly outside `H = 0.88`)
+// Dual Contouring voxel grid (`N = 84`, default bound = `0.92`; octant pass uses `0.95` + `halfSlot = 0.024`)
 const DC_GRID_N = 84;
 const DC_BOUND = 0.92;
+const DC_OCTANT_BOUND = 0.95;
+const OCTANT_HALF_SLOT = 0.024;
 const DC_MIN = -DC_BOUND;
 const DC_SPAN = DC_BOUND * 2;
 const DC_STEP = DC_SPAN / DC_GRID_N;
 const DC_VERTS = DC_GRID_N + 1;
-const DC_CELL_PAD = DC_STEP * 0.015; // Keeps every dual vertex strictly inside its own voxel cell
 
 // Pocket clearance grid resolution per face
 const POCKET_N = 41;
@@ -83,10 +112,13 @@ const ARCH_SPRING_H = 0.055;
 const ARCH_CROWN_H = 0.104; // 0.012 clearance above 0.092 bead diameter; 0.056 stone arch crown
 const BRIDGE_HALF_SPAN = 0.130;
 
-// Coarse spatial bin grid (`16^3`) for fast exact analytical SDF gradient lookups in solveQefCells
+// Inner faceted geode vault extents (strictly >= 0.135 rock below tier=1 underpass floors)
+const VAULT_R_BOX = 0.435;
+const VAULT_R_EDGE = 0.465;
+const VAULT_R_CORNER = 0.505;
+
+// Coarse spatial bin grid (`16^3`) for fast exact analytical SDF gradient & floor lookups
 const EDGE_BIN_N = 16;
-const EDGE_BIN_STEP = DC_SPAN / EDGE_BIN_N;
-const INV_EDGE_BIN_STEP = 1 / EDGE_BIN_STEP;
 const EDGE_BIN_TOTAL = EDGE_BIN_N * EDGE_BIN_N * EDGE_BIN_N;
 const sBinCounts = new Int32Array(EDGE_BIN_TOTAL);
 const sBinOffsets = new Int32Array(EDGE_BIN_TOTAL + 1);
@@ -94,10 +126,10 @@ const sBinEdgeList = new Int32Array(32768);
 const sNearEdgeIdx = new Int32Array(64);
 const sNearSocketIdx = new Int32Array(8);
 
-// Pre-allocated scratch buffers for zero-GC startup construction
+// Pre-allocated scratch buffers for zero-GC startup and lazy octant construction
 const SCRATCH_VERT_TOTAL = DC_VERTS * DC_VERTS * DC_VERTS;
 const SCRATCH_CELL_TOTAL = DC_GRID_N * DC_GRID_N * DC_GRID_N;
-const SCRATCH_MAX_EDGES = 180000;
+const SCRATCH_MAX_EDGES = 260000;
 const sSdfGrid = new Float32Array(SCRATCH_VERT_TOTAL);
 const sCellToActive = new Int32Array(SCRATCH_CELL_TOTAL);
 const sEdgeAxis = new Uint8Array(SCRATCH_MAX_EDGES);
@@ -123,6 +155,15 @@ const sVertTriList = new Int32Array(SCRATCH_MAX_EDGES * 6);
 const sCellAo = new Float32Array(SCRATCH_MAX_EDGES);
 const sCellBasalt = new Float32Array(SCRATCH_MAX_EDGES);
 const sCellPatina = new Float32Array(SCRATCH_MAX_EDGES);
+const sCellFloorMask = new Float32Array(SCRATCH_MAX_EDGES);
+const sCellEdgeWear = new Float32Array(SCRATCH_MAX_EDGES);
+const sCellAoTmp = new Float32Array(SCRATCH_MAX_EDGES);
+const sCellBasaltTmp = new Float32Array(SCRATCH_MAX_EDGES);
+const sCellPatinaTmp = new Float32Array(SCRATCH_MAX_EDGES);
+const sCellEdgeWearTmp = new Float32Array(SCRATCH_MAX_EDGES);
+const sTriOctantId = new Uint8Array(SCRATCH_MAX_EDGES * 2);
+const sOctantTriCounts = new Int32Array(8);
+const sOctantCursors = new Int32Array(8);
 
 function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
@@ -553,7 +594,7 @@ function buildCarveEdges(
   return result;
 }
 
-function evalCarveEdgeAir(
+function evalCarveEdgeAirAndCoords(
   edge: CarveEdgeData,
   px: number,
   py: number,
@@ -561,7 +602,7 @@ function evalCarveEdgeAir(
   hw: number,
   H: number,
   bridges: readonly BridgeVolume[]
-): number {
+): { air: number; h: number; flatDist: number } {
   const segCount = edge.segCount;
   let bestSeg = 0;
   let bestT = 0;
@@ -641,6 +682,8 @@ function evalCarveEdgeAir(
     }
   }
 
+  const flatDist = Math.hypot(w, sOvershoot);
+
   if (edge.kind === 'underpass') {
     const hwArch = hw - 0.0035;
     const wNorm = Math.min(1.0, w / hwArch);
@@ -653,7 +696,7 @@ function evalCarveEdgeAir(
     const openTrenchAir = smin(wallAir, h, 0.004);
 
     if (edge.bridgeIndices.length === 0) {
-      return openTrenchAir;
+      return { air: openTrenchAir, h, flatDist };
     }
 
     const tunnelAir = smin(Math.min(hwArch - w, hCeil - h), h, 0.004);
@@ -672,10 +715,11 @@ function evalCarveEdgeAir(
       }
     }
 
-    if (minDistInsideBridge === Infinity) {
-      return openTrenchAir;
-    }
-    return Math.max(tunnelAir, Math.min(openTrenchAir, minDistInsideBridge));
+    const air =
+      minDistInsideBridge === Infinity
+        ? openTrenchAir
+        : Math.max(tunnelAir, Math.min(openTrenchAir, minDistInsideBridge));
+    return { air, h, flatDist };
   }
 
   const hwFloor = hw - 0.003;
@@ -702,7 +746,19 @@ function evalCarveEdgeAir(
     }
   }
 
-  return smin(dHoriz, h, 0.004);
+  return { air: smin(dHoriz, h, 0.004), h, flatDist };
+}
+
+function evalCarveEdgeAir(
+  edge: CarveEdgeData,
+  px: number,
+  py: number,
+  pz: number,
+  hw: number,
+  H: number,
+  bridges: readonly BridgeVolume[]
+): number {
+  return evalCarveEdgeAirAndCoords(edge, px, py, pz, hw, H, bridges).air;
 }
 
 function buildFacePocketGrids(
@@ -930,14 +986,20 @@ function solveQef3x3(
   out[outOffset + 2] = clamp(vz, minZ, maxZ);
 }
 
-const INV_DC_STEP = 1 / DC_STEP;
 let sLastActiveCells = 0;
 let sLastCrossingEdges = 0;
 
-function sampleGridSdfFast(vStrideZ: number, x: number, y: number, z: number): number {
-  const fx = clamp((x - DC_MIN) * INV_DC_STEP, 0, DC_GRID_N - 0.001);
-  const fy = clamp((y - DC_MIN) * INV_DC_STEP, 0, DC_GRID_N - 0.001);
-  const fz = clamp((z - DC_MIN) * INV_DC_STEP, 0, DC_GRID_N - 0.001);
+function sampleGridSdfFast(
+  vStrideZ: number,
+  dcMin: number,
+  invDcStep: number,
+  x: number,
+  y: number,
+  z: number
+): number {
+  const fx = clamp((x - dcMin) * invDcStep, 0, DC_GRID_N - 0.001);
+  const fy = clamp((y - dcMin) * invDcStep, 0, DC_GRID_N - 0.001);
+  const fz = clamp((z - dcMin) * invDcStep, 0, DC_GRID_N - 0.001);
   const ix = fx | 0;
   const iy = fy | 0;
   const iz = fz | 0;
@@ -957,19 +1019,34 @@ function sampleGridSdfFast(vStrideZ: number, x: number, y: number, z: number): n
   return c0 + (c1 - c0) * tz;
 }
 
+function evalInnerVaultAir(qx: number, qy: number, qz: number): number {
+  const ax = Math.abs(qx);
+  const ay = Math.abs(qy);
+  const az = Math.abs(qz);
+  const maxYZ = ay > az ? ay : az;
+  const dBox = VAULT_R_BOX - (ax > maxYZ ? ax : maxYZ);
+  const dXY = VAULT_R_EDGE - (ax + ay) * INV_SQRT2;
+  const dXZ = VAULT_R_EDGE - (ax + az) * INV_SQRT2;
+  const dYZ = VAULT_R_EDGE - (ay + az) * INV_SQRT2;
+  const dEdges = dXY < dXZ ? (dXY < dYZ ? dXY : dYZ) : dXZ < dYZ ? dXZ : dYZ;
+  const dCorner = VAULT_R_CORNER - (ax + ay + az) * INV_SQRT3;
+  return dBox < dEdges ? (dBox < dCorner ? dBox : dCorner) : dEdges < dCorner ? dEdges : dCorner;
+}
+
 function buildCarveEdgeSpatialBins(carveEdges: readonly CarveEdgeData[]): void {
   sBinCounts.fill(0);
-  const pad = 0.005;
+  const pad = 0.018;
   const n2 = EDGE_BIN_N * EDGE_BIN_N;
+  const invBinStep = EDGE_BIN_N / DC_SPAN;
 
   for (let ei = 0; ei < carveEdges.length; ei++) {
     const e = carveEdges[ei];
-    const x0 = clamp(Math.floor((e.minX - pad - DC_MIN) * INV_EDGE_BIN_STEP), 0, EDGE_BIN_N - 1);
-    const y0 = clamp(Math.floor((e.minY - pad - DC_MIN) * INV_EDGE_BIN_STEP), 0, EDGE_BIN_N - 1);
-    const z0 = clamp(Math.floor((e.minZ - pad - DC_MIN) * INV_EDGE_BIN_STEP), 0, EDGE_BIN_N - 1);
-    const x1 = clamp(Math.floor((e.maxX + pad - DC_MIN) * INV_EDGE_BIN_STEP), 0, EDGE_BIN_N - 1);
-    const y1 = clamp(Math.floor((e.maxY + pad - DC_MIN) * INV_EDGE_BIN_STEP), 0, EDGE_BIN_N - 1);
-    const z1 = clamp(Math.floor((e.maxZ + pad - DC_MIN) * INV_EDGE_BIN_STEP), 0, EDGE_BIN_N - 1);
+    const x0 = clamp(Math.floor((e.minX - pad - DC_MIN) * invBinStep), 0, EDGE_BIN_N - 1);
+    const y0 = clamp(Math.floor((e.minY - pad - DC_MIN) * invBinStep), 0, EDGE_BIN_N - 1);
+    const z0 = clamp(Math.floor((e.minZ - pad - DC_MIN) * invBinStep), 0, EDGE_BIN_N - 1);
+    const x1 = clamp(Math.floor((e.maxX + pad - DC_MIN) * invBinStep), 0, EDGE_BIN_N - 1);
+    const y1 = clamp(Math.floor((e.maxY + pad - DC_MIN) * invBinStep), 0, EDGE_BIN_N - 1);
+    const z1 = clamp(Math.floor((e.maxZ + pad - DC_MIN) * invBinStep), 0, EDGE_BIN_N - 1);
     for (let bz = z0; bz <= z1; bz++) {
       const zOff = bz * n2;
       for (let by = y0; by <= y1; by++) {
@@ -989,12 +1066,12 @@ function buildCarveEdgeSpatialBins(carveEdges: readonly CarveEdgeData[]): void {
 
   for (let ei = 0; ei < carveEdges.length; ei++) {
     const e = carveEdges[ei];
-    const x0 = clamp(Math.floor((e.minX - pad - DC_MIN) * INV_EDGE_BIN_STEP), 0, EDGE_BIN_N - 1);
-    const y0 = clamp(Math.floor((e.minY - pad - DC_MIN) * INV_EDGE_BIN_STEP), 0, EDGE_BIN_N - 1);
-    const z0 = clamp(Math.floor((e.minZ - pad - DC_MIN) * INV_EDGE_BIN_STEP), 0, EDGE_BIN_N - 1);
-    const x1 = clamp(Math.floor((e.maxX + pad - DC_MIN) * INV_EDGE_BIN_STEP), 0, EDGE_BIN_N - 1);
-    const y1 = clamp(Math.floor((e.maxY + pad - DC_MIN) * INV_EDGE_BIN_STEP), 0, EDGE_BIN_N - 1);
-    const z1 = clamp(Math.floor((e.maxZ + pad - DC_MIN) * INV_EDGE_BIN_STEP), 0, EDGE_BIN_N - 1);
+    const x0 = clamp(Math.floor((e.minX - pad - DC_MIN) * invBinStep), 0, EDGE_BIN_N - 1);
+    const y0 = clamp(Math.floor((e.minY - pad - DC_MIN) * invBinStep), 0, EDGE_BIN_N - 1);
+    const z0 = clamp(Math.floor((e.minZ - pad - DC_MIN) * invBinStep), 0, EDGE_BIN_N - 1);
+    const x1 = clamp(Math.floor((e.maxX + pad - DC_MIN) * invBinStep), 0, EDGE_BIN_N - 1);
+    const y1 = clamp(Math.floor((e.maxY + pad - DC_MIN) * invBinStep), 0, EDGE_BIN_N - 1);
+    const z1 = clamp(Math.floor((e.maxZ + pad - DC_MIN) * invBinStep), 0, EDGE_BIN_N - 1);
     for (let bz = z0; bz <= z1; bz++) {
       const zOff = bz * n2;
       for (let by = y0; by <= y1; by++) {
@@ -1039,13 +1116,14 @@ function evalOuterCubeSdf(
 }
 
 function evalExactLocalFiltered(
-  x: number,
-  y: number,
-  z: number,
+  px: number,
+  py: number,
+  pz: number,
   H: number,
   edgeLimit: number,
   cornerLimit: number,
   hw: number,
+  halfSlot: number,
   bridges: readonly BridgeVolume[],
   carveEdges: readonly CarveEdgeData[],
   pocketGrids: readonly Float32Array[],
@@ -1056,7 +1134,27 @@ function evalExactLocalFiltered(
   nearEdgeCount: number,
   nearSocketCount: number
 ): number {
+  let x = px;
+  let y = py;
+  let z = pz;
+  let gapAir = -1.0;
+
+  if (halfSlot > 0) {
+    const gx = halfSlot - Math.abs(px);
+    const gy = halfSlot - Math.abs(py);
+    const gz = halfSlot - Math.abs(pz);
+    gapAir = gx > gy ? (gx > gz ? gx : gz) : gy > gz ? gy : gz;
+    x = px >= 0 ? px - halfSlot : px + halfSlot;
+    y = py >= 0 ? py - halfSlot : py + halfSlot;
+    z = pz >= 0 ? pz - halfSlot : pz + halfSlot;
+  }
+
   let sdf = evalOuterCubeSdf(x, y, z, H, edgeLimit, cornerLimit);
+  if (halfSlot > 0) {
+    if (gapAir > sdf) sdf = gapAir;
+    const vaultAir = evalInnerVaultAir(x, y, z);
+    if (vaultAir > sdf) sdf = vaultAir;
+  }
   if (sdf > 0.025) return sdf;
 
   if (basisX !== null) {
@@ -1092,6 +1190,10 @@ function evalExactLocalFiltered(
 }
 
 function bakeMonolithSdf(
+  dcMin: number,
+  dcStep: number,
+  invDcStep: number,
+  halfSlot: number,
   H: number,
   edgeLimit: number,
   cornerLimit: number,
@@ -1103,19 +1205,25 @@ function bakeMonolithSdf(
 ): void {
   const sdfGrid = sSdfGrid;
   sdfGrid.fill(-0.38);
-  const coreVertLo = Math.floor(((-0.52) - DC_MIN) * INV_DC_STEP);
-  const coreVertHi = Math.ceil((0.52 - DC_MIN) * INV_DC_STEP);
+  const skipCore = halfSlot === 0;
+  const coreVertLo = Math.floor(((-0.52) - dcMin) * invDcStep);
+  const coreVertHi = Math.ceil((0.52 - dcMin) * invDcStep);
   const vStrideZ = DC_VERTS * DC_VERTS;
 
   for (let iz = 0; iz < DC_VERTS; iz++) {
-    const zInCore = iz > coreVertLo && iz < coreVertHi;
-    const z = DC_MIN + iz * DC_STEP;
-    const az = Math.abs(z);
+    const zInCore = skipCore && iz > coreVertLo && iz < coreVertHi;
+    const z = dcMin + iz * dcStep;
+    const zQ = halfSlot > 0 ? (z >= 0 ? z - halfSlot : z + halfSlot) : z;
+    const az = Math.abs(zQ);
+    const gapZ = halfSlot - Math.abs(z);
     const zOff = iz * vStrideZ;
     for (let iy = 0; iy < DC_VERTS; iy++) {
       const yzInCore = zInCore && iy > coreVertLo && iy < coreVertHi;
-      const y = DC_MIN + iy * DC_STEP;
-      const ay = Math.abs(y);
+      const y = dcMin + iy * dcStep;
+      const yQ = halfSlot > 0 ? (y >= 0 ? y - halfSlot : y + halfSlot) : y;
+      const ay = Math.abs(yQ);
+      const gapY = halfSlot - Math.abs(y);
+      const gapYZ = gapY > gapZ ? gapY : gapZ;
       const yzOff = zOff + iy * DC_VERTS;
       const dYZ = (ay + az) * INV_SQRT2 - edgeLimit;
       const maxYZ = ay > az ? ay : az;
@@ -1124,15 +1232,25 @@ function bakeMonolithSdf(
           ix = coreVertHi - 1;
           continue;
         }
-        const x = DC_MIN + ix * DC_STEP;
-        const ax = Math.abs(x);
+        const x = dcMin + ix * dcStep;
+        const xQ = halfSlot > 0 ? (x >= 0 ? x - halfSlot : x + halfSlot) : x;
+        const ax = Math.abs(xQ);
         const dFaces = (ax > maxYZ ? ax : maxYZ) - H;
         const dXY = (ax + ay) * INV_SQRT2 - edgeLimit;
         const dXZ = (ax + az) * INV_SQRT2 - edgeLimit;
         const dEdges = dXY > dXZ ? (dXY > dYZ ? dXY : dYZ) : dXZ > dYZ ? dXZ : dYZ;
         const dCorners = (ax + ay + az) * INV_SQRT3 - cornerLimit;
-        sdfGrid[yzOff + ix] =
+        let sdf =
           dFaces > dEdges ? (dFaces > dCorners ? dFaces : dCorners) : dEdges > dCorners ? dEdges : dCorners;
+
+        if (halfSlot > 0) {
+          const gapX = halfSlot - Math.abs(x);
+          const gapAir = gapX > gapYZ ? gapX : gapYZ;
+          if (gapAir > sdf) sdf = gapAir;
+          const vaultAir = evalInnerVaultAir(xQ, yQ, zQ);
+          if (vaultAir > sdf) sdf = vaultAir;
+        }
+        sdfGrid[yzOff + ix] = sdf;
       }
     }
   }
@@ -1141,17 +1259,18 @@ function bakeMonolithSdf(
     const basis = FACE_BASES[fi];
     const grid = pocketGrids[fi];
     const minN = H - 0.17;
-    const maxN = H + DC_STEP;
-    const iu0 = clamp(Math.floor((-POCKET_BOUND - DC_STEP - DC_MIN) * INV_DC_STEP), 1, DC_GRID_N - 1);
-    const iu1 = clamp(Math.ceil((POCKET_BOUND + DC_STEP - DC_MIN) * INV_DC_STEP), 1, DC_GRID_N - 1);
+    const maxN = H + dcStep + halfSlot;
+    const uLim = POCKET_BOUND + dcStep + halfSlot;
+    const iu0 = clamp(Math.floor((-uLim - dcMin) * invDcStep), 1, DC_GRID_N - 1);
+    const iu1 = clamp(Math.ceil((uLim - dcMin) * invDcStep), 1, DC_GRID_N - 1);
     const in0 =
       basis.nx + basis.ny + basis.nz > 0
-        ? clamp(Math.floor((minN - DC_MIN) * INV_DC_STEP), 1, DC_GRID_N - 1)
-        : clamp(Math.floor((-maxN - DC_MIN) * INV_DC_STEP), 1, DC_GRID_N - 1);
+        ? clamp(Math.floor((minN - dcMin) * invDcStep), 1, DC_GRID_N - 1)
+        : clamp(Math.floor((-maxN - dcMin) * invDcStep), 1, DC_GRID_N - 1);
     const in1 =
       basis.nx + basis.ny + basis.nz > 0
-        ? clamp(Math.ceil((maxN - DC_MIN) * INV_DC_STEP), 1, DC_GRID_N - 1)
-        : clamp(Math.ceil((-minN - DC_MIN) * INV_DC_STEP), 1, DC_GRID_N - 1);
+        ? clamp(Math.ceil((maxN - dcMin) * invDcStep), 1, DC_GRID_N - 1)
+        : clamp(Math.ceil((-minN - dcMin) * invDcStep), 1, DC_GRID_N - 1);
 
     const uSign = basis.ux + basis.uy + basis.uz;
     const vSign = basis.vx + basis.vy + basis.vz;
@@ -1161,10 +1280,12 @@ function bakeMonolithSdf(
     const sN = basis.nx !== 0 ? 1 : basis.ny !== 0 ? DC_VERTS : vStrideZ;
 
     for (let iv = iu0; iv <= iu1; iv++) {
-      const vCoord = (DC_MIN + iv * DC_STEP) * vSign;
+      const vcRaw = (dcMin + iv * dcStep) * vSign;
+      const vCoord = halfSlot > 0 ? (vcRaw >= 0 ? vcRaw - halfSlot : vcRaw + halfSlot) : vcRaw;
       const vOff = iv * sV;
       for (let iu = iu0; iu <= iu1; iu++) {
-        const uCoord = (DC_MIN + iu * DC_STEP) * uSign;
+        const ucRaw = (dcMin + iu * dcStep) * uSign;
+        const uCoord = halfSlot > 0 ? (ucRaw >= 0 ? ucRaw - halfSlot : ucRaw + halfSlot) : ucRaw;
         const dClear = samplePocketClearance(grid, uCoord, vCoord);
         if (dClear <= -0.025) continue;
         const baseOff = vOff + iu * sU;
@@ -1172,7 +1293,8 @@ function bakeMonolithSdf(
         for (let iDepth = in0; iDepth <= in1; iDepth++) {
           const idx = baseOff + iDepth * sN;
           if (sdfGrid[idx] > 0.025) continue;
-          const faceCoord = (DC_MIN + iDepth * DC_STEP) * nSign;
+          const fcRaw = (dcMin + iDepth * dcStep) * nSign;
+          const faceCoord = halfSlot > 0 ? (fcRaw >= 0 ? fcRaw - halfSlot : fcRaw + halfSlot) : fcRaw;
           const depthFromSurface = H - faceCoord;
           const shelfAir = dClear < 0.075 - depthFromSurface ? dClear : 0.075 - depthFromSurface;
           const wellAir = dClearWell < 0.135 - depthFromSurface ? dClearWell : 0.135 - depthFromSurface;
@@ -1185,23 +1307,29 @@ function bakeMonolithSdf(
 
   for (let ei = 0; ei < carveEdges.length; ei++) {
     const edge = carveEdges[ei];
-    const ix0 = clamp(Math.floor((edge.minX - DC_MIN) * INV_DC_STEP), 1, DC_GRID_N - 1);
-    const iy0 = clamp(Math.floor((edge.minY - DC_MIN) * INV_DC_STEP), 1, DC_GRID_N - 1);
-    const iz0 = clamp(Math.floor((edge.minZ - DC_MIN) * INV_DC_STEP), 1, DC_GRID_N - 1);
-    const ix1 = clamp(Math.ceil((edge.maxX - DC_MIN) * INV_DC_STEP), 1, DC_GRID_N - 1);
-    const iy1 = clamp(Math.ceil((edge.maxY - DC_MIN) * INV_DC_STEP), 1, DC_GRID_N - 1);
-    const iz1 = clamp(Math.ceil((edge.maxZ - DC_MIN) * INV_DC_STEP), 1, DC_GRID_N - 1);
+    const ix0 = clamp(Math.floor((edge.minX - halfSlot - dcMin) * invDcStep), 1, DC_GRID_N - 1);
+    const iy0 = clamp(Math.floor((edge.minY - halfSlot - dcMin) * invDcStep), 1, DC_GRID_N - 1);
+    const iz0 = clamp(Math.floor((edge.minZ - halfSlot - dcMin) * invDcStep), 1, DC_GRID_N - 1);
+    const ix1 = clamp(Math.ceil((edge.maxX + halfSlot - dcMin) * invDcStep), 1, DC_GRID_N - 1);
+    const iy1 = clamp(Math.ceil((edge.maxY + halfSlot - dcMin) * invDcStep), 1, DC_GRID_N - 1);
+    const iz1 = clamp(Math.ceil((edge.maxZ + halfSlot - dcMin) * invDcStep), 1, DC_GRID_N - 1);
 
     for (let iz = iz0; iz <= iz1; iz++) {
-      const z = DC_MIN + iz * DC_STEP;
+      const zRaw = dcMin + iz * dcStep;
+      const z = halfSlot > 0 ? (zRaw >= 0 ? zRaw - halfSlot : zRaw + halfSlot) : zRaw;
+      if (z < edge.minZ || z > edge.maxZ) continue;
       const zOff = iz * vStrideZ;
       for (let iy = iy0; iy <= iy1; iy++) {
-        const y = DC_MIN + iy * DC_STEP;
+        const yRaw = dcMin + iy * dcStep;
+        const y = halfSlot > 0 ? (yRaw >= 0 ? yRaw - halfSlot : yRaw + halfSlot) : yRaw;
+        if (y < edge.minY || y > edge.maxY) continue;
         const yzOff = zOff + iy * DC_VERTS;
         for (let ix = ix0; ix <= ix1; ix++) {
           const idx = yzOff + ix;
           if (sdfGrid[idx] > 0.025) continue;
-          const x = DC_MIN + ix * DC_STEP;
+          const xRaw = dcMin + ix * dcStep;
+          const x = halfSlot > 0 ? (xRaw >= 0 ? xRaw - halfSlot : xRaw + halfSlot) : xRaw;
+          if (x < edge.minX || x > edge.maxX) continue;
           const carveAir = evalCarveEdgeAir(edge, x, y, z, hw, H, bridges);
           if (carveAir > sdfGrid[idx]) sdfGrid[idx] = carveAir;
         }
@@ -1211,26 +1339,29 @@ function bakeMonolithSdf(
 
   for (let si = 0; si < sockets.length; si++) {
     const s = sockets[si];
-    const ix0 = clamp(Math.floor((s.minX - DC_MIN) * INV_DC_STEP), 1, DC_GRID_N - 1);
-    const iy0 = clamp(Math.floor((s.minY - DC_MIN) * INV_DC_STEP), 1, DC_GRID_N - 1);
-    const iz0 = clamp(Math.floor((s.minZ - DC_MIN) * INV_DC_STEP), 1, DC_GRID_N - 1);
-    const ix1 = clamp(Math.ceil((s.maxX - DC_MIN) * INV_DC_STEP), 1, DC_GRID_N - 1);
-    const iy1 = clamp(Math.ceil((s.maxY - DC_MIN) * INV_DC_STEP), 1, DC_GRID_N - 1);
-    const iz1 = clamp(Math.ceil((s.maxZ - DC_MIN) * INV_DC_STEP), 1, DC_GRID_N - 1);
+    const ix0 = clamp(Math.floor((s.minX - halfSlot - dcMin) * invDcStep), 1, DC_GRID_N - 1);
+    const iy0 = clamp(Math.floor((s.minY - halfSlot - dcMin) * invDcStep), 1, DC_GRID_N - 1);
+    const iz0 = clamp(Math.floor((s.minZ - halfSlot - dcMin) * invDcStep), 1, DC_GRID_N - 1);
+    const ix1 = clamp(Math.ceil((s.maxX + halfSlot - dcMin) * invDcStep), 1, DC_GRID_N - 1);
+    const iy1 = clamp(Math.ceil((s.maxY + halfSlot - dcMin) * invDcStep), 1, DC_GRID_N - 1);
+    const iz1 = clamp(Math.ceil((s.maxZ + halfSlot - dcMin) * invDcStep), 1, DC_GRID_N - 1);
 
     for (let iz = iz0; iz <= iz1; iz++) {
-      const z = DC_MIN + iz * DC_STEP;
+      const zRaw = dcMin + iz * dcStep;
+      const z = halfSlot > 0 ? (zRaw >= 0 ? zRaw - halfSlot : zRaw + halfSlot) : zRaw;
+      const dz = z - s.cz;
       const zOff = iz * vStrideZ;
       for (let iy = iy0; iy <= iy1; iy++) {
-        const y = DC_MIN + iy * DC_STEP;
+        const yRaw = dcMin + iy * dcStep;
+        const y = halfSlot > 0 ? (yRaw >= 0 ? yRaw - halfSlot : yRaw + halfSlot) : yRaw;
+        const dy = y - s.cy;
         const yzOff = zOff + iy * DC_VERTS;
         for (let ix = ix0; ix <= ix1; ix++) {
           const idx = yzOff + ix;
           if (sdfGrid[idx] > 0.025) continue;
-          const x = DC_MIN + ix * DC_STEP;
+          const xRaw = dcMin + ix * dcStep;
+          const x = halfSlot > 0 ? (xRaw >= 0 ? xRaw - halfSlot : xRaw + halfSlot) : xRaw;
           const dx = x - s.cx;
-          const dy = y - s.cy;
-          const dz = z - s.cz;
           const h = dx * s.nx + dy * s.ny + dz * s.nz;
           const r = Math.sqrt(Math.max(0, dx * dx + dy * dy + dz * dz - h * h));
           const air = Math.min(s.radius + Math.max(0, h - s.flareStartH) * s.coneSlope - r, h - s.depthOffset);
@@ -1243,18 +1374,18 @@ function bakeMonolithSdf(
 
 const CREASE_COS = 0.829;
 
-function extractCrossingEdges(): void {
+function extractCrossingEdges(dcMin: number, invDcStep: number, skipCore: boolean): void {
   const sdfGrid = sSdfGrid;
   sCellToActive.fill(-1);
   let activeCellCount = 0;
   let crossingEdgeCount = 0;
   const n2 = DC_GRID_N * DC_GRID_N;
   const vStrideZ = DC_VERTS * DC_VERTS;
-  const coreLo = Math.floor(((-0.52) - DC_MIN) * INV_DC_STEP);
-  const coreHi = Math.ceil((0.52 - DC_MIN) * INV_DC_STEP);
+  const coreLo = Math.floor(((-0.52) - dcMin) * invDcStep);
+  const coreHi = Math.ceil((0.52 - dcMin) * invDcStep);
 
   for (let iz = 1; iz < DC_GRID_N; iz++) {
-    const zInCore = iz > coreLo && iz < coreHi;
+    const zInCore = skipCore && iz > coreLo && iz < coreHi;
     const zOff = iz * vStrideZ;
     for (let iy = 1; iy < DC_GRID_N; iy++) {
       const yzInCore = zInCore && iy > coreLo && iy < coreHi;
@@ -1360,6 +1491,9 @@ function extractCrossingEdges(): void {
 }
 
 function solveQefCells(
+  dcMin: number,
+  dcStep: number,
+  halfSlot: number,
   activeCellCount: number,
   crossingEdgeCount: number,
   H: number,
@@ -1374,6 +1508,8 @@ function solveQefCells(
   const qefBuf = sQefBuf;
   qefBuf.fill(0, 0, activeCellCount * 13);
   const n2 = EDGE_BIN_N * EDGE_BIN_N;
+  const invBinStep = EDGE_BIN_N / DC_SPAN;
+  const cellPad = dcStep * 0.015;
   const h = 0.002 * INV_SQRT3;
   const hPad = h + 0.0002;
   const inv4h = 0.25 / h;
@@ -1387,13 +1523,17 @@ function solveQefCells(
     const iz = sEdgeIz[ei];
     const t = sEdgeT0[ei];
 
-    const px = DC_MIN + (ix + (ax === 0 ? t : 0)) * DC_STEP;
-    const py = DC_MIN + (iy + (ax === 1 ? t : 0)) * DC_STEP;
-    const pz = DC_MIN + (iz + (ax === 2 ? t : 0)) * DC_STEP;
+    const px = dcMin + (ix + (ax === 0 ? t : 0)) * dcStep;
+    const py = dcMin + (iy + (ax === 1 ? t : 0)) * dcStep;
+    const pz = dcMin + (iz + (ax === 2 ? t : 0)) * dcStep;
 
-    const bxIdx = clamp(Math.floor((px - DC_MIN) * INV_EDGE_BIN_STEP), 0, EDGE_BIN_N - 1);
-    const byIdx = clamp(Math.floor((py - DC_MIN) * INV_EDGE_BIN_STEP), 0, EDGE_BIN_N - 1);
-    const bzIdx = clamp(Math.floor((pz - DC_MIN) * INV_EDGE_BIN_STEP), 0, EDGE_BIN_N - 1);
+    const qx = halfSlot > 0 ? (px >= 0 ? px - halfSlot : px + halfSlot) : px;
+    const qy = halfSlot > 0 ? (py >= 0 ? py - halfSlot : py + halfSlot) : py;
+    const qz = halfSlot > 0 ? (pz >= 0 ? pz - halfSlot : pz + halfSlot) : pz;
+
+    const bxIdx = clamp(Math.floor((qx - DC_MIN) * invBinStep), 0, EDGE_BIN_N - 1);
+    const byIdx = clamp(Math.floor((qy - DC_MIN) * invBinStep), 0, EDGE_BIN_N - 1);
+    const bzIdx = clamp(Math.floor((qz - DC_MIN) * invBinStep), 0, EDGE_BIN_N - 1);
     const binId = bzIdx * n2 + byIdx * EDGE_BIN_N + bxIdx;
     const binStart = sBinOffsets[binId];
     const binEnd = sBinOffsets[binId + 1];
@@ -1403,12 +1543,12 @@ function solveQefCells(
       const eIdx = sBinEdgeList[bi];
       const edge = carveEdges[eIdx];
       if (
-        px >= edge.minX - hPad &&
-        px <= edge.maxX + hPad &&
-        py >= edge.minY - hPad &&
-        py <= edge.maxY + hPad &&
-        pz >= edge.minZ - hPad &&
-        pz <= edge.maxZ + hPad
+        qx >= edge.minX - hPad &&
+        qx <= edge.maxX + hPad &&
+        qy >= edge.minY - hPad &&
+        qy <= edge.maxY + hPad &&
+        qz >= edge.minZ - hPad &&
+        qz <= edge.maxZ + hPad
       ) {
         if (nearEdgeCount < 64) sNearEdgeIdx[nearEdgeCount++] = eIdx;
       }
@@ -1418,35 +1558,35 @@ function solveQefCells(
     for (let si = 0; si < sockets.length; si++) {
       const s = sockets[si];
       if (
-        px >= s.minX - hPad &&
-        px <= s.maxX + hPad &&
-        py >= s.minY - hPad &&
-        py <= s.maxY + hPad &&
-        pz >= s.minZ - hPad &&
-        pz <= s.maxZ + hPad
+        qx >= s.minX - hPad &&
+        qx <= s.maxX + hPad &&
+        qy >= s.minY - hPad &&
+        qy <= s.maxY + hPad &&
+        qz >= s.minZ - hPad &&
+        qz <= s.maxZ + hPad
       ) {
         if (nearSocketCount < 8) sNearSocketIdx[nearSocketCount++] = si;
       }
     }
 
-    const apx = Math.abs(px);
-    const apy = Math.abs(py);
-    const apz = Math.abs(pz);
+    const apx = Math.abs(qx);
+    const apy = Math.abs(qy);
+    const apz = Math.abs(qz);
     const basisX =
       apx >= pocketFaceThresh && apy <= pocketUvMax && apz <= pocketUvMax
-        ? px >= 0
+        ? qx >= 0
           ? FACE_BASES[0]
           : FACE_BASES[1]
         : null;
     const basisY =
       apy >= pocketFaceThresh && apx <= pocketUvMax && apz <= pocketUvMax
-        ? py >= 0
+        ? qy >= 0
           ? FACE_BASES[2]
           : FACE_BASES[3]
         : null;
     const basisZ =
       apz >= pocketFaceThresh && apx <= pocketUvMax && apy <= pocketUvMax
-        ? pz >= 0
+        ? qz >= 0
           ? FACE_BASES[4]
           : FACE_BASES[5]
         : null;
@@ -1456,6 +1596,7 @@ function solveQefCells(
     let f2: number;
     let f3: number;
     if (
+      halfSlot === 0 &&
       nearEdgeCount === 0 &&
       nearSocketCount === 0 &&
       basisX === null &&
@@ -1469,22 +1610,22 @@ function solveQefCells(
     } else {
       f0 = evalExactLocalFiltered(
         px + h, py + h, pz + h,
-        H, edgeLimit, cornerLimit, hw, bridges, carveEdges, pocketGrids, sockets,
+        H, edgeLimit, cornerLimit, hw, halfSlot, bridges, carveEdges, pocketGrids, sockets,
         basisX, basisY, basisZ, nearEdgeCount, nearSocketCount
       );
       f1 = evalExactLocalFiltered(
         px + h, py - h, pz - h,
-        H, edgeLimit, cornerLimit, hw, bridges, carveEdges, pocketGrids, sockets,
+        H, edgeLimit, cornerLimit, hw, halfSlot, bridges, carveEdges, pocketGrids, sockets,
         basisX, basisY, basisZ, nearEdgeCount, nearSocketCount
       );
       f2 = evalExactLocalFiltered(
         px - h, py + h, pz - h,
-        H, edgeLimit, cornerLimit, hw, bridges, carveEdges, pocketGrids, sockets,
+        H, edgeLimit, cornerLimit, hw, halfSlot, bridges, carveEdges, pocketGrids, sockets,
         basisX, basisY, basisZ, nearEdgeCount, nearSocketCount
       );
       f3 = evalExactLocalFiltered(
         px - h, py - h, pz + h,
-        H, edgeLimit, cornerLimit, hw, bridges, carveEdges, pocketGrids, sockets,
+        H, edgeLimit, cornerLimit, hw, halfSlot, bridges, carveEdges, pocketGrids, sockets,
         basisX, basisY, basisZ, nearEdgeCount, nearSocketCount
       );
     }
@@ -1550,16 +1691,16 @@ function solveQefCells(
     const count = Math.max(1, qefBuf[q + 12]);
     const invC = 1 / count;
     const cb = aid * 3;
-    const minX = DC_MIN + sCellBoxCoords[cb] * DC_STEP;
-    const minY = DC_MIN + sCellBoxCoords[cb + 1] * DC_STEP;
-    const minZ = DC_MIN + sCellBoxCoords[cb + 2] * DC_STEP;
+    const minX = dcMin + sCellBoxCoords[cb] * dcStep;
+    const minY = dcMin + sCellBoxCoords[cb + 1] * dcStep;
+    const minZ = dcMin + sCellBoxCoords[cb + 2] * dcStep;
     solveQef3x3(
       qefBuf[q], qefBuf[q + 1], qefBuf[q + 2],
       qefBuf[q + 3], qefBuf[q + 4], qefBuf[q + 5],
       qefBuf[q + 6], qefBuf[q + 7], qefBuf[q + 8],
       qefBuf[q + 9] * invC, qefBuf[q + 10] * invC, qefBuf[q + 11] * invC,
-      minX + DC_CELL_PAD, minY + DC_CELL_PAD, minZ + DC_CELL_PAD,
-      minX + DC_STEP - DC_CELL_PAD, minY + DC_STEP - DC_CELL_PAD, minZ + DC_STEP - DC_CELL_PAD,
+      minX + cellPad, minY + cellPad, minZ + cellPad,
+      minX + dcStep - cellPad, minY + dcStep - cellPad, minZ + dcStep - cellPad,
       count, cellVertPos, aid * 3
     );
   }
@@ -1664,6 +1805,9 @@ function emitDualQuadsAndCsr(activeCellCount: number, crossingEdgeCount: number)
 }
 
 function computeCellAoAndZones(
+  dcMin: number,
+  invDcStep: number,
+  halfSlot: number,
   activeCellCount: number,
   H: number,
   surfaceDepth: number,
@@ -1672,19 +1816,27 @@ function computeCellAoAndZones(
   edgeLimit: number,
   cornerLimit: number,
   pocketGrids: readonly Float32Array[],
-  bridges: readonly BridgeVolume[]
+  bridges: readonly BridgeVolume[],
+  carveEdges: readonly CarveEdgeData[]
 ): void {
   const cellVertPos = sCellVertPos;
   const triFaceNormals = sTriFaceNormals;
   const vStrideZ = DC_VERTS * DC_VERTS;
   const bridgeCount = bridges.length;
+  const n2 = EDGE_BIN_N * EDGE_BIN_N;
+  const invBinStep = EDGE_BIN_N / DC_SPAN;
   sCellIsSharp.fill(0, 0, activeCellCount);
 
   for (let aid = 0; aid < activeCellCount; aid++) {
     const p3 = aid * 3;
-    const px = cellVertPos[p3];
-    const py = cellVertPos[p3 + 1];
-    const pz = cellVertPos[p3 + 2];
+    const gpx = cellVertPos[p3];
+    const gpy = cellVertPos[p3 + 1];
+    const gpz = cellVertPos[p3 + 2];
+
+    const px = halfSlot > 0 ? (gpx >= 0 ? gpx - halfSlot : gpx + halfSlot) : gpx;
+    const py = halfSlot > 0 ? (gpy >= 0 ? gpy - halfSlot : gpy + halfSlot) : gpy;
+    const pz = halfSlot > 0 ? (gpz >= 0 ? gpz - halfSlot : gpz + halfSlot) : gpz;
+
     let nx = sAvgCellNorm[p3];
     let ny = sAvgCellNorm[p3 + 1];
     let nz = sAvgCellNorm[p3 + 2];
@@ -1707,15 +1859,22 @@ function computeCellAoAndZones(
       }
     }
 
-    const dNear = sampleGridSdfFast(vStrideZ, px + nx * 0.022, py + ny * 0.022, pz + nz * 0.022);
-    const d1 = sampleGridSdfFast(vStrideZ, px + nx * 0.045, py + ny * 0.045, pz + nz * 0.045);
-    const d2 = sampleGridSdfFast(vStrideZ, px + nx * 0.125, py + ny * 0.125, pz + nz * 0.125);
+    const dNear = sampleGridSdfFast(vStrideZ, dcMin, invDcStep, gpx + nx * 0.022, gpy + ny * 0.022, gpz + nz * 0.022);
+    const d1 = sampleGridSdfFast(vStrideZ, dcMin, invDcStep, gpx + nx * 0.045, gpy + ny * 0.045, gpz + nz * 0.045);
+    const d2 = sampleGridSdfFast(vStrideZ, dcMin, invDcStep, gpx + nx * 0.125, gpy + ny * 0.125, gpz + nz * 0.125);
     const occ =
       Math.max(0, 0.022 - dNear) * 20.0 +
       Math.max(0, 0.045 - d1) * 12.0 +
       Math.max(0, 0.125 - d2) * 4.2;
     const ao = clamp(1.0 - occ * 0.78, 0.10, 1.0);
     sCellAo[aid] = ao;
+
+    // Convex edge thickness taps for chiseled limestone ridge & bevel arris wear
+    const tIn1 = sampleGridSdfFast(vStrideZ, dcMin, invDcStep, gpx - nx * 0.024, gpy - ny * 0.024, gpz - nz * 0.024);
+    const tIn2 = sampleGridSdfFast(vStrideZ, dcMin, invDcStep, gpx - nx * 0.046, gpy - ny * 0.046, gpz - nz * 0.046);
+    const thin1 = clamp((tIn1 + 0.021) * 48.0, 0, 1);
+    const thin2 = clamp((tIn2 + 0.041) * 34.0, 0, 1);
+    sCellEdgeWear[aid] = clamp((thin1 * 0.5 + thin2 * 0.5) * (ao > 0.45 ? 1.0 : 0.25), 0, 1);
 
     const ax = Math.abs(px);
     const ay = Math.abs(py);
@@ -1726,11 +1885,27 @@ function computeCellAoAndZones(
     const dCorners = (ax + ay + az) * INV_SQRT3 - cornerLimit;
     const depthIn = -Math.max(dFaces, dEdges, dCorners);
 
+    const isCleavagePlane = halfSlot > 0 && Math.min(ax, ay, az) < 0.015;
+    const innerVaultAir = halfSlot > 0 ? evalInnerVaultAir(px, py, pz) : -1.0;
+    const isInnerVault = halfSlot > 0 && innerVaultAir > -0.028;
+
     let basalt = 0;
     let patina = 0;
+    let floorMask = 0;
+    const fNoise = organicField3D(px, py, pz);
 
-    if (depthIn > 0.05) {
-      const fNoise = organicField3D(px, py, pz);
+    if (isCleavagePlane || isInnerVault) {
+      basalt = 0.88 + 0.12 * fNoise;
+      if (isInnerVault && fNoise > 0.48) {
+        patina = clamp((fNoise - 0.48) * 1.9, 0.2, 0.85);
+      }
+      sCellBasalt[aid] = clamp(basalt, 0, 1);
+      sCellPatina[aid] = clamp(patina, 0, 1);
+      sCellFloorMask[aid] = 0;
+      continue;
+    }
+
+    if (depthIn > 0.04) {
       const domBasis = dominantFaceBasis(px, py, pz);
       const uC = px * domBasis.ux + py * domBasis.uy + pz * domBasis.uz;
       const vC = px * domBasis.vx + py * domBasis.vy + pz * domBasis.vz;
@@ -1754,14 +1929,18 @@ function computeCellAoAndZones(
         }
       }
 
-      if (pocketClr > -0.015 && depthIn > 0.055) {
-        const depthFade = clamp((depthIn - 0.050) / 0.012, 0, 1);
-        const clrFade = clamp((pocketClr + 0.018) / 0.012, 0, 1);
+      if (pocketClr > -0.028 && depthIn > 0.042) {
+        const depthFade = clamp((depthIn - 0.040) / 0.014, 0, 1);
+        const clrFade = clamp((pocketClr + 0.028) / 0.014, 0, 1);
         basalt = Math.max(basalt, depthFade * clrFade);
       }
-      if (!isBridgeArchBody && depthIn > surfaceDepth + 0.025) {
-        const s = clamp((depthIn - (surfaceDepth + 0.020) + (fNoise - 0.5) * 0.020) / 0.025, 0, 1);
+      if (!isBridgeArchBody && depthIn > surfaceDepth + 0.016) {
+        const s = clamp((depthIn - (surfaceDepth + 0.012) + (fNoise - 0.5) * 0.020) / 0.024, 0, 1);
         basalt = Math.max(basalt, s);
+      }
+      if (!isBridgeArchBody && depthIn > 0.055 && fNoise > 0.66) {
+        const outcrop = clamp((fNoise - 0.66) / 0.16, 0, 1) * clamp((depthIn - 0.055) / 0.045, 0, 1);
+        basalt = Math.max(basalt, outcrop * 0.85);
       }
 
       const recessFactor = clamp((depthIn - 0.065) / 0.070, 0, 1);
@@ -1775,122 +1954,179 @@ function computeCellAoAndZones(
       if (isUnderpassSoffit) {
         patina = Math.max(patina, 0.45 + 0.55 * organicVein);
       }
+
+      // Compute strict corridor floorMask so wet Yellow Ochre trail stays off walls & top plateaus
+      if (depthIn >= 0.085 && !isUnderpassSoffit) {
+        const bxIdx = clamp(Math.floor((px - DC_MIN) * invBinStep), 0, EDGE_BIN_N - 1);
+        const byIdx = clamp(Math.floor((py - DC_MIN) * invBinStep), 0, EDGE_BIN_N - 1);
+        const bzIdx = clamp(Math.floor((pz - DC_MIN) * invBinStep), 0, EDGE_BIN_N - 1);
+        const binId = bzIdx * n2 + byIdx * EDGE_BIN_N + bxIdx;
+        const binStart = sBinOffsets[binId];
+        const binEnd = sBinOffsets[binId + 1];
+        for (let bi = binStart; bi < binEnd; bi++) {
+          const edge = carveEdges[sBinEdgeList[bi]];
+          if (
+            px < edge.minX || px > edge.maxX ||
+            py < edge.minY || py > edge.maxY ||
+            pz < edge.minZ || pz > edge.maxZ
+          ) {
+            continue;
+          }
+          const c = evalCarveEdgeAirAndCoords(edge, px, py, pz, hw, H, bridges);
+          if (c.h >= -0.025 && c.h <= 0.028 && c.flatDist <= hw + 0.015) {
+            const hMask = clamp(1.0 - (c.h - 0.015) / 0.013, 0, 1);
+            const wMask = clamp(1.0 - (c.flatDist - hw) / 0.015, 0, 1);
+            const fM = hMask * wMask;
+            if (fM > floorMask) floorMask = fM;
+          }
+        }
+      }
     }
 
     sCellBasalt[aid] = clamp(basalt, 0, 1);
     sCellPatina[aid] = clamp(patina, 0, 1);
+    sCellFloorMask[aid] = clamp(floorMask, 0, 1);
+  }
+
+  // Two passes of crease-aware CSR neighbor averaging eliminate voxel diagonal stair-steps
+  for (let pass = 0; pass < 2; pass++) {
+    for (let aid = 0; aid < activeCellCount; aid++) {
+      const start = sVertTriOffsets[aid];
+      const end = sVertTriOffsets[aid + 1];
+      const nx = sAvgCellNorm[aid * 3];
+      const ny = sAvgCellNorm[aid * 3 + 1];
+      const nz = sAvgCellNorm[aid * 3 + 2];
+
+      let wSum = 2.6;
+      let aoSum = sCellAo[aid] * 2.6;
+      let basSum = sCellBasalt[aid] * 2.6;
+      let patSum = sCellPatina[aid] * 2.6;
+      let wearSum = sCellEdgeWear[aid] * 2.6;
+
+      for (let j = start; j < end; j++) {
+        const t3 = sVertTriList[j] * 3;
+        for (let k = 0; k < 3; k++) {
+          const nb = sTriCellIndices[t3 + k];
+          if (nb === aid) continue;
+          const dotN =
+            nx * sAvgCellNorm[nb * 3] +
+            ny * sAvgCellNorm[nb * 3 + 1] +
+            nz * sAvgCellNorm[nb * 3 + 2];
+          const w = dotN > 0.65 ? dotN : 0.10;
+          wSum += w;
+          aoSum += sCellAo[nb] * w;
+          basSum += sCellBasalt[nb] * w;
+          patSum += sCellPatina[nb] * w;
+          wearSum += sCellEdgeWear[nb] * w;
+        }
+      }
+      const inv = 1 / wSum;
+      sCellAoTmp[aid] = aoSum * inv;
+      sCellBasaltTmp[aid] = basSum * inv;
+      sCellPatinaTmp[aid] = patSum * inv;
+      sCellEdgeWearTmp[aid] = wearSum * inv;
+    }
+    sCellAo.set(sCellAoTmp.subarray(0, activeCellCount), 0);
+    sCellBasalt.set(sCellBasaltTmp.subarray(0, activeCellCount), 0);
+    sCellPatina.set(sCellPatinaTmp.subarray(0, activeCellCount), 0);
+    sCellEdgeWear.set(sCellEdgeWearTmp.subarray(0, activeCellCount), 0);
   }
 }
 
-function emitFinalMonolithBuffers(
-  triCount: number,
-  activeCellCount: number,
-  H: number
-): THREE.BufferGeometry {
-  const cellVertPos = sCellVertPos;
-  const triCellIndices = sTriCellIndices;
-  const triFaceNormals = sTriFaceNormals;
-  const outVerts = triCount * 3;
-  const positions = new Float32Array(outVerts * 3);
-  const normals = new Float32Array(outVerts * 3);
-  const uvs = new Float32Array(outVerts * 2);
-  const materialZone = new Float32Array(outVerts * 4);
+function writeVertexToBuffers(
+  vIdx: number,
+  aid: number,
+  fnx: number,
+  fny: number,
+  fnz: number,
+  ti: number,
+  halfSlot: number,
+  faceIdx: number,
+  bux: number,
+  buy: number,
+  buz: number,
+  bvx: number,
+  bvy: number,
+  bvz: number,
+  uvPadLo: number,
+  uvPadHi: number,
+  inv2H: number,
+  positions: Float32Array,
+  normals: Float32Array,
+  uvs: Float32Array,
+  materialZone: Float32Array,
+  stoneDetail: Float32Array
+): void {
+  const gx = sCellVertPos[aid * 3];
+  const gy = sCellVertPos[aid * 3 + 1];
+  const gz = sCellVertPos[aid * 3 + 2];
+  const px = halfSlot > 0 ? (gx >= 0 ? gx - halfSlot : gx + halfSlot) : gx;
+  const py = halfSlot > 0 ? (gy >= 0 ? gy - halfSlot : gy + halfSlot) : gy;
+  const pz = halfSlot > 0 ? (gz >= 0 ? gz - halfSlot : gz + halfSlot) : gz;
 
-  const uvPadLo = 0.5 / 64;
-  const uvPadHi = 63.5 / 64;
-  const inv2H = 0.5 / H;
+  positions[vIdx * 3] = px;
+  positions[vIdx * 3 + 1] = py;
+  positions[vIdx * 3 + 2] = pz;
 
-  for (let ti = 0; ti < triCount; ti++) {
-    const t3 = ti * 3;
-    const cA = triCellIndices[t3];
-    const cB = triCellIndices[t3 + 1];
-    const cC = triCellIndices[t3 + 2];
-
-    const fnx = triFaceNormals[t3];
-    const fny = triFaceNormals[t3 + 1];
-    const fnz = triFaceNormals[t3 + 2];
-
-    const cx = (cellVertPos[cA * 3] + cellVertPos[cB * 3] + cellVertPos[cC * 3]) * (1 / 3);
-    const cy = (cellVertPos[cA * 3 + 1] + cellVertPos[cB * 3 + 1] + cellVertPos[cC * 3 + 1]) * (1 / 3);
-    const cz = (cellVertPos[cA * 3 + 2] + cellVertPos[cB * 3 + 2] + cellVertPos[cC * 3 + 2]) * (1 / 3);
-    const basis = dominantFaceBasis(cx, cy, cz);
-    const faceIdx = basis.index;
-    const bux = basis.ux, buy = basis.uy, buz = basis.uz;
-    const bvx = basis.vx, bvy = basis.vy, bvz = basis.vz;
-
-    for (let k = 0; k < 3; k++) {
-      const aid = k === 0 ? cA : k === 1 ? cB : cC;
-      const vIdx = t3 + k;
-      const px = cellVertPos[aid * 3];
-      const py = cellVertPos[aid * 3 + 1];
-      const pz = cellVertPos[aid * 3 + 2];
-
-      positions[vIdx * 3] = px;
-      positions[vIdx * 3 + 1] = py;
-      positions[vIdx * 3 + 2] = pz;
-
-      if (sCellIsSharp[aid] === 0) {
-        normals[vIdx * 3] = sAvgCellNorm[aid * 3];
-        normals[vIdx * 3 + 1] = sAvgCellNorm[aid * 3 + 1];
-        normals[vIdx * 3 + 2] = sAvgCellNorm[aid * 3 + 2];
-      } else {
-        let nx = fnx;
-        let ny = fny;
-        let nz = fnz;
-        const start = sVertTriOffsets[aid];
-        const end = sVertTriOffsets[aid + 1];
-        for (let j = start; j < end; j++) {
-          const nti = sVertTriList[j];
-          if (nti === ti) continue;
-          const n3 = nti * 3;
-          const onx = triFaceNormals[n3];
-          const ony = triFaceNormals[n3 + 1];
-          const onz = triFaceNormals[n3 + 2];
-          if (fnx * onx + fny * ony + fnz * onz >= CREASE_COS) {
-            nx += onx;
-            ny += ony;
-            nz += onz;
-          }
-        }
-        const nLen = Math.sqrt(nx * nx + ny * ny + nz * nz);
-        if (nLen > 1e-6 && nx * fnx + ny * fny + nz * fnz > 0) {
-          const invL = 1 / nLen;
-          normals[vIdx * 3] = nx * invL;
-          normals[vIdx * 3 + 1] = ny * invL;
-          normals[vIdx * 3 + 2] = nz * invL;
-        } else {
-          normals[vIdx * 3] = fnx;
-          normals[vIdx * 3 + 1] = fny;
-          normals[vIdx * 3 + 2] = fnz;
-        }
+  if (sCellIsSharp[aid] === 0) {
+    normals[vIdx * 3] = sAvgCellNorm[aid * 3];
+    normals[vIdx * 3 + 1] = sAvgCellNorm[aid * 3 + 1];
+    normals[vIdx * 3 + 2] = sAvgCellNorm[aid * 3 + 2];
+  } else {
+    let nx = fnx;
+    let ny = fny;
+    let nz = fnz;
+    const start = sVertTriOffsets[aid];
+    const end = sVertTriOffsets[aid + 1];
+    for (let j = start; j < end; j++) {
+      const nti = sVertTriList[j];
+      if (nti === ti) continue;
+      const n3 = nti * 3;
+      const onx = sTriFaceNormals[n3];
+      const ony = sTriFaceNormals[n3 + 1];
+      const onz = sTriFaceNormals[n3 + 2];
+      if (fnx * onx + fny * ony + fnz * onz >= CREASE_COS) {
+        nx += onx;
+        ny += ony;
+        nz += onz;
       }
-
-      const u01 = clamp(0.5 + (px * bux + py * buy + pz * buz) * inv2H, uvPadLo, uvPadHi);
-      const v01 = clamp(0.5 + (px * bvx + py * bvy + pz * bvz) * inv2H, uvPadLo, uvPadHi);
-      uvs[vIdx * 2] = (faceIdx + u01) / 6;
-      uvs[vIdx * 2 + 1] = v01;
-
-      const bWeight = sCellBasalt[aid];
-      materialZone[vIdx * 4] = 1 - bWeight;
-      materialZone[vIdx * 4 + 1] = bWeight;
-      materialZone[vIdx * 4 + 2] = sCellAo[aid];
-      materialZone[vIdx * 4 + 3] = sCellPatina[aid];
+    }
+    const nLen = Math.sqrt(nx * nx + ny * ny + nz * nz);
+    if (nLen > 1e-6 && nx * fnx + ny * fny + nz * fnz > 0) {
+      const invL = 1 / nLen;
+      normals[vIdx * 3] = nx * invL;
+      normals[vIdx * 3 + 1] = ny * invL;
+      normals[vIdx * 3 + 2] = nz * invL;
+    } else {
+      normals[vIdx * 3] = fnx;
+      normals[vIdx * 3 + 1] = fny;
+      normals[vIdx * 3 + 2] = fnz;
     }
   }
 
-  const geom = new THREE.BufferGeometry();
-  geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  geom.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
-  geom.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
-  geom.setAttribute('aMaterialZone', new THREE.BufferAttribute(materialZone, 4));
+  const u01 = clamp(0.5 + (px * bux + py * buy + pz * buz) * inv2H, uvPadLo, uvPadHi);
+  const v01 = clamp(0.5 + (px * bvx + py * bvy + pz * bvz) * inv2H, uvPadLo, uvPadHi);
+  uvs[vIdx * 2] = (faceIdx + u01) / 6;
+  uvs[vIdx * 2 + 1] = v01;
+
+  const bWeight = sCellBasalt[aid];
+  materialZone[vIdx * 4] = 1 - bWeight;
+  materialZone[vIdx * 4 + 1] = bWeight;
+  materialZone[vIdx * 4 + 2] = sCellAo[aid];
+  materialZone[vIdx * 4 + 3] = sCellPatina[aid];
+
+  stoneDetail[vIdx * 2] = sCellFloorMask[aid];
+  stoneDetail[vIdx * 2 + 1] = sCellEdgeWear[aid];
+}
+
+function finalizeGeometryBounds(geom: THREE.BufferGeometry, positions: Float32Array): THREE.BufferGeometry {
   let bMinX = Infinity, bMinY = Infinity, bMinZ = Infinity;
   let bMaxX = -Infinity, bMaxY = -Infinity, bMaxZ = -Infinity;
   let maxRSq = 0;
-  for (let aid = 0; aid < activeCellCount; aid++) {
-    const p3 = aid * 3;
-    const x = cellVertPos[p3];
-    const y = cellVertPos[p3 + 1];
-    const z = cellVertPos[p3 + 2];
+  for (let i = 0; i < positions.length; i += 3) {
+    const x = positions[i];
+    const y = positions[i + 1];
+    const z = positions[i + 2];
     if (x < bMinX) bMinX = x;
     if (y < bMinY) bMinY = y;
     if (z < bMinZ) bMinZ = z;
@@ -1908,22 +2144,186 @@ function emitFinalMonolithBuffers(
   return geom;
 }
 
-function buildMonolithGeometry(topology: LabyrinthTopology): THREE.BufferGeometry {
-  const H = topology.cubeHalfExtent;
-  const R = topology.bevelRadius;
-  const hw = topology.channelWidth * 0.5;
-  const surfaceDepth = topology.surfaceDepth;
-  const edgeLimit = (2 * H - R) * INV_SQRT2;
-  const cornerLimit = (3 * H - 2 * R) * INV_SQRT3;
+function emitFinalMonolithBuffers(
+  triCount: number,
+  H: number
+): THREE.BufferGeometry {
+  const cellVertPos = sCellVertPos;
+  const triCellIndices = sTriCellIndices;
+  const triFaceNormals = sTriFaceNormals;
+  const outVerts = triCount * 3;
+  const positions = new Float32Array(outVerts * 3);
+  const normals = new Float32Array(outVerts * 3);
+  const uvs = new Float32Array(outVerts * 2);
+  const materialZone = new Float32Array(outVerts * 4);
+  const stoneDetail = new Float32Array(outVerts * 2);
 
-  const gridPitch = resolveGridPitch(topology);
-  const bridges = buildBridgeVolumes(topology, gridPitch);
-  const carveEdges = buildCarveEdges(topology, bridges);
-  const pocketGrids = buildFacePocketGrids(topology, carveEdges, bridges);
+  const uvPadLo = 0.5 / WET_ATLAS_FACE_SIZE;
+  const uvPadHi = (WET_ATLAS_FACE_SIZE - 0.5) / WET_ATLAS_FACE_SIZE;
+  const inv2H = 0.5 / H;
 
+  for (let ti = 0; ti < triCount; ti++) {
+    const t3 = ti * 3;
+    const cA = triCellIndices[t3];
+    const cB = triCellIndices[t3 + 1];
+    const cC = triCellIndices[t3 + 2];
+
+    const fnx = triFaceNormals[t3];
+    const fny = triFaceNormals[t3 + 1];
+    const fnz = triFaceNormals[t3 + 2];
+
+    const cx = (cellVertPos[cA * 3] + cellVertPos[cB * 3] + cellVertPos[cC * 3]) * (1 / 3);
+    const cy = (cellVertPos[cA * 3 + 1] + cellVertPos[cB * 3 + 1] + cellVertPos[cC * 3 + 1]) * (1 / 3);
+    const cz = (cellVertPos[cA * 3 + 2] + cellVertPos[cB * 3 + 2] + cellVertPos[cC * 3 + 2]) * (1 / 3);
+    const basis = dominantFaceBasis(cx, cy, cz);
+
+    for (let k = 0; k < 3; k++) {
+      const aid = k === 0 ? cA : k === 1 ? cB : cC;
+      writeVertexToBuffers(
+        t3 + k,
+        aid,
+        fnx,
+        fny,
+        fnz,
+        ti,
+        0,
+        basis.index,
+        basis.ux,
+        basis.uy,
+        basis.uz,
+        basis.vx,
+        basis.vy,
+        basis.vz,
+        uvPadLo,
+        uvPadHi,
+        inv2H,
+        positions,
+        normals,
+        uvs,
+        materialZone,
+        stoneDetail
+      );
+    }
+  }
+
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geom.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+  geom.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+  geom.setAttribute('aMaterialZone', new THREE.BufferAttribute(materialZone, 4));
+  geom.setAttribute('aStoneDetail', new THREE.BufferAttribute(stoneDetail, 2));
+  return finalizeGeometryBounds(geom, positions);
+}
+
+function emitOctantMonolithRawBuffers(
+  triCount: number,
+  H: number,
+  halfSlot: number
+): RawStoneMeshBuffers[] {
+  const cellVertPos = sCellVertPos;
+  const triCellIndices = sTriCellIndices;
+  const triFaceNormals = sTriFaceNormals;
+  sOctantTriCounts.fill(0);
+
+  for (let ti = 0; ti < triCount; ti++) {
+    const t3 = ti * 3;
+    const cA = triCellIndices[t3];
+    const cB = triCellIndices[t3 + 1];
+    const cC = triCellIndices[t3 + 2];
+    const cx = cellVertPos[cA * 3] + cellVertPos[cB * 3] + cellVertPos[cC * 3];
+    const cy = cellVertPos[cA * 3 + 1] + cellVertPos[cB * 3 + 1] + cellVertPos[cC * 3 + 1];
+    const cz = cellVertPos[cA * 3 + 2] + cellVertPos[cB * 3 + 2] + cellVertPos[cC * 3 + 2];
+    const oi = (cx >= 0 ? 4 : 0) | (cy >= 0 ? 2 : 0) | (cz >= 0 ? 1 : 0);
+    sTriOctantId[ti] = oi;
+    sOctantTriCounts[oi]++;
+  }
+
+  const posArr: Float32Array[] = [];
+  const normArr: Float32Array[] = [];
+  const uvArr: Float32Array[] = [];
+  const matArr: Float32Array[] = [];
+  const detArr: Float32Array[] = [];
+
+  for (let oi = 0; oi < 8; oi++) {
+    const vCount = sOctantTriCounts[oi] * 3;
+    posArr.push(new Float32Array(vCount * 3));
+    normArr.push(new Float32Array(vCount * 3));
+    uvArr.push(new Float32Array(vCount * 2));
+    matArr.push(new Float32Array(vCount * 4));
+    detArr.push(new Float32Array(vCount * 2));
+  }
+  sOctantCursors.fill(0);
+
+  const uvPadLo = 0.5 / WET_ATLAS_FACE_SIZE;
+  const uvPadHi = (WET_ATLAS_FACE_SIZE - 0.5) / WET_ATLAS_FACE_SIZE;
+  const inv2H = 0.5 / H;
+
+  for (let ti = 0; ti < triCount; ti++) {
+    const oi = sTriOctantId[ti];
+    const t3 = ti * 3;
+    const cA = triCellIndices[t3];
+    const cB = triCellIndices[t3 + 1];
+    const cC = triCellIndices[t3 + 2];
+    const fnx = triFaceNormals[t3];
+    const fny = triFaceNormals[t3 + 1];
+    const fnz = triFaceNormals[t3 + 2];
+
+    const gxC = (cellVertPos[cA * 3] + cellVertPos[cB * 3] + cellVertPos[cC * 3]) * (1 / 3);
+    const gyC = (cellVertPos[cA * 3 + 1] + cellVertPos[cB * 3 + 1] + cellVertPos[cC * 3 + 1]) * (1 / 3);
+    const gzC = (cellVertPos[cA * 3 + 2] + cellVertPos[cB * 3 + 2] + cellVertPos[cC * 3 + 2]) * (1 / 3);
+    const qxC = gxC >= 0 ? gxC - halfSlot : gxC + halfSlot;
+    const qyC = gyC >= 0 ? gyC - halfSlot : gyC + halfSlot;
+    const qzC = gzC >= 0 ? gzC - halfSlot : gzC + halfSlot;
+    const basis = dominantFaceBasis(qxC, qyC, qzC);
+
+    const outTri = sOctantCursors[oi]++;
+    const outBase = outTri * 3;
+    for (let k = 0; k < 3; k++) {
+      const aid = k === 0 ? cA : k === 1 ? cB : cC;
+      writeVertexToBuffers(
+        outBase + k,
+        aid,
+        fnx,
+        fny,
+        fnz,
+        ti,
+        halfSlot,
+        basis.index,
+        basis.ux,
+        basis.uy,
+        basis.uz,
+        basis.vx,
+        basis.vy,
+        basis.vz,
+        uvPadLo,
+        uvPadHi,
+        inv2H,
+        posArr[oi],
+        normArr[oi],
+        uvArr[oi],
+        matArr[oi],
+        detArr[oi]
+      );
+    }
+  }
+
+  const outRaw: RawStoneMeshBuffers[] = [];
+  for (let oi = 0; oi < 8; oi++) {
+    outRaw.push({
+      positions: posArr[oi],
+      normals: normArr[oi],
+      uvs: uvArr[oi],
+      materialZone: matArr[oi],
+      stoneDetail: detArr[oi],
+    });
+  }
+  return outRaw;
+}
+
+function buildSockets(topology: LabyrinthTopology): SocketRecess[] {
   const goalNode = topology.nodes[topology.goalNodeId];
   const startNode = topology.nodes[topology.startNodeId];
-  const sockets: SocketRecess[] = [
+  return [
     {
       cx: goalNode.localPos[0],
       cy: goalNode.localPos[1],
@@ -1961,15 +2361,54 @@ function buildMonolithGeometry(topology: LabyrinthTopology): THREE.BufferGeometr
       maxZ: startNode.localPos[2] + 0.120,
     },
   ];
+}
+
+function runDualContouringPipeline(
+  topology: LabyrinthTopology,
+  dcBound: number,
+  halfSlot: number
+): { triCount: number; activeCellCount: number; H: number } {
+  const H = topology.cubeHalfExtent;
+  const R = topology.bevelRadius;
+  const hw = topology.channelWidth * 0.5;
+  const surfaceDepth = topology.surfaceDepth;
+  const edgeLimit = (2 * H - R) * INV_SQRT2;
+  const cornerLimit = (3 * H - 2 * R) * INV_SQRT3;
+
+  const dcMin = -dcBound;
+  const dcStep = (dcBound * 2) / DC_GRID_N;
+  const invDcStep = 1 / dcStep;
+
+  const gridPitch = resolveGridPitch(topology);
+  const bridges = buildBridgeVolumes(topology, gridPitch);
+  const carveEdges = buildCarveEdges(topology, bridges);
+  const pocketGrids = buildFacePocketGrids(topology, carveEdges, bridges);
+  const sockets = buildSockets(topology);
 
   buildCarveEdgeSpatialBins(carveEdges);
-  bakeMonolithSdf(H, edgeLimit, cornerLimit, hw, bridges, carveEdges, pocketGrids, sockets);
+  bakeMonolithSdf(
+    dcMin,
+    dcStep,
+    invDcStep,
+    halfSlot,
+    H,
+    edgeLimit,
+    cornerLimit,
+    hw,
+    bridges,
+    carveEdges,
+    pocketGrids,
+    sockets
+  );
 
-  extractCrossingEdges();
+  extractCrossingEdges(dcMin, invDcStep, halfSlot === 0);
   const activeCellCount = sLastActiveCells;
   const crossingEdgeCount = sLastCrossingEdges;
 
   solveQefCells(
+    dcMin,
+    dcStep,
+    halfSlot,
     activeCellCount,
     crossingEdgeCount,
     H,
@@ -1984,6 +2423,9 @@ function buildMonolithGeometry(topology: LabyrinthTopology): THREE.BufferGeometr
 
   const triCount = emitDualQuadsAndCsr(activeCellCount, crossingEdgeCount);
   computeCellAoAndZones(
+    dcMin,
+    invDcStep,
+    halfSlot,
     activeCellCount,
     H,
     surfaceDepth,
@@ -1992,10 +2434,16 @@ function buildMonolithGeometry(topology: LabyrinthTopology): THREE.BufferGeometr
     edgeLimit,
     cornerLimit,
     pocketGrids,
-    bridges
+    bridges,
+    carveEdges
   );
 
-  return emitFinalMonolithBuffers(triCount, activeCellCount, H);
+  return { triCount, activeCellCount, H };
+}
+
+function buildMonolithGeometry(topology: LabyrinthTopology): THREE.BufferGeometry {
+  const { triCount, H } = runDualContouringPipeline(topology, DC_BOUND, 0);
+  return emitFinalMonolithBuffers(triCount, H);
 }
 
 function buildNodeTangentFrame(
@@ -2339,6 +2787,260 @@ function buildBeadGeometry(beadRadius: number): THREE.BufferGeometry {
   geom.setIndex(tris);
   geom.computeBoundingSphere();
   return geom;
+}
+
+function clipSanctumHalfByZRaw(
+  srcGeom: THREE.BufferGeometry,
+  topology: LabyrinthTopology,
+  signZ: 1 | -1
+): RawSanctumHalfBuffers {
+  const posAttr = srcGeom.getAttribute('position') as THREE.BufferAttribute;
+  const normAttr = srcGeom.getAttribute('normal') as THREE.BufferAttribute;
+  const zoneAttr = srcGeom.getAttribute('aSanctumZone') as THREE.BufferAttribute;
+  const index = srcGeom.getIndex()!;
+
+  const outPos: number[] = [];
+  const outNorm: number[] = [];
+  const outZone: number[] = [];
+
+  interface ClipV {
+    x: number;
+    y: number;
+    z: number;
+    nx: number;
+    ny: number;
+    nz: number;
+    cal: number;
+    cin: number;
+    sd: number;
+  }
+
+  const readV = (vi: number): ClipV => {
+    const z = posAttr.getZ(vi);
+    return {
+      x: posAttr.getX(vi),
+      y: posAttr.getY(vi),
+      z,
+      nx: normAttr.getX(vi),
+      ny: normAttr.getY(vi),
+      nz: normAttr.getZ(vi),
+      cal: zoneAttr.getX(vi),
+      cin: zoneAttr.getY(vi),
+      sd: signZ * z,
+    };
+  };
+
+  const lerpV = (a: ClipV, b: ClipV): ClipV => {
+    const t = a.sd / (a.sd - b.sd);
+    let nx = a.nx + (b.nx - a.nx) * t;
+    let ny = a.ny + (b.ny - a.ny) * t;
+    let nz = a.nz + (b.nz - a.nz) * t;
+    const nl = Math.hypot(nx, ny, nz) || 1;
+    nx /= nl;
+    ny /= nl;
+    nz /= nl;
+    return {
+      x: a.x + (b.x - a.x) * t,
+      y: a.y + (b.y - a.y) * t,
+      z: 0,
+      nx,
+      ny,
+      nz,
+      cal: a.cal + (b.cal - a.cal) * t,
+      cin: a.cin + (b.cin - a.cin) * t,
+      sd: 0,
+    };
+  };
+
+  const pushTri = (a: ClipV, b: ClipV, c: ClipV): void => {
+    outPos.push(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z);
+    outNorm.push(a.nx, a.ny, a.nz, b.nx, b.ny, b.nz, c.nx, c.ny, c.nz);
+    outZone.push(a.cal, a.cin, b.cal, b.cin, c.cal, c.cin);
+  };
+
+  const eps = 1e-6;
+  const poly: ClipV[] = [];
+  for (let i = 0; i < index.count; i += 3) {
+    const v0 = readV(index.getX(i));
+    const v1 = readV(index.getX(i + 1));
+    const v2 = readV(index.getX(i + 2));
+    const src = [v0, v1, v2];
+    poly.length = 0;
+    for (let k = 0; k < 3; k++) {
+      const cur = src[k];
+      const nxt = src[(k + 1) % 3];
+      const curIn = cur.sd >= -eps;
+      const nxtIn = nxt.sd >= -eps;
+      if (curIn) {
+        poly.push(cur);
+        if (!nxtIn) poly.push(lerpV(cur, nxt));
+      } else if (nxtIn) {
+        poly.push(lerpV(cur, nxt));
+      }
+    }
+    if (poly.length >= 3) {
+      pushTri(poly[0], poly[1], poly[2]);
+      if (poly.length === 4) {
+        pushTri(poly[0], poly[2], poly[3]);
+      }
+    }
+  }
+
+  // Cap the two z=0 cross-sections of the carved mortar cup so split halves appear solid
+  const goalNode = topology.nodes[topology.goalNodeId];
+  const { t1, t2, n } = buildNodeTangentFrame(goalNode, topology.edges);
+  const spillwayAngles: number[] = [];
+  const tmpDir = new THREE.Vector3();
+  for (let i = 0; i < topology.edges.length; i++) {
+    const e = topology.edges[i];
+    if (e.from !== goalNode.id && e.to !== goalNode.id) continue;
+    const kCount = Math.floor(e.samplesPos.length / 3);
+    if (kCount < 2) continue;
+    if (e.from === goalNode.id) {
+      tmpDir.set(
+        e.samplesPos[3] - e.samplesPos[0],
+        e.samplesPos[4] - e.samplesPos[1],
+        e.samplesPos[5] - e.samplesPos[2]
+      );
+    } else {
+      const i0 = (kCount - 1) * 3;
+      const i1 = (kCount - 2) * 3;
+      tmpDir.set(
+        e.samplesPos[i1] - e.samplesPos[i0],
+        e.samplesPos[i1 + 1] - e.samplesPos[i0 + 1],
+        e.samplesPos[i1 + 2] - e.samplesPos[i0 + 2]
+      );
+    }
+    tmpDir.addScaledVector(n, -tmpDir.dot(n));
+    if (tmpDir.lengthSq() > 1e-6) {
+      tmpDir.normalize();
+      spillwayAngles.push(Math.atan2(tmpDir.dot(t2), tmpDir.dot(t1)));
+    }
+  }
+
+  const profile: Array<readonly [number, number, number, number]> = [
+    [0.0, 0.010, 0.0, 1.0],
+    [0.016, 0.013, 0.0, 1.0],
+    [0.032, 0.022, 0.0, 1.0],
+    [0.044, 0.036, 0.0, 1.0],
+    [0.050, 0.044, 0.15, 0.85],
+    [0.055, 0.049, 1.0, 0.0],
+    [0.066, 0.052, 1.0, 0.0],
+    [0.078, 0.050, 1.0, 0.0],
+    [0.087, 0.035, 1.0, 0.0],
+    [0.091, 0.012, 1.0, 0.0],
+    [0.092, -0.028, 1.0, 0.0],
+    [0.0, -0.028, 0.0, 1.0],
+  ];
+
+  // Cross-section along z=0 lies along +X (dir = (+1, 0, 0)) and -X (dir = (-1, 0, 0))
+  const capNormZ = -signZ;
+  const ox = goalNode.localPos[0];
+  const oy = goalNode.localPos[1];
+  const capTris: Array<readonly [number, number, number]> = [
+    [11, 0, 1],
+    [11, 1, 2],
+    [11, 2, 3],
+    [11, 3, 4],
+    [11, 4, 10],
+    [10, 4, 5],
+    [10, 5, 6],
+    [10, 6, 7],
+    [10, 7, 8],
+    [10, 8, 9],
+  ];
+
+  for (const xArm of [-1, 1] as const) {
+    const theta = Math.atan2(xArm * t2.x, xArm * t1.x);
+    let notchFactor = 0;
+    for (let si = 0; si < spillwayAngles.length; si++) {
+      let dAng = Math.abs(theta - spillwayAngles[si]);
+      if (dAng > Math.PI) dAng = Math.PI * 2 - dAng;
+      if (dAng < 0.42) {
+        const u = 1 - dAng / 0.42;
+        notchFactor = Math.max(notchFactor, u * u * (3 - 2 * u));
+      }
+    }
+    const pts = profile.map(([r, baseH, cal, cin], j) => {
+      const h = j >= 5 && j <= 9 ? baseH - notchFactor * 0.036 : baseH;
+      return {
+        x: ox + xArm * r,
+        y: oy + h,
+        z: 0,
+        nx: 0,
+        ny: 0,
+        nz: capNormZ,
+        cal,
+        cin,
+        sd: 0,
+      };
+    });
+
+    for (const [ia, ib, ic] of capTris) {
+      const a = pts[ia], b = pts[ib], c = pts[ic];
+      const e1x = b.x - a.x, e1y = b.y - a.y;
+      const e2x = c.x - a.x, e2y = c.y - a.y;
+      const cz = e1x * e2y - e1y * e2x;
+      if (cz * capNormZ >= 0) {
+        pushTri(a, b, c);
+      } else {
+        pushTri(a, c, b);
+      }
+    }
+  }
+
+  return {
+    positions: new Float32Array(outPos),
+    normals: new Float32Array(outNorm),
+    sanctumZone: new Float32Array(outZone),
+  };
+}
+
+export function buildVaultOctantRawBuffers(topology: LabyrinthTopology): VaultOctantsRawPayload {
+  const { triCount, H } = runDualContouringPipeline(topology, DC_OCTANT_BOUND, OCTANT_HALF_SLOT);
+  const octants = emitOctantMonolithRawBuffers(triCount, H, OCTANT_HALF_SLOT);
+  const fullSanctum = buildSanctumInlayGeometry(topology);
+  const sanctumPosZ = clipSanctumHalfByZRaw(fullSanctum, topology, 1);
+  const sanctumNegZ = clipSanctumHalfByZRaw(fullSanctum, topology, -1);
+  fullSanctum.dispose();
+
+  return {
+    octants,
+    sanctumPosZ,
+    sanctumNegZ,
+  };
+}
+
+export function hydrateVaultOctantGeometries(payload: VaultOctantsRawPayload): VaultOctantsResult {
+  const octantGeometries: THREE.BufferGeometry[] = [];
+  for (let oi = 0; oi < payload.octants.length; oi++) {
+    const raw = payload.octants[oi];
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(raw.positions, 3));
+    geom.setAttribute('normal', new THREE.BufferAttribute(raw.normals, 3));
+    geom.setAttribute('uv', new THREE.BufferAttribute(raw.uvs, 2));
+    geom.setAttribute('aMaterialZone', new THREE.BufferAttribute(raw.materialZone, 4));
+    geom.setAttribute('aStoneDetail', new THREE.BufferAttribute(raw.stoneDetail, 2));
+    octantGeometries.push(finalizeGeometryBounds(geom, raw.positions));
+  }
+
+  const hydrateSanctumHalf = (raw: RawSanctumHalfBuffers): THREE.BufferGeometry => {
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(raw.positions, 3));
+    geom.setAttribute('normal', new THREE.BufferAttribute(raw.normals, 3));
+    geom.setAttribute('aSanctumZone', new THREE.BufferAttribute(raw.sanctumZone, 2));
+    return finalizeGeometryBounds(geom, raw.positions);
+  };
+
+  return {
+    octantGeometries,
+    sanctumHalfPosZGeometry: hydrateSanctumHalf(payload.sanctumPosZ),
+    sanctumHalfNegZGeometry: hydrateSanctumHalf(payload.sanctumNegZ),
+  };
+}
+
+export function buildVaultOctantGeometries(topology: LabyrinthTopology): VaultOctantsResult {
+  return hydrateVaultOctantGeometries(buildVaultOctantRawBuffers(topology));
 }
 
 export function createLabyrinthGeometries(topology: LabyrinthTopology): LabyrinthMeshesResult {

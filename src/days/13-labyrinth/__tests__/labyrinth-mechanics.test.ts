@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
+import * as THREE from 'three/webgpu';
 import {
   CUBE_FACES,
   EDGE_SAMPLE_COUNT,
+  WET_ATLAS_FACE_SIZE,
   WET_ATLAS_HEIGHT,
   WET_ATLAS_WIDTH,
   type CubeFaceId,
@@ -109,7 +111,7 @@ describe('Day 13 — Labyrinth: Multi-Face Topology & Geodesic Invariants', () =
     }
   });
 
-  it('maps 6-face UVs and 384x64 wet-atlas UVs consistently without cross-tile bleed', () => {
+  it('maps 6-face UVs and high-res wet-atlas UVs consistently without cross-tile bleed', () => {
     for (const face of CUBE_FACES) {
       const node = topology.nodes.find((n) => n.face === face && n.tier === 0);
       expect(node).toBeDefined();
@@ -311,11 +313,11 @@ describe('Day 13 — Labyrinth: Physics, Spline Integration & Automated Solve', 
 
     // Check that both portal faces on bevel-wrap edges in the solution path received yellow-ochre paint
     let facesWithPaint = 0;
-    const faceStride = 64;
+    const faceStride = WET_ATLAS_FACE_SIZE;
     for (let f = 0; f < CUBE_FACES.length; f++) {
       let maxR = 0;
       const xStart = f * faceStride;
-      for (let y = 0; y < 64; y++) {
+      for (let y = 0; y < WET_ATLAS_HEIGHT; y++) {
         for (let x = xStart; x < xStart + faceStride; x++) {
           const r = sim.wetAtlasData[(y * WET_ATLAS_WIDTH + x) * 4];
           if (r > maxR) maxR = r;
@@ -324,6 +326,88 @@ describe('Day 13 — Labyrinth: Physics, Spline Integration & Automated Solve', 
       if (maxR > 100) facesWithPaint++;
     }
     expect(facesWithPaint).toBeGreaterThanOrEqual(4);
+  });
+
+  it('is genuinely solvable by smooth human-rate SO(3) quaternion rotation under fixed world -Y gravity', () => {
+    const sim = new LabyrinthBeadSimulator(topology);
+    const dt = 1 / 60;
+    const maxAngularRate = 2.2; // rad/s realistic smooth hand trackball drag (strictly <= 2.4 rad/s)
+    const maxAngleStep = maxAngularRate * dt;
+
+    // Start from the default hero isometric quaternion
+    const yaw = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -0.62);
+    const pitch = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), 0.7);
+    const roll = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), -0.52);
+    const cubeQuat = new THREE.Quaternion().copy(roll).multiply(pitch).multiply(yaw).normalize();
+
+    const worldGravity = new THREE.Vector3(0, -9.81, 0);
+    const worldDown = new THREE.Vector3(0, -1, 0);
+    const desiredLocalVec = new THREE.Vector3();
+    const currentWorldDesired = new THREE.Vector3();
+    const rotAxis = new THREE.Vector3();
+    const deltaQuat = new THREE.Quaternion();
+    const invQuat = new THREE.Quaternion();
+    const localGravVec = new THREE.Vector3();
+    const desiredGravOut: [number, number, number] = [0, 0, 0];
+    const appliedLocalGrav: [number, number, number] = [0, -9.81, 0];
+
+    const visitedUnderpasses = new Set<number>();
+    let steps = 0;
+    const maxSteps = 2800; // <= 46.7 s real play time
+
+    while (!sim.state.solved && steps < maxSteps) {
+      const curEdge = topology.edges[sim.state.edgeId];
+      if (curEdge.kind === 'underpass') {
+        visitedUnderpasses.add(curEdge.from);
+      }
+
+      sim.computeDownhillGravityForNextStep(desiredGravOut);
+      desiredLocalVec.set(desiredGravOut[0], desiredGravOut[1], desiredGravOut[2]).normalize();
+      currentWorldDesired.copy(desiredLocalVec).applyQuaternion(cubeQuat).normalize();
+
+      const cosAngle = Math.max(-1, Math.min(1, currentWorldDesired.dot(worldDown)));
+      const fullAngle = Math.acos(cosAngle);
+      if (fullAngle > 1e-4) {
+        rotAxis.crossVectors(currentWorldDesired, worldDown);
+        if (rotAxis.lengthSq() < 1e-8) {
+          rotAxis.set(1, 0, 0);
+        } else {
+          rotAxis.normalize();
+        }
+        const stepAngle = Math.min(fullAngle, maxAngleStep);
+        expect(stepAngle / dt).toBeLessThanOrEqual(2.4);
+        deltaQuat.setFromAxisAngle(rotAxis, stepAngle);
+        cubeQuat.premultiply(deltaQuat).normalize();
+      }
+
+      invQuat.copy(cubeQuat).invert();
+      localGravVec.copy(worldGravity).applyQuaternion(invQuat);
+      appliedLocalGrav[0] = localGravVec.x;
+      appliedLocalGrav[1] = localGravVec.y;
+      appliedLocalGrav[2] = localGravVec.z;
+
+      sim.step(dt, appliedLocalGrav);
+      steps++;
+    }
+
+    expect(sim.state.solved).toBe(true);
+    expect(visitedUnderpasses.size).toBeGreaterThanOrEqual(4);
+
+    // Verify solution ignition paints all 6 faces cleanly
+    sim.igniteSolutionPathWave(1.0);
+    let paintedFaces = 0;
+    for (let f = 0; f < CUBE_FACES.length; f++) {
+      let maxR = 0;
+      const xStart = f * WET_ATLAS_FACE_SIZE;
+      for (let y = 0; y < WET_ATLAS_HEIGHT; y++) {
+        for (let x = xStart; x < xStart + WET_ATLAS_FACE_SIZE; x++) {
+          const r = sim.wetAtlasData[(y * WET_ATLAS_WIDTH + x) * 4];
+          if (r > maxR) maxR = r;
+        }
+      }
+      if (maxR > 180) paintedFaces++;
+    }
+    expect(paintedFaces).toBe(6);
   });
 
   it('maintains C1 tangent and normal continuity across surface, bevel-wrap, ramp, and underpass joints', () => {

@@ -18,13 +18,24 @@ export const DEAD_END_RESTITUTION = 0.28;
 export const MAX_SUBSTEP_DT = 1 / 180;
 export const SOLVER_GRAVITY_MAGNITUDE = 9.81;
 
-const ROLLING_LINEAR_DRAG = 0.16;
-const ROLLING_QUAD_DRAG = 0.05;
+const ROLLING_LINEAR_DRAG = 0.20;
+const ROLLING_QUAD_DRAG = 1.65;
 const CORNER_RETENTION_BASE = 0.82;
-const BRUSH_TEXEL_RADIUS = 1.85;
+const BRUSH_TEXEL_RADIUS = 6.0;
+const RAMP_CLIMB_RESISTANCE_ATTEN = 0.36;
+const JUNCTION_AXIAL_STEER_DT = 0.045;
+const JUNCTION_LATERAL_STEER_DT = 0.25;
+const IGNITE_SUBSAMPLES_PER_EDGE = 8;
 
 function clamp(v: number, min: number, max: number): number {
   return v < min ? min : v > max ? max : v;
+}
+
+function hash2D01(x: number, y: number): number {
+  let h = Math.imul(x, 374761393) + Math.imul(y, 668265263);
+  h = (h ^ (h >>> 13)) | 0;
+  h = Math.imul(h, 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967295;
 }
 
 export class LabyrinthBeadSimulator {
@@ -45,14 +56,20 @@ export class LabyrinthBeadSimulator {
   private readonly nextEdgeToGoal: Int32Array;
   private readonly maxDistToGoal: number;
 
-  // High-precision wet atlas accumulators to prevent 8-bit quantization stall during decay
+  // High-precision wet atlas accumulators & active-texel sparse index for zero-GC O(painted) decay
   private readonly wetnessF32: Float32Array;
   private readonly sheenF32: Float32Array;
   private readonly thicknessF32: Float32Array;
+  private readonly activeTexels: Int32Array;
+  private readonly activeFlag: Uint8Array;
+  private activeTexelCount = 0;
+  private lastIgniteSample = -1;
   private decayAccumSec = 0;
 
   // Preallocated scratch buffers for strictly zero-allocation step() and solver queries
   private readonly scratchUv: [number, number] = [0, 0];
+  private readonly scratchPos: [number, number, number] = [0, 0, 0];
+  private readonly scratchNorm: [number, number, number] = [0, 0, 0];
   private readonly scratchTan: [number, number, number] = [0, 0, 0];
   private readonly scratchGravityOut: [number, number, number] = [0, 0, 0];
 
@@ -63,9 +80,14 @@ export class LabyrinthBeadSimulator {
 
     const texelCount = WET_ATLAS_WIDTH * WET_ATLAS_HEIGHT;
     this.wetAtlasData = new Uint8Array(texelCount * 4);
+    for (let i = 3; i < this.wetAtlasData.length; i += 4) {
+      this.wetAtlasData[i] = 255;
+    }
     this.wetnessF32 = new Float32Array(texelCount);
     this.sheenF32 = new Float32Array(texelCount);
     this.thicknessF32 = new Float32Array(texelCount);
+    this.activeTexels = new Int32Array(texelCount);
+    this.activeFlag = new Uint8Array(texelCount);
 
     this.twinEdgeId = new Int32Array(this.edgeCount).fill(-1);
     this.edgeBeadPos = new Float32Array(this.edgeCount * EDGE_SAMPLE_COUNT * 3);
@@ -243,16 +265,21 @@ export class LabyrinthBeadSimulator {
   }
 
   private clearWetAtlas(): void {
-    this.wetnessF32.fill(0);
-    this.sheenF32.fill(0);
-    this.thicknessF32.fill(0);
     const data = this.wetAtlasData;
-    for (let i = 0; i < data.length; i += 4) {
-      data[i + 0] = 0;
-      data[i + 1] = 0;
-      data[i + 2] = 0;
-      data[i + 3] = 255;
+    for (let i = 0; i < this.activeTexelCount; i++) {
+      const texelIdx = this.activeTexels[i];
+      this.wetnessF32[texelIdx] = 0;
+      this.sheenF32[texelIdx] = 0;
+      this.thicknessF32[texelIdx] = 0;
+      this.activeFlag[texelIdx] = 0;
+      const byteIdx = texelIdx * 4;
+      data[byteIdx + 0] = 0;
+      data[byteIdx + 1] = 0;
+      data[byteIdx + 2] = 0;
+      data[byteIdx + 3] = 255;
     }
+    this.activeTexelCount = 0;
+    this.lastIgniteSample = -1;
     this.decayAccumSec = 0;
     this.wetAtlasDirty = true;
   }
@@ -271,6 +298,7 @@ export class LabyrinthBeadSimulator {
     const cy = clamp(v01, 0, 1) * (faceSize - 1);
     const rad = BRUSH_TEXEL_RADIUS;
     const radSq = rad * rad;
+    const invRad = 1 / rad;
 
     const minX = Math.max(0, Math.floor(cx - rad));
     const maxX = Math.min(faceSize - 1, Math.ceil(cx + rad));
@@ -288,7 +316,12 @@ export class LabyrinthBeadSimulator {
         if (d2 >= radSq) continue;
 
         const w = 1 - d2 / radSq;
-        const falloff = w * Math.sqrt(w);
+        const rNorm = Math.sqrt(d2) * invRad;
+        // Organic capillary edge wicking near outer contact perimeter without sharp transitions
+        const rimBlend = clamp((rNorm - 0.35) / 0.65, 0, 1);
+        const smoothRim = rimBlend * rimBlend * (3 - 2 * rimBlend);
+        const wick = 1.0 - smoothRim * 0.14 * (1.0 - hash2D01(faceXOffset + lx, ly));
+        const falloff = w * Math.sqrt(w) * wick;
         const texelIdx = rowOffset + faceXOffset + lx;
 
         const nextWet = wetStrength * falloff;
@@ -310,6 +343,10 @@ export class LabyrinthBeadSimulator {
         }
 
         if (changed) {
+          if (this.activeFlag[texelIdx] === 0) {
+            this.activeFlag[texelIdx] = 1;
+            this.activeTexels[this.activeTexelCount++] = texelIdx;
+          }
           const byteIdx = texelIdx * 4;
           this.wetAtlasData[byteIdx + 0] = Math.min(255, Math.round(this.wetnessF32[texelIdx] * 255));
           this.wetAtlasData[byteIdx + 1] = Math.min(255, Math.round(this.sheenF32[texelIdx] * 255));
@@ -321,18 +358,24 @@ export class LabyrinthBeadSimulator {
     }
   }
 
-  private stampCurrentTrail(wetStrength: number, sheenStrength: number, thicknessStrength: number): void {
+  private stampPositionWithEdge(
+    pos: readonly [number, number, number],
+    edgeId: number,
+    wetStrength: number,
+    sheenStrength: number,
+    thicknessStrength: number
+  ): void {
     const H = this.topology.cubeHalfExtent;
-    const { face, u01, v01 } = localPointToFaceUv(this.state.localPos, H);
+    const { face, u01, v01 } = localPointToFaceUv(pos, H);
     this.stampFaceBrush(face, u01, v01, wetStrength, sheenStrength, thicknessStrength);
 
     // Dual-stamp adjacent cube faces across bevel-wrap portals and rim transitions for seamless corners
-    const edge = this.topology.edges[this.state.edgeId];
+    const edge = this.topology.edges[edgeId];
     if (edge.kind === 'bevel-wrap') {
       const fromFace = this.topology.nodes[edge.from].face;
       const toFace = this.topology.nodes[edge.to].face;
       if (fromFace !== face) {
-        projectPointOntoFaceUv(this.state.localPos, fromFace, H, this.scratchUv);
+        projectPointOntoFaceUv(pos, fromFace, H, this.scratchUv);
         this.stampFaceBrush(
           fromFace,
           this.scratchUv[0],
@@ -343,7 +386,7 @@ export class LabyrinthBeadSimulator {
         );
       }
       if (toFace !== face) {
-        projectPointOntoFaceUv(this.state.localPos, toFace, H, this.scratchUv);
+        projectPointOntoFaceUv(pos, toFace, H, this.scratchUv);
         this.stampFaceBrush(
           toFace,
           this.scratchUv[0],
@@ -356,32 +399,75 @@ export class LabyrinthBeadSimulator {
     }
   }
 
+  private stampCurrentTrail(wetStrength: number, sheenStrength: number, thicknessStrength: number): void {
+    this.stampPositionWithEdge(
+      this.state.localPos,
+      this.state.edgeId,
+      wetStrength,
+      sheenStrength,
+      thicknessStrength
+    );
+  }
+
+  /**
+   * Progressively floods a luminous wet golden-ochre capillary glaze backward from
+   * Goal Sanctum to Start Spring along the 39-edge solution geodesic during Phase 1 win ignition.
+   */
+  igniteSolutionPathWave(progress01: number): void {
+    const solEdges = this.topology.solutionEdgePath;
+    if (solEdges.length === 0) return;
+
+    const totalSamples = solEdges.length * IGNITE_SUBSAMPLES_PER_EDGE;
+    const targetSample = Math.min(
+      totalSamples - 1,
+      Math.floor(clamp(progress01, 0, 1) * totalSamples)
+    );
+    if (targetSample <= this.lastIgniteSample) return;
+
+    for (let sIdx = this.lastIgniteSample + 1; sIdx <= targetSample; sIdx++) {
+      const revEdgeOffset = Math.floor(sIdx / IGNITE_SUBSAMPLES_PER_EDGE);
+      const pathIdx = solEdges.length - 1 - revEdgeOffset;
+      const edgeId = solEdges[pathIdx];
+      const subStep = sIdx % IGNITE_SUBSAMPLES_PER_EDGE;
+      const tEdge = 1.0 - subStep / IGNITE_SUBSAMPLES_PER_EDGE;
+      this.evalEdgeBeadFrame(edgeId, tEdge, this.scratchPos, this.scratchNorm, this.scratchTan);
+      this.stampPositionWithEdge(this.scratchPos, edgeId, 1.0, 1.0, 1.0);
+    }
+
+    this.lastIgniteSample = targetSample;
+  }
+
   private decayWetAtlas(dt: number): void {
+    if (this.activeTexelCount === 0) return;
+
     const wetDecay = Math.exp(-0.035 * dt);
     const sheenDecay = Math.exp(-0.32 * dt);
     const thickDecay = Math.exp(-0.008 * dt);
-    const texelCount = WET_ATLAS_WIDTH * WET_ATLAS_HEIGHT;
 
     let anyChanged = false;
-    for (let i = 0; i < texelCount; i++) {
+    for (let k = this.activeTexelCount - 1; k >= 0; k--) {
+      const i = this.activeTexels[k];
       const w = this.wetnessF32[i];
       const sh = this.sheenF32[i];
       const th = this.thicknessF32[i];
-      if (w <= 0 && sh <= 0 && th <= 0) continue;
 
       const nw = w * wetDecay;
       const nsh = sh * sheenDecay;
       // Preserve permanent mineral yellow-ochre residue floor at 65% of peak deposit
       const nth = Math.max(th * 0.65, th * thickDecay);
 
-      this.wetnessF32[i] = nw < 0.002 ? 0 : nw;
-      this.sheenF32[i] = nsh < 0.002 ? 0 : nsh;
-      this.thicknessF32[i] = nth < 0.002 ? 0 : nth;
+      const fw = nw < 0.002 ? 0 : nw;
+      const fsh = nsh < 0.002 ? 0 : nsh;
+      const fth = nth < 0.002 ? 0 : nth;
+
+      this.wetnessF32[i] = fw;
+      this.sheenF32[i] = fsh;
+      this.thicknessF32[i] = fth;
 
       const byteIdx = i * 4;
-      const r = Math.min(255, Math.round(this.wetnessF32[i] * 255));
-      const g = Math.min(255, Math.round(this.sheenF32[i] * 255));
-      const b = Math.min(255, Math.round(this.thicknessF32[i] * 255));
+      const r = Math.min(255, Math.round(fw * 255));
+      const g = Math.min(255, Math.round(fsh * 255));
+      const b = Math.min(255, Math.round(fth * 255));
       if (
         this.wetAtlasData[byteIdx + 0] !== r ||
         this.wetAtlasData[byteIdx + 1] !== g ||
@@ -391,6 +477,14 @@ export class LabyrinthBeadSimulator {
         this.wetAtlasData[byteIdx + 1] = g;
         this.wetAtlasData[byteIdx + 2] = b;
         anyChanged = true;
+      }
+
+      if (fw === 0 && fsh === 0 && fth === 0) {
+        this.activeFlag[i] = 0;
+        const lastIdx = --this.activeTexelCount;
+        if (k !== lastIdx) {
+          this.activeTexels[k] = this.activeTexels[lastIdx];
+        }
       }
     }
     if (anyChanged) {
@@ -488,7 +582,22 @@ export class LabyrinthBeadSimulator {
       const tx = this.state.localTangent[0];
       const ty = this.state.localTangent[1];
       const tz = this.state.localTangent[2];
-      const gTangential = gx * tx + gy * ty + gz * tz;
+      let gTangential = gx * tx + gy * ty + gz * tz;
+
+      // Underpass exit ramp climb ergonomics: attenuate upward face-normal resistance so
+      // a comfortable 24°-35° camera tilt exits stone underpasses while keeping 0° flat rollback
+      const stepEdge = edges[edgeId];
+      if (stepEdge.kind === 'ramp') {
+        const faceN = this.topology.nodes[stepEdge.from].localNormal;
+        const fnx = faceN[0];
+        const fny = faceN[1];
+        const fnz = faceN[2];
+        const tDotN = tx * fnx + ty * fny + tz * fnz;
+        const gDotN = gx * fnx + gy * fny + gz * fnz;
+        if (tDotN > 0 && gDotN < 0) {
+          gTangential -= (1.0 - RAMP_CLIMB_RESISTANCE_ATTEN) * gDotN * tDotN;
+        }
+      }
 
       // Static threshold prevents micro-creep when cube is virtually level
       let accel = 0;
@@ -584,12 +693,25 @@ export class LabyrinthBeadSimulator {
           edgeLen = this.edgeBeadLen[edgeId];
           tNext = Math.min(0.99, overshootDist / edgeLen);
         } else {
-          // Junction routing: score = dot(unitDir, incomingMomentum + dt * g_local)
-          // Use a physical intersection contact window (min 0.035s) so steering is frame-rate independent
-          const steerDt = Math.max(dtSub, 0.035);
-          const momX = newSpeed * inDirX + steerDt * gx;
-          const momY = newSpeed * inDirY + steerDt * gy;
-          const momZ = newSpeed * inDirZ + steerDt * gz;
+          // Junction routing: decompose gravity into axial (along inDir) & lateral components.
+          // Strong lateral gravity (> 1.6 m/s^2) models physical channel-wall capture before
+          // side mouths so players catch 90° turns smoothly without hyper-delicate pre-braking.
+          const gAxial = gx * inDirX + gy * inDirY + gz * inDirZ;
+          const gPerpX = gx - gAxial * inDirX;
+          const gPerpY = gy - gAxial * inDirY;
+          const gPerpZ = gz - gAxial * inDirZ;
+          const gPerp = Math.hypot(gPerpX, gPerpY, gPerpZ);
+
+          const axialSteerDt = Math.max(dtSub, JUNCTION_AXIAL_STEER_DT);
+          const lateralSteerDt =
+            gPerp > 1.6 && gAxial < gPerp * 1.15
+              ? Math.max(dtSub, JUNCTION_LATERAL_STEER_DT)
+              : axialSteerDt;
+
+          const axialMag = newSpeed + axialSteerDt * gAxial;
+          const momX = axialMag * inDirX + lateralSteerDt * gPerpX;
+          const momY = axialMag * inDirY + lateralSteerDt * gPerpY;
+          const momZ = axialMag * inDirZ + lateralSteerDt * gPerpZ;
 
           let bestOutId = outEdges[0];
           let bestScore = -Infinity;

@@ -37,12 +37,12 @@ import {
   valueNoise3DTsl,
 } from '../../core/tslMaterials';
 import { type SpecimenStage } from '../../core/stage/SpecimenStage';
+import { WET_ATLAS_HEIGHT, WET_ATLAS_WIDTH } from './types';
+
+export { WET_ATLAS_HEIGHT, WET_ATLAS_WIDTH };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type TslNode = any;
-
-export const WET_ATLAS_WIDTH = 384;
-export const WET_ATLAS_HEIGHT = 64;
 
 export interface LabyrinthOpticsBundle {
   stoneMaterial: THREE.MeshStandardNodeMaterial;
@@ -57,43 +57,52 @@ export interface LabyrinthOpticsBundle {
     solveProgress01?: number,
     dtSec?: number
   ) => void;
+  setVictoryUniforms: (solveProgress01: number, victoryIgnition01: number) => void;
   dispose: () => void;
 }
 
 /**
- * Lightweight 2-octave irrational-angle rotated 3D FBM using `valueNoise3DTsl`
- * for crisp mineral pores, fossil flecks, and derivative-free normal gradients.
+ * Orthonormal off-axis 3D basis rotation eliminating any axis-aligned
+ * trilinear lattice artifacts on X/Y/Z corridor faces or 45-degree bevels.
  */
-const stoneDetailFbm = Fn(([pos_in, scale_in]: [TslNode, TslNode]) => {
-  const p0 = vec3(pos_in).mul(scale_in);
+const rotLithic3D = Fn(([pos_in]: [TslNode]) => {
+  const p = vec3(pos_in);
+  const u = vec3(0.6324555, 0.5477226, -0.5477226);
+  const v = vec3(-0.4647580, 0.8340136, 0.2973573);
+  const w = vec3(0.6196773, 0.0664932, 0.7820349);
+  return vec3(dot(p, u), dot(p, v), dot(p, w));
+});
+
+/**
+ * 2-octave off-axis rotated 3D lithic FBM with irrational lacunarity (`2.07`)
+ * for continuous oblique travertine strata and mineral tooth.
+ */
+const lithicFbm2 = Fn(([pos_in, scale_in]: [TslNode, TslNode]) => {
+  const p0 = rotLithic3D(vec3(pos_in).mul(scale_in));
   const v0 = valueNoise3DTsl(p0);
-
-  const c = float(0.80901699);
-  const s = float(0.58778525);
-  const p1 = vec3(
-    p0.x.mul(c).sub(p0.z.mul(s)),
-    p0.y.mul(c).add(p0.x.mul(s)),
-    p0.z.mul(c).add(p0.y.mul(s))
-  ).mul(2.11);
+  const p1 = rotLithic3D(p0.mul(2.07).add(vec3(7.31, -4.19, 3.83)));
   const v1 = valueNoise3DTsl(p1);
-
   return v0.mul(0.64).add(v1.mul(0.36));
 });
 
 /**
- * Single-octave derivative-free 3D value-noise micro-relief local-space normal perturbation.
- * Normalizes finite-difference gradient by frequency so `strength_in` stays scale-invariant.
+ * Single-octave off-axis rotated 3D relief field (`68`) for crisp crystalline
+ * stone normal perturbation at half the fragment shader cost.
  */
-const perturbStoneNormalLocal = Fn(
-  ([baseNorm_in, pos3D_in, freq_in, strength_in]: [TslNode, TslNode, TslNode, TslNode]) => {
-    const freq = float(freq_in);
-    const p = vec3(pos3D_in).mul(freq);
-    const eps = float(0.085);
-    const h0 = valueNoise3DTsl(p);
-    const hx = valueNoise3DTsl(p.add(vec3(eps, 0.0, 0.0)));
-    const hy = valueNoise3DTsl(p.add(vec3(0.0, eps, 0.0)));
-    const hz = valueNoise3DTsl(p.add(vec3(0.0, 0.0, eps)));
-    const grad = vec3(hx.sub(h0), hy.sub(h0), hz.sub(h0)).div(eps);
+const evalLithicRelief = Fn(([pos3D_in]: [TslNode]) => {
+  return valueNoise3DTsl(rotLithic3D(vec3(pos3D_in)).mul(68.0));
+});
+
+const perturbLithicNormalLocal = Fn(
+  ([baseNorm_in, pos3D_in, freqMul_in, strength_in]: [TslNode, TslNode, TslNode, TslNode]) => {
+    const p = vec3(pos3D_in).mul(float(freqMul_in));
+    const eps = float(0.0025);
+    const h0 = evalLithicRelief(p);
+    const hx = evalLithicRelief(p.add(vec3(eps, 0.0, 0.0)));
+    const hy = evalLithicRelief(p.add(vec3(0.0, eps, 0.0)));
+    const hz = evalLithicRelief(p.add(vec3(0.0, 0.0, eps)));
+    const normScale = float(68.0).mul(max(float(0.25), float(freqMul_in)));
+    const grad = vec3(hx.sub(h0), hy.sub(h0), hz.sub(h0)).div(eps.mul(normScale));
     return normalize(vec3(baseNorm_in).sub(grad.mul(float(strength_in))));
   }
 );
@@ -122,7 +131,7 @@ export function createLabyrinthOptics(
   const celadonGlauconite = createPigmentUniforms('celadonGlauconite');
 
   // -------------------------------------------------------------------------
-  // Live 384x64 Wet Yellow Ochre Trail DataTexture (linear scalar RGBA channels)
+  // Live 1536x256 Wet Yellow Ochre Trail DataTexture (linear scalar RGBA channels)
   // -------------------------------------------------------------------------
   const wetTrailTexture = new THREE.DataTexture(
     wetAtlasData,
@@ -140,9 +149,12 @@ export function createLabyrinthOptics(
   wetTrailTexture.generateMipmaps = false;
   wetTrailTexture.needsUpdate = true;
 
+  const uSolveProgress = uniform(0.0);
+  const uVictoryIgnition = uniform(0.0);
+
   // -------------------------------------------------------------------------
-  // 1. Carved Stone Monolith Material (Fossiliferous Limestone + Vesicular Basalt
-  //    + Verdigris Copper-Carbonate Patina + Wet Yellow Ochre Trail Glaze)
+  // 1. Carved Stone Monolith Material (Rotated Lithic Limestone + Vesicular Basalt
+  //    + Crystalline Verdigris Patina + Floor-Gated Wet Yellow Ochre Trail Glaze)
   // -------------------------------------------------------------------------
   const stoneMaterial = new THREE.MeshStandardNodeMaterial({
     roughness: 0.80,
@@ -156,129 +168,128 @@ export function createLabyrinthOptics(
     const creviceAo = clamp(aMatZone.z, 0.0, 1.0);
     const patinaInput = clamp(aMatZone.w, 0.0, 1.0);
 
+    const aDetail = attribute('aStoneDetail', 'vec2'); // [floorMask, convexEdgeWear]
+    const floorMask = clamp(aDetail.x, 0.0, 1.0);
+    const convexEdgeWear = clamp(aDetail.y, 0.0, 1.0);
+
     // Strictly uniform control flow: explicit-LOD texture fetch unconditionally at shader entry
     const wetSample = texture(wetTrailTexture, uv()).level(float(0.0));
-    const wetness = clamp(wetSample.r, 0.0, 1.0);
-    const freshSheen = clamp(wetSample.g, 0.0, 1.0);
-    const ochreThickness = clamp(wetSample.b, 0.0, 1.0);
+    const floorGate = smoothstep(float(0.08), float(0.55), floorMask);
+    const wetness = clamp(wetSample.r, 0.0, 1.0).mul(floorGate);
+    const freshSheen = clamp(wetSample.g, 0.0, 1.0).mul(floorGate);
+    const ochreThickness = clamp(wetSample.b, 0.0, 1.0).mul(floorGate);
 
     const p = positionLocal;
-    const macroWarp = stoneDetailFbm(p.mul(2.1), float(1.75));
+    const rotP = rotLithic3D(p);
+    const nMacro = valueNoise3DTsl(rotP.mul(4.2));
 
-    // Fossiliferous limestone: tilted warm travertine bedding + micro-fissures + subtle warm kaolin bioclasts
-    const strataCoord = vec3(
-      p.x.mul(1.85),
-      p.y.mul(8.6).add(p.x.mul(1.15)).add(macroWarp.mul(1.75)),
-      p.z.mul(1.85)
-    );
-    const strata = stoneDetailFbm(strataCoord, float(1.85));
-    const stoneGrain = stoneDetailFbm(p.mul(18.0), float(2.05));
+    // Continuous tilted travertine bedding (stretched oblique strata + 2-octave fbm, zero closed rings)
+    const bedCoord = rotP.mul(vec3(0.65, 3.85, 0.65)).add(vec3(0.18, nMacro.mul(0.85), -0.14));
+    const strata = lithicFbm2(bedCoord, float(1.0));
+    const bedPhase = rotP.y.mul(5.2).add(rotP.x.mul(1.15)).add(nMacro.mul(1.45)).add(strata.mul(0.95));
+    const bedBand = sin(bedPhase.mul(6.283185)).mul(0.5).add(0.5);
+    const travertineStrata = strata.mul(0.62).add(bedBand.mul(0.38));
 
-    const fleckNoise = valueNoise3DTsl(
-      p.mul(vec3(56.0, 92.0, 56.0)).add(vec3(3.7, 8.1, 2.4))
-    );
+    // Shared 3-scale off-axis oolitic & crystalline mineral grain (reused across limestone, basalt, patina)
+    const nMid = valueNoise3DTsl(rotP.mul(44.0).add(vec3(4.9, 2.3, 7.6)));
+    const nFine = valueNoise3DTsl(rotP.mul(148.0).add(vec3(2.4, 7.1, 4.3)));
+    const nSpark = valueNoise3DTsl(rotP.mul(285.0).add(vec3(9.1, 1.7, 6.2)));
+    const stoneGrain = nFine.mul(0.58).add(nSpark.mul(0.42));
+
+    const limestonePits = smoothstep(float(0.26), float(0.09), nMid);
+    const beddingDarkSeam = smoothstep(float(0.82), float(0.96), bedBand).mul(float(0.65).add(nMid.mul(0.35)));
     const fossilFlecks = smoothstep(
-      float(0.86),
-      float(0.96),
-      fleckNoise.mul(float(0.80).add(stoneGrain.mul(0.32)))
+      float(0.79),
+      float(0.94),
+      nFine.mul(0.54).add(nSpark.mul(0.46)).mul(float(0.84).add(travertineStrata.mul(0.24)))
     );
 
-    const veinBase = valueNoise3DTsl(
-      p.mul(vec3(7.4, 5.2, 7.4)).add(macroWarp.mul(1.25)).add(vec3(6.3, 1.9, 4.5))
-    );
-    const microFissure = float(1.0).sub(
-      smoothstep(float(0.002), float(0.009), abs(veinBase.sub(0.505)))
-    );
-
-    const pitNoise = valueNoise3DTsl(p.mul(52.0).add(vec3(2.1, 5.3, 7.7)));
-    const limestonePits = smoothstep(float(0.28), float(0.11), pitNoise);
-
-    const umberShadowBed = rawUmber.rInf.mul(0.62);
+    const umberShadowBed = rawUmber.rInf.mul(0.58);
     const limestoneMixT = clamp(
-      float(0.55).add(strata.mul(0.34)).add(stoneGrain.mul(0.14)).sub(limestonePits.mul(0.16)),
-      0.55,
+      float(0.26)
+        .add(travertineStrata.mul(0.52))
+        .add(stoneGrain.mul(0.18))
+        .sub(limestonePits.mul(0.20))
+        .sub(beddingDarkSeam.mul(0.14)),
+      0.16,
       0.95
     );
-    const warmLimestoneK = mix(
-      rawUmber.K,
-      mix(warmKaolin.K, yellowOchre.K, float(0.26)),
+    const warmMineralK = mix(
+      mix(rawUmber.K, burntSienna.K, float(0.34).add(travertineStrata.mul(0.26))),
+      mix(warmKaolin.K, yellowOchre.K, float(0.30)),
       limestoneMixT
     );
-    const warmLimestoneS = mix(
-      rawUmber.S,
-      mix(warmKaolin.S, yellowOchre.S, float(0.26)),
+    const warmMineralS = mix(
+      mix(rawUmber.S, burntSienna.S, float(0.34).add(travertineStrata.mul(0.26))),
+      mix(warmKaolin.S, yellowOchre.S, float(0.30)),
       limestoneMixT
     );
     const limestoneDepth = clamp(
-      float(1.08).add(strata.mul(0.65)).sub(limestonePits.mul(0.38)),
-      0.28,
-      1.75
-    );
-    const limestoneGlaze = kubelkaMunkGlaze(
-      warmLimestoneK,
-      warmLimestoneS,
-      limestoneDepth,
-      umberShadowBed
-    );
-    const limestoneFissured = limestoneGlaze.mul(float(1.0).sub(microFissure.mul(0.12)));
-    const fossilGlazeDepth = clamp(fossilFlecks.mul(0.09), 0.0, 0.09);
-    const limestoneFinal = kubelkaMunkGlaze(
-      warmKaolin.K,
-      warmKaolin.S,
-      fossilGlazeDepth,
-      limestoneFissured
+      float(0.86).add(travertineStrata.mul(0.82)).sub(limestonePits.mul(0.40)),
+      0.24,
+      1.85
     );
 
-    // Dark vesicular basalt: rawUmber heavily absorbing over deep Chalky Slate backing
-    const vesicleMacro = valueNoise3DTsl(p.mul(34.0).add(vec3(4.9, 2.3, 7.6)));
-    const vesicleMicro = valueNoise3DTsl(p.mul(85.0));
+    // Rotated dark vesicular basalt sharing nMid & nFine
     const vesiclePit = max(
-      smoothstep(float(0.39), float(0.18), vesicleMacro),
-      smoothstep(float(0.32), float(0.13), vesicleMicro).mul(0.68)
+      smoothstep(float(0.38), float(0.16), nMid),
+      smoothstep(float(0.32), float(0.12), nFine).mul(0.68)
     );
     const slateBacking = vec3(
       CHALKY_SLATE_LINEAR[0],
       CHALKY_SLATE_LINEAR[1],
       CHALKY_SLATE_LINEAR[2]
-    ).mul(0.55);
-    const basaltBody = kubelkaMunkGlaze(
-      rawUmber.K.mul(2.1),
-      rawUmber.S.mul(0.35),
-      float(0.26).add(vesicleMacro.mul(0.22)).mul(float(1.0).sub(vesiclePit.mul(0.88))),
-      slateBacking
-    );
-    const basaltSeptaRim = smoothstep(float(0.62), float(0.88), vesicleMacro).mul(
-      float(1.0).sub(vesiclePit)
-    );
-    const basaltFinal = basaltBody.add(warmKaolin.rInf.mul(basaltSeptaRim.mul(0.085)));
+    ).mul(0.52);
+    const basaltDepth = float(0.24).add(nMid.mul(0.22)).mul(float(1.0).sub(vesiclePit.mul(0.90)));
 
-    // Blend limestone & basalt zones + apply carved crevice & underpass soffit AO
-    const stoneBase = mix(basaltFinal, limestoneFinal, limestoneW);
-    const aoFactor = mix(float(0.24), float(1.04), creviceAo);
+    // Unified Kubelka-Munk base pass for limestone + basalt (call 1 of 3)
+    const stoneK = mix(rawUmber.K.mul(2.15), warmMineralK, limestoneW);
+    const stoneS = mix(rawUmber.S.mul(0.34), warmMineralS, limestoneW);
+    const stoneDepth = mix(basaltDepth, limestoneDepth, limestoneW);
+    const stoneBacking = mix(slateBacking, umberShadowBed, limestoneW);
+    const stoneKmBase = kubelkaMunkGlaze(stoneK, stoneS, stoneDepth, stoneBacking);
+
+    const arrisWearMask = convexEdgeWear.mul(float(0.66).add(nFine.mul(0.34)));
+    const stoneWithSeams = mix(
+      stoneKmBase,
+      rawUmber.rInf.mul(0.64),
+      beddingDarkSeam.mul(0.32).mul(limestoneW)
+    );
+    const basaltSeptaRim = smoothstep(float(0.64), float(0.90), nMid.mul(0.65).add(nFine.mul(0.35)))
+      .mul(float(1.0).sub(vesiclePit));
+    const paleCalcite = mix(warmKaolin.rInf, boneCalcite.rInf, float(0.68));
+    const limestoneHighlight = clamp(
+      arrisWearMask.mul(0.48).add(fossilFlecks.mul(0.22)),
+      0.0,
+      0.56
+    ).mul(limestoneW);
+    const stoneBase = mix(stoneWithSeams, paleCalcite, limestoneHighlight)
+      .add(warmKaolin.rInf.mul(basaltSeptaRim.mul(0.10).mul(basaltW)));
+
+    const aoFactor = mix(float(0.22), float(1.04), creviceAo);
     const stoneWithAo = stoneBase.mul(aoFactor);
 
     // Compute wet mask first so live liquid trail suppresses older copper patina underneath
     const wetMask = smoothstep(float(0.02), float(0.20), max(wetness, ochreThickness));
 
-    // Fine mineral-granule Verdigris Malachite & Celadon Glauconite patina in deep seams & soffits
-    const patinaMacro = valueNoise3DTsl(p.mul(36.0).add(vec3(1.5, 6.2, 3.8)));
-    const patinaGranule = valueNoise3DTsl(p.mul(78.0).add(vec3(7.2, 2.9, 5.1)));
-    const patinaTex = mix(patinaMacro, patinaGranule, float(0.45));
+    // Crystalline Verdigris Malachite & Celadon Glauconite crust in deep seams & soffits (reusing nMid & nSpark)
+    const patinaTex = nMid.mul(0.50).add(nSpark.mul(0.50));
     const patinaSignal = patinaInput
-      .mul(float(0.48).add(patinaTex.mul(0.84)))
-      .add(stoneGrain.sub(0.5).mul(0.22));
-    const patinaCoverage = smoothstep(float(0.40), float(0.86), patinaSignal);
-    const patinaFinal = patinaCoverage.mul(float(1.0).sub(wetMask.mul(0.90)));
-    const patinaK = mix(verdigrisMalachite.K, celadonGlauconite.K, patinaTex.mul(0.32));
-    const patinaS = mix(verdigrisMalachite.S, celadonGlauconite.S, patinaTex.mul(0.32));
+      .mul(float(0.46).add(patinaTex.mul(0.88)))
+      .add(stoneGrain.sub(0.5).mul(0.26));
+    const patinaCoverage = smoothstep(float(0.38), float(0.84), patinaSignal);
+    const patinaFinal = patinaCoverage.mul(float(1.0).sub(wetMask.mul(0.92)));
+    const patinaK = mix(verdigrisMalachite.K, celadonGlauconite.K, nSpark.mul(0.36));
+    const patinaS = mix(verdigrisMalachite.S, celadonGlauconite.S, nSpark.mul(0.36));
+    // Patina glaze (call 2 of 3)
     const stoneWithPatina = kubelkaMunkGlaze(
       patinaK,
       patinaS,
-      patinaFinal.mul(1.32),
+      patinaFinal.mul(1.36),
       stoneWithAo
     );
 
-    // Vivid glossy wet Yellow Ochre trail glaze
+    // Floor-gated glossy wet Yellow Ochre trail glaze
     const wetDarkenedBacking = stoneWithPatina.mul(mix(float(1.0), float(0.82), wetMask));
     const trailK = mix(yellowOchre.K, realgarAmber.K, float(0.28).add(freshSheen.mul(0.14)));
     const trailS = mix(yellowOchre.S, realgarAmber.S, float(0.28).add(freshSheen.mul(0.14)));
@@ -292,12 +303,13 @@ export function createLabyrinthOptics(
 
     stoneMaterial.colorNode = clamp(finalStoneRgb, 0.0, 1.0);
 
-    // Matte porous stone (0.78-0.92) -> glossy wet Yellow Ochre meniscus (0.11)
+    // Matte porous stone (0.76-0.94) -> glossy wet Yellow Ochre meniscus (0.11)
     const dryRoughness = clamp(
-      mix(float(0.78), float(0.90), basaltW)
+      mix(float(0.79), float(0.91), basaltW)
         .add(patinaFinal.mul(0.08))
-        .sub(stoneGrain.mul(0.06)),
-      0.68,
+        .sub(stoneGrain.mul(0.08))
+        .sub(arrisWearMask.mul(0.06)),
+      0.66,
       0.96
     );
     const wetGlossFactor = clamp(wetness.mul(1.20).add(freshSheen.mul(0.32)), 0.0, 1.0);
@@ -308,36 +320,39 @@ export function createLabyrinthOptics(
     );
     stoneMaterial.metalnessNode = mix(float(0.02), float(0.08), wetGlossFactor);
 
-    // Fine 3D mineral tooth bump (deepened vesicle pores on basalt) damped inside wet pools
-    const bumpAmp = mix(float(0.095), float(0.20), basaltW)
-      .add(patinaFinal.mul(0.032))
+    // 3-scale off-axis rotated crystalline lithic bump damped smoothly inside wet pools
+    const bumpAmp = mix(float(0.105), float(0.215), basaltW)
+      .add(patinaFinal.mul(0.045))
       .mul(float(1.0).sub(wetGlossFactor.mul(0.88)));
-    const perturbedLocalNorm = perturbStoneNormalLocal(
+    const perturbedLocalNorm = perturbLithicNormalLocal(
       normalLocal,
       p,
-      float(64.0),
+      float(1.0),
       bumpAmp
     );
     stoneMaterial.normalNode = transformNormalToView(perturbedLocalNorm);
 
-    // Soft lustrous studio sheen along wet ochre meniscus pools without white facet blowout
+    // Soft lustrous studio sheen along wet ochre meniscus + warm capillary ignition wave on solve
     const viewDirW = normalize(cameraPosition.sub(positionWorld));
     const nW = normalize(normalWorld);
     const keySoftboxDir = normalize(vec3(0.6, 4.4, 4.2));
     const halfVec = normalize(keySoftboxDir.add(viewDirW));
     const meniscusSpec = pow(max(float(0.0), dot(nW, halfVec)), float(24.0));
     const meniscusFresnel = pow(abs(float(1.0).sub(clamp(dot(nW, viewDirW), 0.0, 1.0))), float(3.2));
-    stoneMaterial.emissiveNode = mix(yellowOchre.rInf, warmKaolin.rInf, float(0.28))
+    const meniscusGlow = mix(yellowOchre.rInf, warmKaolin.rInf, float(0.28))
       .mul(meniscusSpec.mul(0.22).add(meniscusFresnel.mul(0.10)))
       .mul(wetGlossFactor)
       .mul(float(0.55).add(freshSheen.mul(0.45)));
+    const ignitionGlow = mix(realgarAmber.rInf, yellowOchre.rInf, float(0.42))
+      .mul(uVictoryIgnition)
+      .mul(0.85)
+      .mul(wetMask);
+    stoneMaterial.emissiveNode = meniscusGlow.add(ignitionGlow);
   }
 
   // -------------------------------------------------------------------------
   // 2. Goal Sanctum Material (Bone Calcite Collar + Cinnabar Vermilion Cup)
   // -------------------------------------------------------------------------
-  const uSolveProgress = uniform(0.0);
-
   const sanctumMaterial = new THREE.MeshStandardNodeMaterial({
     roughness: 0.68,
     metalness: 0.02,
@@ -351,8 +366,9 @@ export function createLabyrinthOptics(
     const cupBlend = smoothstep(float(0.28), float(0.72), clamp(cinnabarW.div(normSum), 0.0, 1.0));
 
     const p = positionLocal;
-    const grain = stoneDetailFbm(p.mul(22.0), float(2.2));
-    const microPit = smoothstep(float(0.28), float(0.14), valueNoise3DTsl(p.mul(58.0)));
+    const rotP = rotLithic3D(p);
+    const grain = lithicFbm2(p, float(18.0));
+    const microPit = smoothstep(float(0.28), float(0.12), valueNoise3DTsl(rotP.mul(92.0)));
 
     const calciteCollar = kubelkaMunkGlaze(
       boneCalcite.K,
@@ -376,11 +392,11 @@ export function createLabyrinthOptics(
       0.88
     );
     sanctumMaterial.normalNode = transformNormalToView(
-      perturbStoneNormalLocal(normalLocal, p, float(46.0), float(0.045))
+      perturbLithicNormalLocal(normalLocal, p, float(0.85), float(0.055))
     );
     sanctumMaterial.emissiveNode = mix(cinnabarVermilion.rInf, realgarAmber.rInf, float(0.48))
       .mul(cupBlend)
-      .mul(uSolveProgress.mul(0.14));
+      .mul(uSolveProgress.mul(0.14).add(uVictoryIgnition.mul(0.45)));
   }
 
   // -------------------------------------------------------------------------
@@ -399,7 +415,7 @@ export function createLabyrinthOptics(
     const rimBlend = clamp(amberW.div(normSum), 0.0, 1.0);
 
     const p = positionLocal;
-    const grain = stoneDetailFbm(p.mul(26.0), float(2.2));
+    const grain = lithicFbm2(p, float(20.0));
     const slateBacking = vec3(
       CHALKY_SLATE_LINEAR[0],
       CHALKY_SLATE_LINEAR[1],
@@ -431,7 +447,7 @@ export function createLabyrinthOptics(
       0.92
     );
     startSpringMaterial.normalNode = transformNormalToView(
-      perturbStoneNormalLocal(normalLocal, p, float(52.0), mix(float(0.10), float(0.035), rimBlend))
+      perturbLithicNormalLocal(normalLocal, p, float(0.95), mix(float(0.11), float(0.040), rimBlend))
     );
   }
 
@@ -617,6 +633,14 @@ export function createLabyrinthOptics(
     uSolveProgress.value = Math.max(0, Math.min(1, solveProgress01));
   };
 
+  const setVictoryUniforms: LabyrinthOpticsBundle['setVictoryUniforms'] = (
+    solveProgress01,
+    victoryIgnition01
+  ) => {
+    uSolveProgress.value = Math.max(0, Math.min(1, solveProgress01));
+    uVictoryIgnition.value = Math.max(0, Math.min(1, victoryIgnition01));
+  };
+
   return {
     stoneMaterial,
     sanctumMaterial,
@@ -624,6 +648,7 @@ export function createLabyrinthOptics(
     beadMaterial,
     wetTrailTexture,
     updateBeadUniforms,
+    setVictoryUniforms,
     dispose: () => {
       wetTrailTexture.dispose();
       stoneMaterial.dispose();

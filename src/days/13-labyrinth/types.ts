@@ -2,9 +2,9 @@ export type CubeFaceId = 'px' | 'nx' | 'py' | 'ny' | 'pz' | 'nz';
 
 export const CUBE_FACES: readonly CubeFaceId[] = ['px', 'nx', 'py', 'ny', 'pz', 'nz'];
 
-export const WET_ATLAS_FACE_SIZE = 64;
-export const WET_ATLAS_WIDTH = WET_ATLAS_FACE_SIZE * CUBE_FACES.length; // 384
-export const WET_ATLAS_HEIGHT = WET_ATLAS_FACE_SIZE; // 64
+export const WET_ATLAS_FACE_SIZE = 256;
+export const WET_ATLAS_WIDTH = WET_ATLAS_FACE_SIZE * CUBE_FACES.length; // 1536
+export const WET_ATLAS_HEIGHT = WET_ATLAS_FACE_SIZE; // 256
 export const EDGE_SAMPLE_COUNT = 9;
 export const GRID_PITCH = 0.215;
 
