@@ -165,112 +165,124 @@ export function createLabyrinthOptics(
     const p = positionLocal;
     const macroWarp = stoneDetailFbm(p.mul(2.1), float(1.75));
 
-    // Fossiliferous limestone: tilted sedimentary bedding + travertine pits + calcite bioclasts
+    // Fossiliferous limestone: tilted warm travertine bedding + micro-fissures + subtle warm kaolin bioclasts
     const strataCoord = vec3(
       p.x.mul(1.85),
       p.y.mul(8.6).add(p.x.mul(1.15)).add(macroWarp.mul(1.75)),
       p.z.mul(1.85)
     );
     const strata = stoneDetailFbm(strataCoord, float(1.85));
-    const stoneGrain = stoneDetailFbm(p.mul(16.0), float(2.05));
+    const stoneGrain = stoneDetailFbm(p.mul(18.0), float(2.05));
 
     const fleckNoise = valueNoise3DTsl(
-      p.mul(vec3(52.0, 88.0, 52.0)).add(vec3(3.7, 8.1, 2.4))
+      p.mul(vec3(56.0, 92.0, 56.0)).add(vec3(3.7, 8.1, 2.4))
     );
-    const fossilFlecks = smoothstep(float(0.75), float(0.88), fleckNoise.mul(float(0.78).add(stoneGrain.mul(0.36))));
+    const fossilFlecks = smoothstep(
+      float(0.86),
+      float(0.96),
+      fleckNoise.mul(float(0.80).add(stoneGrain.mul(0.32)))
+    );
 
     const veinBase = valueNoise3DTsl(
-      p.mul(vec3(6.2, 4.4, 6.2)).add(macroWarp.mul(1.35)).add(vec3(6.3, 1.9, 4.5))
+      p.mul(vec3(7.4, 5.2, 7.4)).add(macroWarp.mul(1.25)).add(vec3(6.3, 1.9, 4.5))
     );
-    const veinMask = float(1.0).sub(smoothstep(float(0.003), float(0.015), abs(veinBase.sub(0.505))));
+    const microFissure = float(1.0).sub(
+      smoothstep(float(0.002), float(0.009), abs(veinBase.sub(0.505)))
+    );
 
-    const pitNoise = valueNoise3DTsl(p.mul(48.0).add(vec3(2.1, 5.3, 7.7)));
-    const limestonePits = smoothstep(float(0.26), float(0.12), pitNoise);
+    const pitNoise = valueNoise3DTsl(p.mul(52.0).add(vec3(2.1, 5.3, 7.7)));
+    const limestonePits = smoothstep(float(0.28), float(0.11), pitNoise);
 
-    const umberShadowBed = rawUmber.rInf.mul(0.38);
+    const umberShadowBed = rawUmber.rInf.mul(0.62);
     const limestoneMixT = clamp(
-      float(0.24).add(strata.mul(0.56)).add(stoneGrain.mul(0.24)).sub(limestonePits.mul(0.22)),
-      0.16,
-      0.96
+      float(0.55).add(strata.mul(0.34)).add(stoneGrain.mul(0.14)).sub(limestonePits.mul(0.16)),
+      0.55,
+      0.95
     );
     const warmLimestoneK = mix(
       rawUmber.K,
-      mix(warmKaolin.K, yellowOchre.K, float(0.22)),
+      mix(warmKaolin.K, yellowOchre.K, float(0.26)),
       limestoneMixT
     );
     const warmLimestoneS = mix(
       rawUmber.S,
-      mix(warmKaolin.S, yellowOchre.S, float(0.22)),
+      mix(warmKaolin.S, yellowOchre.S, float(0.26)),
       limestoneMixT
     );
     const limestoneDepth = clamp(
-      float(0.86).add(strata.mul(0.72)).sub(limestonePits.mul(0.44)),
-      0.18,
-      1.65
+      float(1.08).add(strata.mul(0.65)).sub(limestonePits.mul(0.38)),
+      0.28,
+      1.75
     );
-    const limestoneBody = kubelkaMunkGlaze(
+    const limestoneGlaze = kubelkaMunkGlaze(
       warmLimestoneK,
       warmLimestoneS,
       limestoneDepth,
       umberShadowBed
     );
-    const fossilGlazeDepth = clamp(fossilFlecks.mul(0.46).add(veinMask.mul(0.34)), 0.0, 0.72);
+    const limestoneFissured = limestoneGlaze.mul(float(1.0).sub(microFissure.mul(0.12)));
+    const fossilGlazeDepth = clamp(fossilFlecks.mul(0.09), 0.0, 0.09);
     const limestoneFinal = kubelkaMunkGlaze(
-      boneCalcite.K,
-      boneCalcite.S,
+      warmKaolin.K,
+      warmKaolin.S,
       fossilGlazeDepth,
-      limestoneBody
+      limestoneFissured
     );
 
-    // Dark vesicular basalt: rawUmber glazed over Chalky Slate backing with sharp volcanic pores
-    const vesicleMacro = valueNoise3DTsl(p.mul(25.0).add(vec3(4.9, 2.3, 7.6)));
-    const vesicleMicro = valueNoise3DTsl(p.mul(72.0));
+    // Dark vesicular basalt: rawUmber heavily absorbing over deep Chalky Slate backing
+    const vesicleMacro = valueNoise3DTsl(p.mul(32.0).add(vec3(4.9, 2.3, 7.6)));
+    const vesicleMicro = valueNoise3DTsl(p.mul(85.0));
     const vesiclePit = max(
-      smoothstep(float(0.38), float(0.18), vesicleMacro),
-      smoothstep(float(0.30), float(0.13), vesicleMicro).mul(0.65)
+      smoothstep(float(0.39), float(0.18), vesicleMacro),
+      smoothstep(float(0.32), float(0.13), vesicleMicro).mul(0.68)
     );
     const slateBacking = vec3(
       CHALKY_SLATE_LINEAR[0],
       CHALKY_SLATE_LINEAR[1],
       CHALKY_SLATE_LINEAR[2]
-    ).mul(0.85);
+    ).mul(0.55);
     const basaltBody = kubelkaMunkGlaze(
-      rawUmber.K.mul(1.45),
-      rawUmber.S.mul(0.48),
-      float(0.22).add(vesicleMacro.mul(0.24)).mul(float(1.0).sub(vesiclePit.mul(0.88))),
+      rawUmber.K.mul(2.1),
+      rawUmber.S.mul(0.35),
+      float(0.26).add(vesicleMacro.mul(0.22)).mul(float(1.0).sub(vesiclePit.mul(0.88))),
       slateBacking
     );
-    const basaltSeptaRim = smoothstep(float(0.58), float(0.86), vesicleMacro).mul(
+    const basaltSeptaRim = smoothstep(float(0.62), float(0.88), vesicleMacro).mul(
       float(1.0).sub(vesiclePit)
     );
-    const basaltFinal = basaltBody.add(warmKaolin.rInf.mul(basaltSeptaRim.mul(0.055)));
+    const basaltFinal = basaltBody.add(warmKaolin.rInf.mul(basaltSeptaRim.mul(0.032)));
 
     // Blend limestone & basalt zones + apply carved crevice & underpass soffit AO
     const stoneBase = mix(basaltFinal, limestoneFinal, limestoneW);
-    const aoFactor = mix(float(0.26), float(1.04), creviceAo);
+    const aoFactor = mix(float(0.24), float(1.04), creviceAo);
     const stoneWithAo = stoneBase.mul(aoFactor);
 
-    // Encrusted Verdigris Malachite & Celadon Glauconite copper-carbonate seam patina
-    const patinaNoise = valueNoise3DTsl(p.mul(15.5).add(vec3(1.5, 6.2, 3.8)));
+    // Compute wet mask first so live liquid trail suppresses older copper patina underneath
+    const wetMask = smoothstep(float(0.02), float(0.20), max(wetness, ochreThickness));
+
+    // Fine mineral-granule Verdigris Malachite & Celadon Glauconite patina in deep seams & soffits
+    const patinaMacro = valueNoise3DTsl(p.mul(36.0).add(vec3(1.5, 6.2, 3.8)));
+    const patinaGranule = valueNoise3DTsl(p.mul(78.0).add(vec3(7.2, 2.9, 5.1)));
+    const patinaTex = mix(patinaMacro, patinaGranule, float(0.45));
     const patinaSignal = patinaInput
-      .mul(float(0.55).add(patinaNoise.mul(0.75)))
-      .add(stoneGrain.sub(0.5).mul(0.24));
-    const patinaCoverage = smoothstep(float(0.36), float(0.84), patinaSignal);
-    const patinaK = mix(verdigrisMalachite.K, celadonGlauconite.K, patinaNoise.mul(0.36));
-    const patinaS = mix(verdigrisMalachite.S, celadonGlauconite.S, patinaNoise.mul(0.36));
+      .mul(float(0.48).add(patinaTex.mul(0.84)))
+      .add(stoneGrain.sub(0.5).mul(0.22));
+    const patinaCoverage = smoothstep(float(0.40), float(0.86), patinaSignal);
+    const patinaFinal = patinaCoverage.mul(float(1.0).sub(wetMask.mul(0.90)));
+    const patinaK = mix(verdigrisMalachite.K, celadonGlauconite.K, patinaTex.mul(0.32));
+    const patinaS = mix(verdigrisMalachite.S, celadonGlauconite.S, patinaTex.mul(0.32));
     const stoneWithPatina = kubelkaMunkGlaze(
       patinaK,
       patinaS,
-      patinaCoverage.mul(1.25),
+      patinaFinal.mul(1.32),
       stoneWithAo
-    ).add(boneCalcite.rInf.mul(pow(patinaCoverage, float(2.0)).mul(0.14)));
+    );
 
-    // Wet Yellow Ochre trail glaze: darkens wet porous stone + translucent golden-ochre meniscus film
-    const wetMask = smoothstep(float(0.02), float(0.20), max(wetness, ochreThickness));
-    const wetDarkenedBacking = stoneWithPatina.mul(mix(float(1.0), float(0.58), wetMask));
-    const trailK = mix(yellowOchre.K, realgarAmber.K, freshSheen.mul(0.22));
-    const trailS = mix(yellowOchre.S, realgarAmber.S, freshSheen.mul(0.22));
-    const trailOpticalDepth = ochreThickness.mul(0.56).add(wetness.mul(0.14));
+    // Vivid glossy wet Yellow Ochre trail glaze
+    const wetDarkenedBacking = stoneWithPatina.mul(mix(float(1.0), float(0.82), wetMask));
+    const trailK = mix(yellowOchre.K, realgarAmber.K, float(0.28).add(freshSheen.mul(0.14)));
+    const trailS = mix(yellowOchre.S, realgarAmber.S, float(0.28).add(freshSheen.mul(0.14)));
+    const trailOpticalDepth = ochreThickness.mul(1.45).add(wetness.mul(0.50));
     const finalStoneRgb = kubelkaMunkGlaze(
       trailK,
       trailS,
@@ -280,45 +292,45 @@ export function createLabyrinthOptics(
 
     stoneMaterial.colorNode = clamp(finalStoneRgb, 0.0, 1.0);
 
-    // Matte porous stone (0.78-0.92) -> glossy wet Yellow Ochre meniscus (0.11)
+    // Matte porous stone (0.78-0.92) -> glossy wet Yellow Ochre meniscus (0.06)
     const dryRoughness = clamp(
       mix(float(0.78), float(0.90), basaltW)
-        .add(patinaCoverage.mul(0.08))
+        .add(patinaFinal.mul(0.08))
         .sub(stoneGrain.mul(0.06)),
       0.68,
       0.96
     );
-    const wetGlossFactor = clamp(wetness.mul(1.15).add(freshSheen.mul(0.30)), 0.0, 1.0);
+    const wetGlossFactor = clamp(wetness.mul(1.20).add(freshSheen.mul(0.32)), 0.0, 1.0);
     stoneMaterial.roughnessNode = clamp(
-      mix(dryRoughness, float(0.11), wetGlossFactor),
-      0.10,
+      mix(dryRoughness, float(0.06), wetGlossFactor),
+      0.06,
       0.96
     );
-    stoneMaterial.metalnessNode = mix(float(0.02), float(0.07), wetGlossFactor);
+    stoneMaterial.metalnessNode = mix(float(0.02), float(0.08), wetGlossFactor);
 
-    // Derivative-free 3D stone tooth bump damped smoothly inside wet liquid pools
-    const bumpAmp = mix(float(0.055), float(0.145), basaltW)
-      .add(patinaCoverage.mul(0.035))
-      .mul(float(1.0).sub(wetGlossFactor.mul(0.86)));
+    // Fine 3D mineral tooth bump damped smoothly inside wet liquid pools
+    const bumpAmp = mix(float(0.095), float(0.165), basaltW)
+      .add(patinaFinal.mul(0.032))
+      .mul(float(1.0).sub(wetGlossFactor.mul(0.88)));
     const perturbedLocalNorm = perturbStoneNormalLocal(
       normalLocal,
       p,
-      float(28.0),
+      float(64.0),
       bumpAmp
     );
     stoneMaterial.normalNode = transformNormalToView(perturbedLocalNorm);
 
-    // Subtle softbox sheen along wet ochre meniscus pools
+    // Crisp studio softbox sheen along wet ochre meniscus pools
     const viewDirW = normalize(cameraPosition.sub(positionWorld));
     const nW = normalize(normalWorld);
-    const keySoftboxDir = normalize(vec3(2.8, 4.2, 3.2));
+    const keySoftboxDir = normalize(vec3(1.6, 4.4, 3.8));
     const halfVec = normalize(keySoftboxDir.add(viewDirW));
-    const meniscusSpec = pow(max(float(0.0), dot(nW, halfVec)), float(42.0));
+    const meniscusSpec = pow(max(float(0.0), dot(nW, halfVec)), float(52.0));
     const meniscusFresnel = pow(abs(float(1.0).sub(clamp(dot(nW, viewDirW), 0.0, 1.0))), float(3.2));
     stoneMaterial.emissiveNode = mix(yellowOchre.rInf, boneCalcite.rInf, float(0.55))
-      .mul(meniscusSpec.mul(0.14).add(meniscusFresnel.mul(0.06)))
+      .mul(meniscusSpec.mul(0.48).add(meniscusFresnel.mul(0.16)))
       .mul(wetGlossFactor)
-      .mul(float(0.45).add(freshSheen.mul(0.55)));
+      .mul(float(0.55).add(freshSheen.mul(0.45)));
   }
 
   // -------------------------------------------------------------------------
@@ -529,8 +541,8 @@ export function createLabyrinthOptics(
       smoothstep(float(-0.18), float(0.16), R.y)
     );
 
-    // Primary rectangular studio overhead softbox aligned toward key light (2.8, 4.2, 3.2)
-    const keyDir = normalize(vec3(2.8, 4.2, 3.2));
+    // Primary rectangular studio overhead softbox aligned toward key light (1.6, 4.4, 3.8)
+    const keyDir = normalize(vec3(1.6, 4.4, 3.8));
     const keyRight = normalize(cross(vec3(0.0, 1.0, 0.0), keyDir));
     const keyUp = cross(keyDir, keyRight);
     const rx = dot(R, keyRight);

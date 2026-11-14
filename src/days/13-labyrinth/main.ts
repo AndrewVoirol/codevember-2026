@@ -15,8 +15,10 @@ const TRACKBALL_RADIUS = 0.82;
 // Pre-allocated module-scope math scratch objects (strictly zero per-frame allocations)
 const _xAxis = new THREE.Vector3(1, 0, 0);
 const _yAxis = new THREE.Vector3(0, 1, 0);
+const _zAxis = new THREE.Vector3(0, 0, 1);
 const _pitchQuat = new THREE.Quaternion();
 const _yawQuat = new THREE.Quaternion();
+const _rollQuat = new THREE.Quaternion();
 const _deltaQuat = new THREE.Quaternion();
 const _inertiaQuat = new THREE.Quaternion();
 const _inertiaAxis = new THREE.Vector3();
@@ -69,10 +71,12 @@ declare global {
 }
 
 function buildDefaultIsoQuaternion(out: THREE.Quaternion): THREE.Quaternion {
-  // Orient +Y Top, +Z Front-Left, +X Front-Right symmetrically toward camera
-  _yawQuat.setFromAxisAngle(_yAxis, -Math.PI * 0.25);
-  _pitchQuat.setFromAxisAngle(_xAxis, 0.56);
-  return out.copy(_pitchQuat).multiply(_yawQuat).normalize();
+  // Orient +Y Top, +Z Front-Left, +X Front-Right with a gentle clockwise roll so
+  // the mercury bead visibly rolls across the sunlit front-left upper channel on boot
+  _yawQuat.setFromAxisAngle(_yAxis, -0.62);
+  _pitchQuat.setFromAxisAngle(_xAxis, 0.70);
+  _rollQuat.setFromAxisAngle(_zAxis, -0.52);
+  return out.copy(_rollQuat).multiply(_pitchQuat).multiply(_yawQuat).normalize();
 }
 
 function projectToTrackball(nx: number, ny: number, out: THREE.Vector3): THREE.Vector3 {
@@ -99,9 +103,10 @@ export async function bootDay13Labyrinth(): Promise<SpecimenStage> {
   stage.camera.lookAt(0, 0, 0);
   stage.camera.updateMatrixWorld();
 
-  // Tighten shadow frustum around the 1.76m carved stone monolith for crisp trench relief
+  // Tighten shadow frustum & shift key softbox forward-left to illuminate +Z ridges and +Y sanctum
   stage.scene.traverse((obj) => {
     if (obj instanceof THREE.DirectionalLight && obj.castShadow) {
+      obj.position.set(1.6, 4.4, 3.8);
       obj.shadow.mapSize.set(2048, 2048);
       const halfSpan = 1.48;
       obj.shadow.camera.left = -halfSpan;

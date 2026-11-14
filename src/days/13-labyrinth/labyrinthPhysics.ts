@@ -21,7 +21,7 @@ export const SOLVER_GRAVITY_MAGNITUDE = 9.81;
 const ROLLING_LINEAR_DRAG = 0.16;
 const ROLLING_QUAD_DRAG = 0.05;
 const CORNER_RETENTION_BASE = 0.82;
-const BRUSH_TEXEL_RADIUS = 3.1;
+const BRUSH_TEXEL_RADIUS = 1.85;
 
 function clamp(v: number, min: number, max: number): number {
   return v < min ? min : v > max ? max : v;
