@@ -10,16 +10,19 @@ import {
 const TOTAL_BANDS = 180;
 const NUM_LAYERS = 12;
 const CORE_RADIUS = 0.28;
+const CORE_CLEARANCE = 0.012;
 const OUTER_RADIUS = 0.95;
+const MAX_BASE_RADIUS = 0.908;
 const MAX_DUST_PUFFS = 384;
 const MAX_CASCADE_QUEUE = 16;
+const RINGS_PER_BAND = SEGMENTS_PER_BAND + 1;
 
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
 const TWO_PI = Math.PI * 2;
 const STRAIN_PER_UNIT_PULL = 0.62;
-const TWANG_FREQ = 54.0;
-const TWANG_DAMP = 6.2;
-const GRAVITY = 4.8;
+const TWANG_FREQ = 68.0;
+const TWANG_DAMP = 5.4;
+const GRAVITY = 5.6;
 
 const BAND_PIGMENTS: readonly PigmentKey[] = [
   'rawUmber',
@@ -66,6 +69,15 @@ export class RubberBandBallSim {
   private readonly initialOuterLoad = new Float32Array(TOTAL_BANDS);
   private readonly targetRadius = new Float32Array(TOTAL_BANDS);
   private readonly effectiveRadius = new Float32Array(TOTAL_BANDS);
+  private readonly unitCirclePts = new Float32Array(TOTAL_BANDS * RINGS_PER_BAND * 3);
+  private readonly radialProfile = new Float32Array(TOTAL_BANDS * RINGS_PER_BAND);
+  private readonly maxBandRadius = new Float32Array(TOTAL_BANDS);
+
+  // Internal snap-kinematics state (no types.ts churn required)
+  private readonly snapAgeSec = new Float32Array(TOTAL_BANDS);
+  private readonly snapPeakPull = new Float32Array(TOTAL_BANDS);
+  private readonly snapAsym = new Float32Array(TOTAL_BANDS);
+  private readonly snapLaunchDir = new Float32Array(TOTAL_BANDS * 3);
 
   private activePullBandId: number | null = null;
   private snapCount = 0;
@@ -173,10 +185,10 @@ export class RubberBandBallSim {
         vz0 * cp - uz * sp,
       ];
 
-      const baseRadius =
-        CORE_RADIUS + 0.018 + t * (OUTER_RADIUS - CORE_RADIUS - 0.018) + (this.rng() - 0.5) * 0.008;
+      const thickness = 0.008 + this.rng() * 0.007;
+      const minBaseRadius = CORE_RADIUS + CORE_CLEARANCE + thickness * 0.5 + 0.004;
+      const baseRadius = minBaseRadius + t * (MAX_BASE_RADIUS - minBaseRadius);
       const width = (0.034 + this.rng() * 0.036) * 1.22;
-      const thickness = 0.009 + this.rng() * 0.009;
 
       // Stratified pigment selection
       const pigment = this.pickStratifiedPigment(layer);
@@ -221,12 +233,29 @@ export class RubberBandBallSim {
 
       this.targetRadius[i] = baseRadius;
       this.effectiveRadius[i] = baseRadius;
+      this.snapAgeSec[i] = 0;
+      this.snapPeakPull[i] = 0;
+      this.snapAsym[i] = 1;
+
+      const ringOffset = i * RINGS_PER_BAND * 3;
+      for (let k = 0; k < RINGS_PER_BAND; k++) {
+        const theta = (k / SEGMENTS_PER_BAND) * TWO_PI;
+        const c = Math.cos(theta);
+        const s = Math.sin(theta);
+        const idx = ringOffset + k * 3;
+        this.unitCirclePts[idx] = c * txU[0] + s * txV[0];
+        this.unitCirclePts[idx + 1] = c * txU[1] + s * txV[1];
+        this.unitCirclePts[idx + 2] = c * txU[2] + s * txV[2];
+      }
     }
 
     // Compute initial compressive preload exerted by outer layers on inner layers
     for (let i = 0; i < TOTAL_BANDS; i++) {
       this.initialOuterLoad[i] = this.computeOuterCompressionLoad(i);
     }
+
+    // Build layered non-intersecting crossing-wrap profiles
+    this.rebuildRadialProfiles();
   }
 
   private pickStratifiedPigment(layer: number): PigmentKey {
@@ -265,6 +294,90 @@ export class RubberBandBallSim {
     return load;
   }
 
+  private rebuildRadialProfiles(): void {
+    const coreMinCenter = CORE_RADIUS + CORE_CLEARANCE;
+    const shoulderWidth = 0.008;
+    const contactGap = 0.0025;
+
+    for (let i = 0; i < TOTAL_BANDS; i++) {
+      const rtI = this.runtimes[i];
+      if (rtI.status !== 'intact' && rtI.status !== 'pulled') continue;
+      const specI = this.specs[i];
+      const rBase = this.targetRadius[i];
+      const halfHI = specI.thickness * 0.5;
+      const minCoreR = coreMinCenter + halfHI;
+      const profOffset = i * RINGS_PER_BAND;
+      const ptsOffsetI = profOffset * 3;
+
+      // Initialize profile at tensioned base radius (clamped outside core)
+      const initR = Math.max(rBase, minCoreR);
+      for (let k = 0; k < RINGS_PER_BAND; k++) {
+        this.radialProfile[profOffset + k] = initR;
+      }
+
+      // Resolve physical crossing wrap over intact/pulled underlying bands j < i
+      for (let j = 0; j < i; j++) {
+        const rtJ = this.runtimes[j];
+        if (rtJ.status !== 'intact' && rtJ.status !== 'pulled') continue;
+
+        const specJ = this.specs[j];
+        const halfHJ = specJ.thickness * 0.5;
+        // Quick radial cull: skip j if its highest point is well below i's base
+        if (this.maxBandRadius[j] + halfHJ + halfHI + contactGap <= initR) continue;
+
+        const nj = specJ.normal;
+        const uj = specJ.tangentU;
+        const vj = specJ.tangentV;
+        const halfWJ = specJ.width * 0.5;
+        const crossLimit = halfWJ + shoulderWidth;
+        const profOffsetJ = j * RINGS_PER_BAND;
+
+        for (let k = 0; k < RINGS_PER_BAND; k++) {
+          const pIdx = ptsOffsetI + k * 3;
+          const ux = this.unitCirclePts[pIdx];
+          const uy = this.unitCirclePts[pIdx + 1];
+          const uz = this.unitCirclePts[pIdx + 2];
+
+          const latDot = Math.abs(ux * nj[0] + uy * nj[1] + uz * nj[2]);
+          const latDist = latDot * initR;
+          if (latDist >= crossLimit) continue;
+
+          // Sample band j's actual wrapped radius at the closest point along j
+          const pu = ux * uj[0] + uy * uj[1] + uz * uj[2];
+          const pv = ux * vj[0] + uy * vj[1] + uz * vj[2];
+          let angleJ = Math.atan2(pv, pu);
+          if (angleJ < 0) angleJ += TWO_PI;
+          const kJFloat = (angleJ / TWO_PI) * SEGMENTS_PER_BAND;
+          const kJ0 = Math.floor(kJFloat) % SEGMENTS_PER_BAND;
+          const kJ1 = (kJ0 + 1) % SEGMENTS_PER_BAND;
+          const rJ = Math.max(
+            this.radialProfile[profOffsetJ + kJ0],
+            this.radialProfile[profOffsetJ + kJ1]
+          );
+
+          const minClearR = rJ + halfHJ + halfHI + contactGap;
+          if (minClearR <= this.radialProfile[profOffset + k]) continue;
+
+          const ramp =
+            latDist <= halfWJ
+              ? 1.0
+              : 0.5 + 0.5 * Math.cos((Math.PI * (latDist - halfWJ)) / shoulderWidth);
+          const wrappedR = initR + (minClearR - initR) * ramp;
+          if (wrappedR > this.radialProfile[profOffset + k]) {
+            this.radialProfile[profOffset + k] = wrappedR;
+          }
+        }
+      }
+
+      let maxR = initR;
+      for (let k = 0; k < RINGS_PER_BAND; k++) {
+        const rk = this.radialProfile[profOffset + k];
+        if (rk > maxR) maxR = rk;
+      }
+      this.maxBandRadius[i] = maxR;
+    }
+  }
+
   private recomputeCompression(triggerCascadeFromId: number | null): void {
     let cascadeScheduled = 0;
     const srcSpec = triggerCascadeFromId !== null ? this.specs[triggerCascadeFromId] : null;
@@ -301,11 +414,13 @@ export class RubberBandBallSim {
             spec.normal[2] * srcSpec.normal[2]
         );
         if (align > 0.6 && rt.currentStrain >= spec.breakStrain * 0.88) {
-          this.enqueueCascade(i, 0.05 + this.rng() * 0.07, this.rng());
+          this.enqueueCascade(i, 0.04 + this.rng() * 0.06, this.rng());
           cascadeScheduled++;
         }
       }
     }
+
+    this.rebuildRadialProfiles();
   }
 
   private enqueueCascade(bandId: number, delaySec: number, uHit: number): void {
@@ -449,39 +564,66 @@ export class RubberBandBallSim {
 
     const uNorm = ((uHit % 1) + 1) % 1;
     const strainFactor = Math.max(0.5, rt.currentStrain);
+    const peakPull = fromPull ? rt.pullAmount : 0;
+
+    this.snapAgeSec[bandId] = 0;
+    this.snapPeakPull[bandId] = peakPull;
+    const asym = 0.86 + this.rng() * 0.28;
+    this.snapAsym[bandId] = asym;
+    if (fromPull) {
+      this.snapLaunchDir[bandId * 3] = rt.pullDir[0];
+      this.snapLaunchDir[bandId * 3 + 1] = rt.pullDir[1];
+      this.snapLaunchDir[bandId * 3 + 2] = rt.pullDir[2];
+    }
 
     rt.status = 'snapping';
     rt.snapU = uNorm;
     rt.leftArc = 0.5;
     rt.rightArc = 0.5;
-    rt.leftVel = (1.55 + strainFactor * 1.1) * (0.9 + this.rng() * 0.25);
-    rt.rightVel = (1.55 + strainFactor * 1.1) * (0.9 + this.rng() * 0.25);
+    const baseWhipVel = (3.6 + strainFactor * 2.4) * (fromPull ? 1.18 : 1.0);
+    rt.leftVel = baseWhipVel * asym;
+    rt.rightVel = baseWhipVel / asym;
     rt.curlAmount = 0;
     rt.pullAmount = 0;
     rt.twangAmp = 0;
     rt.opacity = 1;
 
-    // Outward kick from the sphere at the antipode direction
+    // Outward radial vector at the snap point
     this.evalCirclePoint(bandId, uNorm, this.scratchPoint);
     const pLen = Math.hypot(this.scratchPoint[0], this.scratchPoint[1], this.scratchPoint[2]) || 1;
     const radX = this.scratchPoint[0] / pLen;
     const radY = this.scratchPoint[1] / pLen;
     const radZ = this.scratchPoint[2] / pLen;
 
-    const kick = fromPull ? 1.45 : 0.95;
+    if (!fromPull) {
+      this.snapLaunchDir[bandId * 3] = radX;
+      this.snapLaunchDir[bandId * 3 + 1] = radY;
+      this.snapLaunchDir[bandId * 3 + 2] = radZ;
+    }
+
+    // Lateral tangent at snap point so the band peels & flings off the side rather than tunneling through the ball
+    const thetaSnap = uNorm * TWO_PI;
+    const tx = -Math.sin(thetaSnap) * spec.tangentU[0] + Math.cos(thetaSnap) * spec.tangentV[0];
+    const ty = -Math.sin(thetaSnap) * spec.tangentU[1] + Math.cos(thetaSnap) * spec.tangentV[1];
+    const tz = -Math.sin(thetaSnap) * spec.tangentU[2] + Math.cos(thetaSnap) * spec.tangentV[2];
+    const latSign = this.rng() < 0.5 ? -1 : 1;
+
+    const outwardKick = fromPull ? 0.55 : 0.35;
+    const sideKick = (fromPull ? 1.15 : 0.78) * latSign;
     rt.fallOffset[0] = 0;
     rt.fallOffset[1] = 0;
     rt.fallOffset[2] = 0;
-    rt.fallVel[0] = -radX * kick + (this.rng() - 0.5) * 0.55;
-    rt.fallVel[1] = -radY * kick + 0.65;
-    rt.fallVel[2] = -radZ * kick + (this.rng() - 0.5) * 0.55;
+    rt.fallVel[0] = radX * outwardKick + tx * sideKick + (this.rng() - 0.5) * 0.45;
+    rt.fallVel[1] = radY * outwardKick + ty * sideKick + (fromPull ? 1.15 : 0.85);
+    rt.fallVel[2] = radZ * outwardKick + tz * sideKick + (this.rng() - 0.5) * 0.45;
 
     // Crisp recoil jolt on the whole ball opposite the snap point
-    const recoilImp = (fromPull ? 0.34 : 0.22) * (0.7 + strainFactor * 0.5);
+    const recoilImp = (fromPull ? 1.15 : 0.72) * (0.75 + strainFactor * 0.55);
     this.recoilVel[0] -= radX * recoilImp;
     this.recoilVel[1] -= radY * recoilImp;
     this.recoilVel[2] -= radZ * recoilImp;
 
+    // Primary talc burst at snap point + secondary talc wake along whipping arc
     this.spawnDustPuffs(
       this.scratchPoint[0],
       this.scratchPoint[1],
@@ -489,8 +631,27 @@ export class RubberBandBallSim {
       radX,
       radY,
       radZ,
-      spec.width
+      spec.width,
+      30,
+      1.0 + strainFactor * 0.45
     );
+    const wakeOffsets = [-0.1, 0.1] as const;
+    for (let w = 0; w < wakeOffsets.length; w++) {
+      const uWake = ((uNorm + wakeOffsets[w]) % 1 + 1) % 1;
+      this.evalCirclePoint(bandId, uWake, this.scratchPoint);
+      const wLen = Math.hypot(this.scratchPoint[0], this.scratchPoint[1], this.scratchPoint[2]) || 1;
+      this.spawnDustPuffs(
+        this.scratchPoint[0],
+        this.scratchPoint[1],
+        this.scratchPoint[2],
+        this.scratchPoint[0] / wLen,
+        this.scratchPoint[1] / wLen,
+        this.scratchPoint[2] / wLen,
+        spec.width,
+        9,
+        0.75 + strainFactor * 0.3
+      );
+    }
 
     // Sympathetic elastic shockwave twang across nearby intact bands
     for (let i = 0; i < TOTAL_BANDS; i++) {
@@ -498,14 +659,14 @@ export class RubberBandBallSim {
       const nrt = this.runtimes[i];
       if (nrt.status !== 'intact') continue;
       const nspec = this.specs[i];
-      if (Math.abs(nspec.layer - spec.layer) > 3) continue;
+      if (Math.abs(nspec.layer - spec.layer) > 4) continue;
       const align = Math.abs(
         nspec.normal[0] * spec.normal[0] +
           nspec.normal[1] * spec.normal[1] +
           nspec.normal[2] * spec.normal[2]
       );
-      if (align > 0.35) {
-        nrt.twangAmp = Math.max(nrt.twangAmp, 0.032 + 0.028 * strainFactor * align);
+      if (align > 0.25) {
+        nrt.twangAmp = Math.max(nrt.twangAmp, 0.055 + 0.05 * strainFactor * align);
         nrt.twangPhase = 0;
         nrt.pullU = uNorm;
         nrt.pullDir[0] = radX;
@@ -525,30 +686,32 @@ export class RubberBandBallSim {
     nx: number,
     ny: number,
     nz: number,
-    bandWidth: number
+    bandWidth: number,
+    targetCount = 30,
+    energyScale = 1.0
   ): void {
     let spawned = 0;
-    const targetCount = 24;
+    const cloudCount = Math.floor(targetCount * 0.65);
     for (let i = 0; i < MAX_DUST_PUFFS && spawned < targetCount; i++) {
       const puff = this.dustPuffs[i];
       if (puff.active) continue;
 
-      const isFineSpeck = spawned >= 16;
+      const isFineSpeck = spawned >= cloudCount;
       puff.active = true;
-      const spread = bandWidth * (isFineSpeck ? 0.9 : 1.4);
+      const spread = bandWidth * (isFineSpeck ? 1.1 : 1.6);
       puff.pos[0] = px + (this.rng() - 0.5) * spread;
       puff.pos[1] = py + (this.rng() - 0.5) * spread;
       puff.pos[2] = pz + (this.rng() - 0.5) * spread;
 
-      const speed = isFineSpeck ? 0.9 + this.rng() * 1.1 : 0.35 + this.rng() * 0.85;
-      const jitter = isFineSpeck ? 0.95 : 0.65;
+      const speed = (isFineSpeck ? 1.5 + this.rng() * 1.7 : 0.65 + this.rng() * 1.15) * energyScale;
+      const jitter = (isFineSpeck ? 1.35 : 0.85) * energyScale;
       puff.vel[0] = nx * speed + (this.rng() - 0.5) * jitter;
-      puff.vel[1] = ny * speed + (this.rng() - 0.5) * jitter + 0.12;
+      puff.vel[1] = ny * speed + (this.rng() - 0.5) * jitter + 0.18;
       puff.vel[2] = nz * speed + (this.rng() - 0.5) * jitter;
 
       puff.ageSec = 0;
-      puff.maxAgeSec = isFineSpeck ? 0.28 + this.rng() * 0.25 : 0.55 + this.rng() * 0.45;
-      puff.size = isFineSpeck ? 0.005 + this.rng() * 0.006 : 0.016 + this.rng() * 0.022;
+      puff.maxAgeSec = isFineSpeck ? 0.24 + this.rng() * 0.24 : 0.48 + this.rng() * 0.42;
+      puff.size = isFineSpeck ? 0.008 + this.rng() * 0.008 : 0.024 + this.rng() * 0.028;
       spawned++;
     }
   }
@@ -559,8 +722,8 @@ export class RubberBandBallSim {
     this.simTimeSec += dt;
 
     // Damped spring recoil of the ball (leans toward active pull, snaps back on release/pop)
-    const kSpring = 180.0;
-    const kDamp = 15.0;
+    const kSpring = 240.0;
+    const kDamp = 14.0;
     const activePull =
       this.activePullBandId !== null ? this.runtimes[this.activePullBandId] : null;
     const leanAmt =
@@ -612,21 +775,24 @@ export class RubberBandBallSim {
           }
         }
       } else if (rt.status === 'snapping') {
-        rt.leftArc = Math.max(0, rt.leftArc - rt.leftVel * dt);
-        rt.rightArc = Math.max(0, rt.rightArc - rt.rightVel * dt);
-        rt.curlAmount = Math.min(1, rt.curlAmount + dt * 2.4);
+        this.snapAgeSec[i] += dt;
+        const arcDamp = Math.exp(-2.6 * dt);
+        rt.leftVel *= arcDamp;
+        rt.rightVel *= arcDamp;
+        rt.leftArc = Math.max(0.055, rt.leftArc - rt.leftVel * dt);
+        rt.rightArc = Math.max(0.055, rt.rightArc - rt.rightVel * dt);
+        rt.curlAmount = Math.min(1, rt.curlAmount + dt * 6.5);
 
         rt.fallVel[1] -= GRAVITY * dt;
         rt.fallOffset[0] += rt.fallVel[0] * dt;
         rt.fallOffset[1] += rt.fallVel[1] * dt;
         rt.fallOffset[2] += rt.fallVel[2] * dt;
 
-        rt.currentStrain = Math.max(0, rt.currentStrain - dt * 2.5);
+        rt.currentStrain = Math.max(0, rt.currentStrain - dt * 5.0);
 
-        if (rt.leftArc <= 0.08 && rt.rightArc <= 0.08) {
-          rt.opacity = Math.max(0, rt.opacity - dt * 2.2);
-        } else if (rt.fallOffset[1] < -1.2) {
-          rt.opacity = Math.max(0, rt.opacity - dt * 1.5);
+        // Keep coiled scrap visible while whipping & tumbling, then dissolve cleanly
+        if (this.snapAgeSec[i] > 0.42 || rt.fallOffset[1] < -0.95) {
+          rt.opacity = Math.max(0, rt.opacity - dt * 2.6);
         }
 
         if (rt.opacity <= 0.005) {
@@ -693,9 +859,24 @@ export class RubberBandBallSim {
       const activeSegs = Math.max(2, Math.min(SEGMENTS_PER_BAND, Math.round(totalArc * SEGMENTS_PER_BAND)));
       const antipodeU = (rt.snapU + 0.5) % 1;
       const curl = rt.curlAmount;
+      const age = this.snapAgeSec[bandIndex];
       const fx = rt.fallOffset[0];
       const fy = rt.fallOffset[1];
       const fz = rt.fallOffset[2];
+
+      // Rapidly whip back from pulled apex if snapped under tension
+      const peakPull = this.snapPeakPull[bandIndex];
+      const whipPeak = peakPull > 0 ? peakPull * Math.exp(-32.0 * age) : 0;
+      const lx = this.snapLaunchDir[bandIndex * 3];
+      const ly = this.snapLaunchDir[bandIndex * 3 + 1];
+      const lz = this.snapLaunchDir[bandIndex * 3 + 2];
+
+      // Minimum clearance sphere so snapping band peels off the ball instead of tunneling through it
+      const minClearR = Math.max(
+        CORE_RADIUS + CORE_CLEARANCE + spec.thickness * 0.5,
+        r + spec.thickness * 0.5
+      );
+      const lashEnv = Math.exp(-4.5 * age);
 
       for (let k = 0; k <= activeSegs; k++) {
         const frac = k / activeSegs;
@@ -704,16 +885,36 @@ export class RubberBandBallSim {
         const c = Math.cos(theta);
         const s = Math.sin(theta);
 
-        // Free ends whip radially outward off the sphere with a traveling elastic lash wave
+        // Free ends whip radially outward off the sphere with an immediate elastic lash wave & C-curl
         const endDist = Math.abs(frac - 0.5) * 2; // 0 at center, 1 at tips
-        const whipWave = Math.sin(endDist * 7.0 - curl * 18.0) * 0.12 * endDist * (1 - curl * 0.45);
-        const curlLift = curl * endDist * endDist * 0.55 + Math.max(0, whipWave);
+        const whipWave = Math.sin(endDist * 8.5 - age * 48.0) * 0.16 * endDist * lashEnv;
+        const curlLift = curl * endDist * endDist * 0.62 + Math.max(0, whipWave);
         const rad = r + curlLift;
 
+        let px = rad * (c * tu[0] + s * tv[0]) + fx;
+        let py = rad * (c * tu[1] + s * tv[1]) + fy;
+        let pz = rad * (c * tu[2] + s * tv[2]) + fz;
+
+        if (whipPeak > 1e-4) {
+          const tipLift = whipPeak * endDist * endDist;
+          px += lx * tipLift;
+          py += ly * tipLift;
+          pz += lz * tipLift;
+        }
+
+        // Enforce non-penetration against the ball sphere
+        const pDist = Math.hypot(px, py, pz);
+        if (pDist < minClearR && pDist > 1e-5) {
+          const scale = minClearR / pDist;
+          px *= scale;
+          py *= scale;
+          pz *= scale;
+        }
+
         const base = k * 3;
-        outPositions[base] = rad * (c * tu[0] + s * tv[0]) + fx;
-        outPositions[base + 1] = rad * (c * tu[1] + s * tv[1]) + fy;
-        outPositions[base + 2] = rad * (c * tu[2] + s * tv[2]) + fz;
+        outPositions[base] = px;
+        outPositions[base + 1] = py;
+        outPositions[base + 2] = pz;
         outStrains[k] = rt.currentStrain * (1 - endDist * 0.5);
       }
 
@@ -731,37 +932,61 @@ export class RubberBandBallSim {
       ? Math.sin(this.simTimeSec * 72.0 + bandIndex * 2.1) * 0.015 * nearBreak
       : 0;
 
+    const profOffset = bandIndex * RINGS_PER_BAND;
+    const breathShift = r - this.targetRadius[bandIndex];
+    const minCoreR = CORE_RADIUS + CORE_CLEARANCE + spec.thickness * 0.5;
+    const pullHalfArc = isPulled
+      ? Math.min(0.22, Math.max(0.11, Math.acos(Math.min(0.98, r / (r + rt.pullAmount + 0.01))) / TWO_PI))
+      : 0.22;
+
     for (let k = 0; k <= SEGMENTS_PER_BAND; k++) {
       const u = k / SEGMENTS_PER_BAND;
       const theta = u * TWO_PI;
       const c = Math.cos(theta);
       const s = Math.sin(theta);
 
-      // Subtle crossing-bite indentation so bands visibly cinch into underlying layers
-      const bite = 1.0 - 0.016 * (0.5 + 0.5 * Math.sin(theta * 5.0 + bandIndex * 1.7)) * Math.cos(theta * 3.0 - bandIndex * 0.9);
-      const rBite = r * bite;
+      // Physical layered crossing-wrap radius (zero intersection with core or underlying bands)
+      const rLayer = Math.max(minCoreR, this.radialProfile[profOffset + k] + breathShift);
 
-      let px = rBite * (c * tu[0] + s * tv[0]);
-      let py = rBite * (c * tu[1] + s * tv[1]);
-      let pz = rBite * (c * tu[2] + s * tv[2]);
+      let px = rLayer * (c * tu[0] + s * tv[0]);
+      let py = rLayer * (c * tu[1] + s * tv[1]);
+      let pz = rLayer * (c * tu[2] + s * tv[2]);
       let strain = rt.currentStrain;
 
       if (isPulled) {
         const d = shortestArcDist(u, rt.pullU);
-        const tent = Math.max(0, 1 - d / 0.34);
+        const tent = Math.max(0, 1 - d / pullHalfArc);
         const vShape = Math.pow(tent, 1.08);
-        const disp = (rt.pullAmount + tremble) * vShape;
+        const disp = Math.max(0, (rt.pullAmount + tremble) * vShape);
         px += rt.pullDir[0] * disp;
         py += rt.pullDir[1] * disp;
         pz += rt.pullDir[2] * disp;
         strain = spec.restStrain + (rt.currentStrain - spec.restStrain) * (0.35 + 0.65 * vShape);
+
+        // Enforce radial wrapping constraint so pulled flanks never clip into the ball
+        const pDist = Math.hypot(px, py, pz);
+        if (pDist < rLayer && pDist > 1e-5) {
+          const scale = rLayer / pDist;
+          px *= scale;
+          py *= scale;
+          pz *= scale;
+        }
       } else if (hasTwang) {
         const d = shortestArcDist(u, rt.pullU);
         const env = Math.exp(-d * d * 18.0);
-        const disp = twangSin * env;
+        // Elastic rebound off the ball surface (cannot dip inside underlying layers)
+        const disp = Math.max(0, twangSin * env);
         px += rt.pullDir[0] * disp;
         py += rt.pullDir[1] * disp;
         pz += rt.pullDir[2] * disp;
+
+        const pDist = Math.hypot(px, py, pz);
+        if (pDist < rLayer && pDist > 1e-5) {
+          const scale = rLayer / pDist;
+          px *= scale;
+          py *= scale;
+          pz *= scale;
+        }
       }
 
       const base = k * 3;
@@ -882,8 +1107,9 @@ export class RubberBandBallSim {
         intactCount++;
         strainSum += rt.currentStrain;
         activeCount++;
-        if (this.effectiveRadius[i] > maxRadius) {
-          maxRadius = this.effectiveRadius[i];
+        const bandOuter = this.maxBandRadius[i] + (this.effectiveRadius[i] - this.targetRadius[i]);
+        if (bandOuter > maxRadius) {
+          maxRadius = bandOuter;
         }
       } else if (rt.status === 'snapping') {
         snappingCount++;

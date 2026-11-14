@@ -246,4 +246,154 @@ describe('RubberBandBallSim', () => {
     expect(diag.snapCount).toBe(0);
     expect(sim.getDustPuffs().every((p) => !p.active)).toBe(true);
   });
+
+  it('enforces zero core or crossing-layer intersection across all 180 intact bands', () => {
+    const sim = new RubberBandBallSim();
+    const specs = sim.getBandSpecs();
+    const posBuf = new Float32Array((SEGMENTS_PER_BAND + 1) * 3);
+    const strainBuf = new Float32Array(SEGMENTS_PER_BAND + 1);
+
+    // Cache sampled positions for all bands
+    const allPos: Float32Array[] = [];
+    for (let i = 0; i < specs.length; i++) {
+      const buf = new Float32Array((SEGMENTS_PER_BAND + 1) * 3);
+      sim.sampleBandCenterline(i, buf, strainBuf);
+      allPos.push(buf);
+
+      const halfHI = specs[i].thickness * 0.5;
+      for (let k = 0; k <= SEGMENTS_PER_BAND; k++) {
+        const r = Math.hypot(buf[k * 3], buf[k * 3 + 1], buf[k * 3 + 2]);
+        // Must clear starter core + inner knots (~0.286)
+        expect(r - halfHI).toBeGreaterThanOrEqual(0.29);
+      }
+    }
+
+    // Verify no outer band i intersects an underlying band j < i where their widths cross
+    for (let i = 1; i < specs.length; i++) {
+      const specI = specs[i];
+      const halfHI = specI.thickness * 0.5;
+      const bufI = allPos[i];
+
+      for (let j = 0; j < i; j++) {
+        const specJ = specs[j];
+        const halfHJ = specJ.thickness * 0.5;
+        const halfWJ = specJ.width * 0.5;
+        const bufJ = allPos[j];
+
+        for (let k = 0; k <= SEGMENTS_PER_BAND; k++) {
+          const px = bufI[k * 3];
+          const py = bufI[k * 3 + 1];
+          const pz = bufI[k * 3 + 2];
+          const rI = Math.hypot(px, py, pz);
+          const ux = px / rI;
+          const uy = py / rI;
+          const uz = pz / rI;
+
+          const latDist = Math.abs(
+            ux * specJ.normal[0] + uy * specJ.normal[1] + uz * specJ.normal[2]
+          ) * rI;
+          if (latDist > halfWJ) continue;
+
+          // Find closest vertex on band j
+          const pu = ux * specJ.tangentU[0] + uy * specJ.tangentU[1] + uz * specJ.tangentU[2];
+          const pv = ux * specJ.tangentV[0] + uy * specJ.tangentV[1] + uz * specJ.tangentV[2];
+          let ang = Math.atan2(pv, pu);
+          if (ang < 0) ang += Math.PI * 2;
+          const kJ = Math.round((ang / (Math.PI * 2)) * SEGMENTS_PER_BAND) % SEGMENTS_PER_BAND;
+          const rJ = Math.hypot(bufJ[kJ * 3], bufJ[kJ * 3 + 1], bufJ[kJ * 3 + 2]);
+
+          // Outer band inner surface must clear underlying band outer surface
+          expect(rI - halfHI).toBeGreaterThanOrEqual(rJ + halfHJ - 0.002);
+        }
+      }
+    }
+
+    // Silence unused variable warning
+    expect(posBuf.length).toBeGreaterThan(0);
+  });
+
+  it('prevents pulled and snapping bands from clipping into the ball or core', () => {
+    const sim = new RubberBandBallSim();
+    const specs = sim.getBandSpecs();
+    const bandId = 175;
+    const spec = specs[bandId];
+    const posBuf = new Float32Array((SEGMENTS_PER_BAND + 1) * 3);
+    const strainBuf = new Float32Array(SEGMENTS_PER_BAND + 1);
+
+    // Sample resting profile
+    sim.sampleBandCenterline(bandId, posBuf, strainBuf);
+    const restRadii = new Float32Array(SEGMENTS_PER_BAND + 1);
+    for (let k = 0; k <= SEGMENTS_PER_BAND; k++) {
+      restRadii[k] = Math.hypot(posBuf[k * 3], posBuf[k * 3 + 1], posBuf[k * 3 + 2]);
+    }
+
+    // Pull obliquely
+    sim.startPull(bandId, 0.2, [...spec.tangentU]);
+    sim.updatePull([
+      spec.tangentU[0] * 0.25 + spec.normal[0] * 0.15,
+      spec.tangentU[1] * 0.25 + spec.normal[1] * 0.15,
+      spec.tangentU[2] * 0.25 + spec.normal[2] * 0.15,
+    ]);
+    sim.sampleBandCenterline(bandId, posBuf, strainBuf);
+    for (let k = 0; k <= SEGMENTS_PER_BAND; k++) {
+      const r = Math.hypot(posBuf[k * 3], posBuf[k * 3 + 1], posBuf[k * 3 + 2]);
+      expect(r).toBeGreaterThanOrEqual(restRadii[k] - 1e-4);
+    }
+
+    // Snap and verify no vertex penetrates the ball core or band radius during whip-back
+    sim.nickBand(bandId, 0.2);
+    for (let step = 0; step < 15; step++) {
+      sim.step(0.02);
+      const segs = sim.sampleBandCenterline(bandId, posBuf, strainBuf);
+      for (let k = 0; k <= segs; k++) {
+        const r = Math.hypot(posBuf[k * 3], posBuf[k * 3 + 1], posBuf[k * 3 + 2]);
+        expect(r).toBeGreaterThanOrEqual(spec.baseRadius - 1e-3);
+      }
+    }
+  });
+
+  it('delivers energetic snap kinematics: fast whip-back, rapid curl, ball jolt, neighbor twang, and talc burst', () => {
+    const sim = new RubberBandBallSim();
+    const specs = sim.getBandSpecs();
+    const runtimes = sim.getBandRuntimes();
+    const bandId = 179;
+    const spec = specs[bandId];
+
+    // Pull to snap
+    sim.startPull(bandId, 0.0, [...spec.tangentU]);
+    const snapped = sim.updatePull([
+      spec.tangentU[0] * 0.95,
+      spec.tangentU[1] * 0.95,
+      spec.tangentU[2] * 0.95,
+    ]);
+    expect(snapped).toBe(true);
+
+    const rt = runtimes[bandId];
+    expect(rt.leftVel).toBeGreaterThan(3.0);
+    expect(rt.rightVel).toBeGreaterThan(3.0);
+
+    // Dense talcum puff burst (>= 30 active puffs)
+    const activePuffs = sim.getDustPuffs().filter((p) => p.active);
+    expect(activePuffs.length).toBeGreaterThanOrEqual(30);
+
+    // Sympathetic neighbor twang
+    let maxNeighborTwang = 0;
+    for (let i = 140; i < 179; i++) {
+      if (runtimes[i].twangAmp > maxNeighborTwang) {
+        maxNeighborTwang = runtimes[i].twangAmp;
+      }
+    }
+    expect(maxNeighborTwang).toBeGreaterThan(0.04);
+
+    // Track ball recoil peak and rapid curl over first 0.12s
+    let maxRecoil = 0;
+    for (let i = 0; i < 6; i++) {
+      sim.step(0.02);
+      const rec = sim.getBallRecoil();
+      const mag = Math.hypot(rec[0], rec[1], rec[2]);
+      if (mag > maxRecoil) maxRecoil = mag;
+    }
+    expect(maxRecoil).toBeGreaterThan(0.025);
+    expect(rt.curlAmount).toBeGreaterThan(0.5);
+  });
 });
