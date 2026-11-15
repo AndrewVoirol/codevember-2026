@@ -1105,43 +1105,94 @@ export class RubberBandBallSim {
 
   /**
    * Smooths `floorScratch` in-place via taut elastic tension-envelope sweeps:
-   * r[k] = max(floor[k], 0.5*(r[k-1] + r[k+1]) - maxSag).
+   * r[k] = max(floor[k], 0.5*(r[k-1] + r[k+1]) - maxSag),
+   * followed by upward-only [0.25, 0.50, 0.25] curvature filleting so C^0 tent peaks round smoothly.
    */
   private smoothElasticEnvelope(
     profileOut: Float32Array,
     outOffset: number,
     sweeps: number,
-    sagSlack = 0.0004
+    sagSlack = 0.0004,
+    filletPasses = 4
   ): void {
     const floor = this.floorScratch;
+    const lastSeg = SEGMENTS_PER_BAND - 1;
     for (let k = 0; k < RINGS_PER_BAND; k++) {
       profileOut[outOffset + k] = floor[k];
     }
 
     for (let pass = 0; pass < sweeps; pass++) {
+      let maxDelta = 0;
+
       // Forward pass
       for (let k = 0; k < SEGMENTS_PER_BAND; k++) {
-        const kPrev = k === 0 ? SEGMENTS_PER_BAND - 1 : k - 1;
-        const kNext = k + 1 === SEGMENTS_PER_BAND ? 0 : k + 1;
+        const kPrev = k === 0 ? lastSeg : k - 1;
+        const kNext = k === lastSeg ? 0 : k + 1;
         const rCur = profileOut[outOffset + k];
         const maxSag = HALF_DTHETA_SQ * rCur + sagSlack;
         const avg =
           0.5 * (profileOut[outOffset + kPrev] + profileOut[outOffset + kNext]) - maxSag;
-        profileOut[outOffset + k] = avg > floor[k] ? avg : floor[k];
+        const nextVal = avg > floor[k] ? avg : floor[k];
+        const diff = nextVal > rCur ? nextVal - rCur : rCur - nextVal;
+        if (diff > maxDelta) maxDelta = diff;
+        profileOut[outOffset + k] = nextVal;
       }
       profileOut[outOffset + SEGMENTS_PER_BAND] = profileOut[outOffset];
 
       // Backward pass for fast symmetric propagation
-      for (let k = SEGMENTS_PER_BAND - 1; k >= 0; k--) {
-        const kPrev = k === 0 ? SEGMENTS_PER_BAND - 1 : k - 1;
-        const kNext = k + 1 === SEGMENTS_PER_BAND ? 0 : k + 1;
+      for (let k = lastSeg; k >= 0; k--) {
+        const kPrev = k === 0 ? lastSeg : k - 1;
+        const kNext = k === lastSeg ? 0 : k + 1;
         const rCur = profileOut[outOffset + k];
         const maxSag = HALF_DTHETA_SQ * rCur + sagSlack;
         const avg =
           0.5 * (profileOut[outOffset + kPrev] + profileOut[outOffset + kNext]) - maxSag;
-        profileOut[outOffset + k] = avg > floor[k] ? avg : floor[k];
+        const nextVal = avg > floor[k] ? avg : floor[k];
+        const diff = nextVal > rCur ? nextVal - rCur : rCur - nextVal;
+        if (diff > maxDelta) maxDelta = diff;
+        profileOut[outOffset + k] = nextVal;
       }
       profileOut[outOffset + SEGMENTS_PER_BAND] = profileOut[outOffset];
+      if (maxDelta < 2e-6) break;
+    }
+
+    // Upward-only Laplacian curvature fillet to round sharp C^0 slope elbows at isolated peaks
+    for (let fPass = 0; fPass < filletPasses; fPass++) {
+      let maxDelta = 0;
+      for (let k = 0; k < SEGMENTS_PER_BAND; k++) {
+        const kPrev = k === 0 ? lastSeg : k - 1;
+        const kNext = k === lastSeg ? 0 : k + 1;
+        const rCur = profileOut[outOffset + k];
+        const filletSag = 0.16 * (HALF_DTHETA_SQ * rCur + sagSlack);
+        const avg =
+          0.25 * profileOut[outOffset + kPrev] +
+          0.5 * rCur +
+          0.25 * profileOut[outOffset + kNext] -
+          filletSag;
+        const nextVal = avg > floor[k] ? avg : floor[k];
+        const diff = nextVal > rCur ? nextVal - rCur : rCur - nextVal;
+        if (diff > maxDelta) maxDelta = diff;
+        profileOut[outOffset + k] = nextVal;
+      }
+      profileOut[outOffset + SEGMENTS_PER_BAND] = profileOut[outOffset];
+
+      for (let k = lastSeg; k >= 0; k--) {
+        const kPrev = k === 0 ? lastSeg : k - 1;
+        const kNext = k === lastSeg ? 0 : k + 1;
+        const rCur = profileOut[outOffset + k];
+        const filletSag = 0.16 * (HALF_DTHETA_SQ * rCur + sagSlack);
+        const avg =
+          0.25 * profileOut[outOffset + kPrev] +
+          0.5 * rCur +
+          0.25 * profileOut[outOffset + kNext] -
+          filletSag;
+        const nextVal = avg > floor[k] ? avg : floor[k];
+        const diff = nextVal > rCur ? nextVal - rCur : rCur - nextVal;
+        if (diff > maxDelta) maxDelta = diff;
+        profileOut[outOffset + k] = nextVal;
+      }
+      profileOut[outOffset + SEGMENTS_PER_BAND] = profileOut[outOffset];
+      if (maxDelta < 2e-6) break;
     }
   }
 
@@ -2424,7 +2475,7 @@ export class RubberBandBallSim {
       ? Math.min(0.24, Math.max(0.13, Math.acos(Math.min(0.98, avgR / (avgR + peakPull + 0.03))) / TWO_PI))
       : 0.16;
 
-    const asym = 0.9 + this.rng() * 0.2;
+    const asym = 0.94 + this.rng() * 0.12;
     this.snapAsym[bandId] = asym;
     const latSign = this.rng() < 0.5 ? -1 : 1;
     this.snapSideSign[bandId] = latSign;
@@ -2444,8 +2495,8 @@ export class RubberBandBallSim {
     rt.leftArc = 0.5;
     rt.rightArc = 0.5;
 
-    // Readable high-speed whip retraction (~2.0-2.8 rev/s) over ~150-250ms
-    const baseWhipVel = (2.05 + strainFactor * 0.5) * (fromPull ? 1.12 : 0.98);
+    // Readable high-speed whip retraction with fast viscous damping across the front hemisphere
+    const baseWhipVel = (2.06 + strainFactor * 0.12) * (fromPull ? 1.05 : 1.0);
     rt.leftVel = baseWhipVel * asym;
     rt.rightVel = baseWhipVel / asym;
     rt.curlAmount = 0;
@@ -2656,7 +2707,7 @@ export class RubberBandBallSim {
     // 2. Update band physics (breathing, twang, readable whip-back & spiral C-curl)
     const breathBlend = 1 - Math.exp(-12.0 * dt);
     const twangDecay = Math.exp(-TWANG_DAMP * dt);
-    const arcDamp = Math.exp(-3.6 * dt);
+    const arcDamp = Math.exp(-7.5 * dt);
     let needDynamicUpdate = false;
 
     for (let i = 0; i < TOTAL_BANDS; i++) {
@@ -2692,9 +2743,9 @@ export class RubberBandBallSim {
         this.snapAgeSec[i] += dt;
         rt.leftVel *= arcDamp;
         rt.rightVel *= arcDamp;
-        rt.leftArc = Math.max(0.085, rt.leftArc - rt.leftVel * dt);
-        rt.rightArc = Math.max(0.085, rt.rightArc - rt.rightVel * dt);
-        rt.curlAmount = Math.min(1, rt.curlAmount + dt * 9.0);
+        rt.leftArc = Math.max(0.14, rt.leftArc - rt.leftVel * dt);
+        rt.rightArc = Math.max(0.14, rt.rightArc - rt.rightVel * dt);
+        rt.curlAmount = Math.min(1, rt.curlAmount + dt * 9.5);
 
         if (this.snapAgeSec[i] > 0.04) {
           rt.fallVel[1] -= GRAVITY * dt;
@@ -2705,7 +2756,7 @@ export class RubberBandBallSim {
 
         rt.currentStrain = Math.max(0, rt.currentStrain - dt * 4.5);
 
-        if (this.snapAgeSec[i] > 0.24 || rt.fallOffset[1] < -0.9) {
+        if (this.snapAgeSec[i] > 0.18 || rt.fallOffset[1] < -0.85) {
           rt.opacity = Math.max(0, rt.opacity - dt * 6.5);
         }
 
@@ -2815,14 +2866,14 @@ export class RubberBandBallSim {
       const ly = this.snapLaunchDir[bandIndex * 3 + 1];
       const lz = this.snapLaunchDir[bandIndex * 3 + 2];
 
-      const rAvg = 0.5 * (this.minBandRadius[bandIndex] + this.maxBandRadius[bandIndex]) + breathShift;
       const minClearR = Math.max(minCoreR, spec.baseRadius + spec.thickness * 0.5);
-      const lashEnv = Math.exp(-7.2 * age);
+      const lashEnv = Math.exp(-6.5 * age) * Math.min(1, age * 45.0);
+      const sideSign = this.snapSideSign[bandIndex];
 
       // Fast outward peel & 3D oblique tumble once severed so the coiled scrap springs clear of the ball
-      const peelBase = Math.min(0.24, age * 2.2);
-      const tumbleBlend = age > 0.045 ? Math.min(1, (age - 0.045) / 0.16) : 0;
-      const tumbleAngle = this.snapSideSign[bandIndex] * tumbleBlend * Math.max(0, age - 0.045) * 9.5;
+      const peelBase = Math.min(0.20, age * 2.4);
+      const tumbleBlend = age > 0.04 ? Math.min(1, (age - 0.04) / 0.14) : 0;
+      const tumbleAngle = sideSign * tumbleBlend * Math.max(0, age - 0.04) * 10.0;
       const cosT = Math.cos(tumbleAngle);
       const sinT = Math.sin(tumbleAngle);
 
@@ -2832,83 +2883,33 @@ export class RubberBandBallSim {
       const antRx = cAnt * tu[0] + sAnt * tv[0];
       const antRy = cAnt * tu[1] + sAnt * tv[1];
       const antRz = cAnt * tu[2] + sAnt * tv[2];
-      const antCenterR = rAvg + peelBase * 0.38;
-      const antCx = antCenterR * antRx;
-      const antCy = antCenterR * antRy;
-      const antCz = antCenterR * antRz;
 
-      const tax = antRx;
-      const tay = antRy;
-      const taz = antRz;
-
-      const hingeDist = 0.56;
-      const uHingeLeft = antipodeU - rt.leftArc * hingeDist;
-      const uHingeRight = antipodeU + rt.rightArc * hingeDist;
-      const thHL = uHingeLeft * TWO_PI;
-      const thHR = uHingeRight * TWO_PI;
-      const cHL = Math.cos(thHL);
-      const sHL = Math.sin(thHL);
-      const cHR = Math.cos(thHR);
-      const sHR = Math.sin(thHR);
-
-      // Evaluate exact wrapped radius at both hinge anchors for C^0 continuous spiral attachment
-      const uHLW = ((uHingeLeft % 1) + 1) % 1;
-      const kHLF = uHLW * SEGMENTS_PER_BAND;
-      const kHL0 = Math.floor(kHLF) % SEGMENTS_PER_BAND;
-      const kHL1 = (kHL0 + 1) % SEGMENTS_PER_BAND;
-      const fHL = kHLF - Math.floor(kHLF);
-      const rWrapHL =
-        this.radialProfile[profOffset + kHL0] * (1 - fHL) +
-        this.radialProfile[profOffset + kHL1] * fHL +
-        breathShift;
-
-      const uHRW = ((uHingeRight % 1) + 1) % 1;
-      const kHRF = uHRW * SEGMENTS_PER_BAND;
-      const kHR0 = Math.floor(kHRF) % SEGMENTS_PER_BAND;
-      const kHR1 = (kHR0 + 1) % SEGMENTS_PER_BAND;
-      const fHR = kHRF - Math.floor(kHRF);
-      const rWrapHR =
-        this.radialProfile[profOffset + kHR0] * (1 - fHR) +
-        this.radialProfile[profOffset + kHR1] * fHR +
-        breathShift;
-
-      const hingeLiftFrac = 0.38 + 0.62 * hingeDist * hingeDist;
-      const hingeWhip =
-        0.11 *
-        hingeDist *
-        lashEnv *
-        (0.4 + 0.6 * Math.max(0, Math.sin(hingeDist * 8.5 - age * 38.0)));
-      const rHL = Math.max(minClearR, rWrapHL) + peelBase * hingeLiftFrac + hingeWhip;
-      const rHR = Math.max(minClearR, rWrapHR) + peelBase * hingeLiftFrac + hingeWhip;
-
-      const erLx = cHL * tu[0] + sHL * tv[0];
-      const erLy = cHL * tu[1] + sHL * tv[1];
-      const erLz = cHL * tu[2] + sHL * tv[2];
-      const etLx = -(-sHL * tu[0] + cHL * tv[0]);
-      const etLy = -(-sHL * tu[1] + cHL * tv[1]);
-      const etLz = -(-sHL * tu[2] + cHL * tv[2]);
-
-      const erRx = cHR * tu[0] + sHR * tv[0];
-      const erRy = cHR * tu[1] + sHR * tv[1];
-      const erRz = cHR * tu[2] + sHR * tv[2];
-      const etRx = -sHR * tu[0] + cHR * tv[0];
-      const etRy = -sHR * tu[1] + cHR * tv[1];
-      const etRz = -sHR * tu[2] + cHR * tv[2];
-
-      const totalPhi = 4.4; // ~252 deg tight 3D helical C-loop
-      const spiralR0 = 0.042;
+      // Oblique tumble axis through origin preserves |c| identically while tilting 3D scrap silhouette
+      const taxRaw = antRx * 0.90 + nj[0] * 0.43 * sideSign;
+      const tayRaw = antRy * 0.90 + nj[1] * 0.43 * sideSign;
+      const tazRaw = antRz * 0.90 + nj[2] * 0.43 * sideSign;
+      const taInv = 1 / (Math.hypot(taxRaw, tayRaw, tazRaw) || 1);
+      const tax = taxRaw * taInv;
+      const tay = tayRaw * taInv;
+      const taz = tazRaw * taInv;
 
       for (let k = 0; k <= activeSegs; k++) {
         const frac = k / activeSegs;
+        const sSigned = (frac - 0.5) * 2;
+        const endDist = Math.abs(sSigned);
         const uOffset = -rt.leftArc + frac * totalArc;
-        const u = antipodeU + uOffset;
-        const uWrapped = ((u % 1) + 1) % 1;
+        const uBase = antipodeU + uOffset;
+        const uBaseWrapped = ((uBase % 1) + 1) % 1;
+
+        // Smooth continuous inward/tangential C-bend across the entire scrap (no rigid middle shaft)
+        const uBend = uOffset * (1 + 0.16 * curl * endDist * endDist);
+        const u = antipodeU + uBend;
         const theta = u * TWO_PI;
         const c = Math.cos(theta);
         const s = Math.sin(theta);
 
-        // Interpolate wrapped base radius along u so the middle hugs the ball accurately
-        const kF = uWrapped * SEGMENTS_PER_BAND;
+        // Interpolate wrapped base radius along uBaseWrapped so the scrap hugs the ball before peeling
+        const kF = uBaseWrapped * SEGMENTS_PER_BAND;
         const k0 = Math.floor(kF) % SEGMENTS_PER_BAND;
         const k1 = (k0 + 1) % SEGMENTS_PER_BAND;
         const kf = kF - Math.floor(kF);
@@ -2917,53 +2918,38 @@ export class RubberBandBallSim {
           this.radialProfile[profOffset + k1] * kf +
           breathShift;
 
-        const endDist = Math.abs(frac - 0.5) * 2;
         const whipLash =
-          0.11 *
+          0.095 *
           endDist *
           lashEnv *
-          (0.4 + 0.6 * Math.max(0, Math.sin(endDist * 8.5 - age * 38.0)));
-        const liftFrac = 0.38 + 0.62 * endDist * endDist;
-        const radCircle = Math.max(minClearR, rWrap) + peelBase * liftFrac + whipLash;
+          (0.35 + 0.65 * Math.sin(endDist * 7.5 - age * 34.0));
+        const liftFrac = 0.55 + 0.45 * endDist * endDist;
+        const tipPhi = 2.2 * Math.pow(endDist, 1.8) * curl;
+        const radHook = -0.055 * Math.sin(tipPhi * 0.85) * endDist * curl;
+        const waveRad = 0.026 * Math.sin(frac * Math.PI * 2.4 - age * 20.0) * endDist * curl;
+        const radCircle = Math.max(minClearR, rWrap) + peelBase * liftFrac + whipLash + radHook + waveRad;
 
-        let cx = radCircle * (c * tu[0] + s * tv[0]);
-        let cy = radCircle * (c * tu[1] + s * tv[1]);
-        let cz = radCircle * (c * tu[2] + s * tv[2]);
+        const erx = c * tu[0] + s * tv[0];
+        const ery = c * tu[1] + s * tv[1];
+        const erz = c * tu[2] + s * tv[2];
+        const etx = -s * tu[0] + c * tv[0];
+        const ety = -s * tu[1] + c * tv[1];
+        const etz = -s * tu[2] + c * tv[2];
 
-        // Smoothly curl free tips (> 56% toward tip) into a tight 3D helical C-loop spiral
-        if (endDist > hingeDist && curl > 1e-4) {
-          const tipS = (endDist - hingeDist) / (1 - hingeDist);
-          const phi = totalPhi * Math.pow(tipS, 1.08);
-          const rho = spiralR0 * (1 - 0.32 * tipS);
-          const dsTan = rho * Math.sin(phi);
-          const dsRad = rho * (1 - Math.cos(phi));
-          const sideSign = frac >= 0.5 ? 1 : -1;
-          const dsLat = sideSign * 0.036 * Math.sin(phi * 1.15);
+        // Tangential tip curl-back (shepherd's hook) + bold out-of-plane 3D S-wave along nj
+        const tanHook = -sSigned * 0.032 * (1 - Math.cos(tipPhi));
+        const waveLat =
+          (0.068 * Math.sin(frac * Math.PI * 2.2 + sideSign * age * 11.0) +
+            sideSign * 0.034 * sSigned * endDist) *
+          curl;
 
-          const isRight = frac >= 0.5;
-          const hx = isRight ? rHR * erRx : rHL * erLx;
-          const hy = isRight ? rHR * erRy : rHL * erLy;
-          const hz = isRight ? rHR * erRz : rHL * erLz;
-
-          const erx = isRight ? erRx : erLx;
-          const ery = isRight ? erRy : erLy;
-          const erz = isRight ? erRz : erLz;
-          const etx = isRight ? etRx : etLx;
-          const ety = isRight ? etRy : etLy;
-          const etz = isRight ? etRz : etLz;
-
-          const coilX = hx + dsTan * etx + dsRad * erx + dsLat * nj[0];
-          const coilY = hy + dsTan * ety + dsRad * ery + dsLat * nj[1];
-          const coilZ = hz + dsTan * etz + dsRad * erz + dsLat * nj[2];
-
-          cx = cx + (coilX - cx) * curl;
-          cy = cy + (coilY - cy) * curl;
-          cz = cz + (coilZ - cz) * curl;
-        }
+        let cx = radCircle * erx + tanHook * etx + waveLat * nj[0];
+        let cy = radCircle * ery + tanHook * ety + waveLat * nj[1];
+        let cz = radCircle * erz + tanHook * etz + waveLat * nj[2];
 
         // Preserve stretched crown into initial whip-down so break starts right at cursor apex
         if (crownEnv > 1e-4) {
-          const dSnap = shortestArcDist(uWrapped, rt.snapU);
+          const dSnap = shortestArcDist(uBaseWrapped, rt.snapU);
           const crownWeight = evalPullArch(dSnap, crownHalfArc);
           const crownLift = crownEnv * crownWeight;
           cx += lx * crownLift;
@@ -2971,18 +2957,15 @@ export class RubberBandBallSim {
           cz += lz * crownLift;
         }
 
-        // 3D oblique tumble around the coiled scrap's own center while springing away from the ball
+        // 3D oblique tumble preserving local distance to ball center while springing away
         if (tumbleBlend > 1e-4) {
-          const dx = cx - antCx;
-          const dy = cy - antCy;
-          const dz = cz - antCz;
-          const aDotD = (tax * dx + tay * dy + taz * dz) * (1 - cosT);
-          const crx = tay * dz - taz * dy;
-          const cry = taz * dx - tax * dz;
-          const crz = tax * dy - tay * dx;
-          cx = antCx + dx * cosT + crx * sinT + tax * aDotD;
-          cy = antCy + dy * cosT + cry * sinT + tay * aDotD;
-          cz = antCz + dz * cosT + crz * sinT + taz * aDotD;
+          const aDotC = (tax * cx + tay * cy + taz * cz) * (1 - cosT);
+          const crx = tay * cz - taz * cy;
+          const cry = taz * cx - tax * cz;
+          const crz = tax * cy - tay * cx;
+          cx = cx * cosT + crx * sinT + tax * aDotC;
+          cy = cy * cosT + cry * sinT + tay * aDotC;
+          cz = cz * cosT + crz * sinT + taz * aDotC;
         }
 
         let px = cx + fx;
