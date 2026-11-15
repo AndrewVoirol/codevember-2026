@@ -429,14 +429,10 @@ export function createRubberBallVisuals(specs: readonly BandSpec[]): RubberBallV
     geom.setIndex(sharedIndex);
 
     const posAttr = new THREE.BufferAttribute(posArr, 3);
-    posAttr.setUsage(THREE.DynamicDrawUsage);
     const normAttr = new THREE.BufferAttribute(normArr, 3);
-    normAttr.setUsage(THREE.DynamicDrawUsage);
     const strainAttr = new THREE.BufferAttribute(strainArr, 1);
-    strainAttr.setUsage(THREE.DynamicDrawUsage);
     const crossUvAttr = new THREE.BufferAttribute(crossUvArr, 3);
     const metaAttr = new THREE.BufferAttribute(metaArr, 4);
-    metaAttr.setUsage(THREE.DynamicDrawUsage);
 
     geom.setAttribute('position', posAttr);
     geom.setAttribute('normal', normAttr);
@@ -480,7 +476,6 @@ export function createRubberBallVisuals(specs: readonly BandSpec[]): RubberBallV
   // x: life [0..1], y: isSpeck [0|1], z: per-instance seed [0..1]
   const puffMetaArr = new Float32Array(MAX_DUST_PUFFS * 3);
   const puffMetaAttr = new THREE.InstancedBufferAttribute(puffMetaArr, 3);
-  puffMetaAttr.setUsage(THREE.DynamicDrawUsage);
   puffGeom.setAttribute('aPuffMeta', puffMetaAttr);
 
   const puffMat = new THREE.MeshBasicNodeMaterial({
@@ -511,20 +506,20 @@ export function createRubberBallVisuals(specs: readonly BandSpec[]): RubberBallV
     float(4.2)
   );
 
-  // Brief light fast-dispersing powder haze (low alpha, tight falloff, never lingering grey smoke)
-  const plumeAlpha = exp(radialDist.mul(radialDist).mul(-4.6))
-    .mul(smoothstep(0.95, 0.25, radialDist.add(puffWisp.sub(0.5).mul(0.54))))
-    .mul(puffLife.mul(puffLife).mul(0.24));
+  // Brief light fast-dispersing powder haze (low alpha <= 0.28, tight falloff, never lingering grey smoke)
+  const plumeAlpha = exp(radialDist.mul(radialDist).mul(-5.0))
+    .mul(smoothstep(0.95, 0.25, radialDist.add(puffWisp.sub(0.5).mul(0.5))))
+    .mul(puffLife.mul(puffLife).mul(0.26));
 
   // Crisp bright chalky mineral flecks with sharp micro-particle edge falloff
-  const speckShape = speckDist.add(puffWisp.sub(0.5).mul(0.32));
-  const speckAlpha = smoothstep(0.68, 0.34, speckShape)
-    .mul(smoothstep(0.0, 0.35, puffLife))
-    .mul(0.94);
+  const speckShape = speckDist.add(puffWisp.sub(0.5).mul(0.26));
+  const speckAlpha = smoothstep(0.84, 0.4, speckShape)
+    .mul(smoothstep(0.0, 0.22, puffLife))
+    .mul(0.98);
 
   puffMat.colorNode = mix(
-    mix(kaolin.rInf, calcite.rInf, float(0.65).add(puffWisp.mul(0.35))),
-    calcite.rInf.mul(1.12),
+    mix(kaolin.rInf, calcite.rInf, float(0.68).add(puffWisp.mul(0.32))),
+    calcite.rInf.mul(1.38),
     isSpeck
   );
   puffMat.opacityNode = max(float(0.0), mix(plumeAlpha, speckAlpha, isSpeck));
@@ -803,10 +798,10 @@ export function createRubberBallVisuals(specs: readonly BandSpec[]): RubberBallV
       const life = 1.0 - p.ageSec / p.maxAgeSec;
       if (life <= 0.005) continue;
 
-      const speckFlag = (p.isSpeck !== undefined ? p.isSpeck : p.size < 0.012) ? 1.0 : 0.0;
+      const speckFlag = (p.isSpeck !== undefined ? p.isSpeck : p.size < 0.016) ? 1.0 : 0.0;
       const expand = speckFlag > 0.5
-        ? 1.05 - (1.0 - life) * 0.2
-        : 0.75 + (1.0 - life) * 0.95;
+        ? 1.22 - (1.0 - life) * 0.28
+        : 0.72 + (1.0 - life) * 0.85;
       const s = p.size * expand;
 
       _dummyPos.set(p.pos[0], p.pos[1], p.pos[2]);

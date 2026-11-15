@@ -311,6 +311,7 @@ export async function bootDay14Tension(): Promise<SpecimenStage> {
   let activeBandId: number | null = null;
   let activeUHit = 0;
   let activePointerId: number | null = null;
+  let grabLockPointerId: number | null = null;
   let isOrbiting = false;
   let dragStartClientX = 0;
   let dragStartClientY = 0;
@@ -347,20 +348,23 @@ export async function bootDay14Tension(): Promise<SpecimenStage> {
     return true;
   }
 
-  function clearPullState(pointerId?: number): void {
+  function clearPullState(keepOrbitLocked: boolean, pointerId?: number): void {
     activeBandId = null;
     activePointerId = null;
-    stage.controls.enabled = true;
-    canvas.style.cursor = hoveredBandId !== null ? 'grab' : 'default';
-    if (pointerId !== undefined) {
-      try {
-        if (canvas.hasPointerCapture(pointerId)) {
-          canvas.releasePointerCapture(pointerId);
+    if (!keepOrbitLocked) {
+      grabLockPointerId = null;
+      stage.controls.enabled = true;
+      if (pointerId !== undefined) {
+        try {
+          if (canvas.hasPointerCapture(pointerId)) {
+            canvas.releasePointerCapture(pointerId);
+          }
+        } catch {
+          // Ignore if pointer capture already released
         }
-      } catch {
-        // Ignore if pointer capture already released
       }
     }
+    canvas.style.cursor = hoveredBandId !== null ? 'grab' : 'default';
   }
 
   const onPointerMove = (e: PointerEvent): void => {
@@ -417,13 +421,14 @@ export async function bootDay14Tension(): Promise<SpecimenStage> {
         const snapped = sim.updatePull(_deltaTuple);
         if (snapped) {
           hoveredBandId = null;
-          clearPullState(e.pointerId);
+          // Keep OrbitControls disabled until pointerup/pointercancel so residual drag never orbits
+          clearPullState(true, e.pointerId);
         }
       }
       return;
     }
 
-    if (isOrbiting) return;
+    if (grabLockPointerId !== null || isOrbiting) return;
     if (!computeLocalRay(e.clientX, e.clientY)) return;
 
     const hit = sim.raycastBand(_rayOriginTuple, _rayDirTuple);
@@ -438,6 +443,12 @@ export async function bootDay14Tension(): Promise<SpecimenStage> {
 
     const hit = sim.raycastBand(_rayOriginTuple, _rayDirTuple);
     if (hit) {
+      // Intercept in capture phase before OrbitControls enters STATE.ROTATE
+      grabLockPointerId = e.pointerId;
+      stage.controls.enabled = false;
+      e.stopImmediatePropagation();
+      e.preventDefault();
+
       activeBandId = hit.bandId;
       activeUHit = hit.uHit;
       activePointerId = e.pointerId;
@@ -468,7 +479,6 @@ export async function bootDay14Tension(): Promise<SpecimenStage> {
       _sentPullVec.set(0, 0, 0);
 
       sim.startPull(hit.bandId, hit.uHit, _pullDirTuple);
-      stage.controls.enabled = false;
       canvas.style.cursor = 'grabbing';
       try {
         canvas.setPointerCapture(e.pointerId);
@@ -480,13 +490,19 @@ export async function bootDay14Tension(): Promise<SpecimenStage> {
 
     // If all bands are gone and user clicks the exposed starter core, re-wrap a fresh ball
     if (sim.getDiagnostics().intactCount === 0 && _localRay.intersectsSphere(_coreSphere)) {
+      grabLockPointerId = e.pointerId;
+      stage.controls.enabled = false;
+      e.stopImmediatePropagation();
+      e.preventDefault();
       sim.reset();
       hoveredBandId = null;
       canvas.style.cursor = 'default';
       return;
     }
 
-    isOrbiting = true;
+    if (grabLockPointerId === null) {
+      isOrbiting = true;
+    }
   };
 
   const onPointerUp = (e: PointerEvent): void => {
@@ -502,7 +518,11 @@ export async function bootDay14Tension(): Promise<SpecimenStage> {
         sim.releasePull();
         rubberAudio.playTwang(pullAmt);
       }
-      clearPullState(e.pointerId);
+      clearPullState(false, e.pointerId);
+      return;
+    }
+    if (grabLockPointerId !== null && e.pointerId === grabLockPointerId) {
+      clearPullState(false, e.pointerId);
       return;
     }
     isOrbiting = false;
@@ -510,8 +530,22 @@ export async function bootDay14Tension(): Promise<SpecimenStage> {
 
   const onDblClick = (): void => {
     hoveredBandId = null;
-    clearPullState();
+    if (activeBandId !== null) {
+      sim.releasePull();
+    }
+    clearPullState(false, grabLockPointerId ?? activePointerId ?? undefined);
+    isOrbiting = false;
     sim.reset();
+  };
+
+  const onWindowBlur = (): void => {
+    if (activeBandId !== null) {
+      sim.releasePull();
+    }
+    if (activePointerId !== null || grabLockPointerId !== null) {
+      clearPullState(false, grabLockPointerId ?? activePointerId ?? undefined);
+    }
+    isOrbiting = false;
   };
 
   const onKeyUnlock = (): void => {
@@ -519,19 +553,22 @@ export async function bootDay14Tension(): Promise<SpecimenStage> {
   };
 
   canvas.addEventListener('pointermove', onPointerMove);
-  canvas.addEventListener('pointerdown', onPointerDown);
-  canvas.addEventListener('pointerup', onPointerUp);
-  canvas.addEventListener('pointercancel', onPointerUp);
+  canvas.addEventListener('pointerdown', onPointerDown, { capture: true });
+  window.addEventListener('pointerup', onPointerUp, { capture: true });
+  window.addEventListener('pointercancel', onPointerUp, { capture: true });
+  window.addEventListener('blur', onWindowBlur);
   canvas.addEventListener('dblclick', onDblClick);
   window.addEventListener('keydown', onKeyUnlock, { passive: true });
 
   stage.shell.registerDispose(() => {
     canvas.removeEventListener('pointermove', onPointerMove);
-    canvas.removeEventListener('pointerdown', onPointerDown);
-    canvas.removeEventListener('pointerup', onPointerUp);
-    canvas.removeEventListener('pointercancel', onPointerUp);
+    canvas.removeEventListener('pointerdown', onPointerDown, { capture: true });
+    window.removeEventListener('pointerup', onPointerUp, { capture: true });
+    window.removeEventListener('pointercancel', onPointerUp, { capture: true });
+    window.removeEventListener('blur', onWindowBlur);
     canvas.removeEventListener('dblclick', onDblClick);
     window.removeEventListener('keydown', onKeyUnlock);
+    stage.controls.enabled = true;
     rubberAudio.dispose();
     visuals.dispose();
   });
