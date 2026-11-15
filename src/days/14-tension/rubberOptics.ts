@@ -10,7 +10,6 @@ import {
   max,
   mix,
   positionLocal,
-  select,
   sin,
   smoothstep,
   step,
@@ -87,13 +86,15 @@ export interface RubberBallVisuals {
 function createRubberBandMaterial(
   pigmentKey: PigmentKey,
   uHoveredBandId: TslNode,
-  uTime: TslNode
+  uTime: TslNode,
+  isFading: boolean
 ): THREE.MeshStandardNodeMaterial {
   const mat = new THREE.MeshStandardNodeMaterial({
     roughness: 0.72,
     metalness: 0.02,
     side: THREE.DoubleSide,
-    alphaTest: 0.5,
+    transparent: false,
+    ...(isFading ? { alphaTest: 0.5 } : {}),
   });
 
   const pigment = createPigmentUniforms(pigmentKey);
@@ -112,21 +113,31 @@ function createRubberBandMaterial(
   const batchSeed = aBandMeta.z;
   const snapTipFlash = aBandMeta.w;
 
-  // Evaluate all procedural 3D noise in uniform control flow
-  const crepeGrain = mineralToothFbm(pos0.add(vec3(batchSeed.mul(13.7))), float(62.0));
-  const talcumNoise = mineralToothFbm(pos0.add(vec3(batchSeed.mul(5.3))), float(15.5));
+  // Evaluate 2 shared 3D FBM fields in uniform control flow to keep hardware TBDR fast
+  // while preserving closed-loop C1 continuity and crepe/talcum/crazing detail.
+  const crepeGrain = mineralToothFbm(pos0.add(vec3(batchSeed.mul(13.7))), float(58.0));
   const loopAng = aCrossUv.y.mul(TWO_PI);
   const loopCos = cos(loopAng);
   const loopSin = sin(loopAng);
-  const stretchFiber = mineralToothFbm(
-    vec3(loopCos.mul(7.6), loopSin.mul(7.6), aCrossUv.x.mul(7.5).add(bandId.mul(3.17))),
-    float(1.0)
-  );
   const crazingNoise = mineralToothFbm(
-    vec3(loopCos.mul(18.3), loopSin.mul(18.3), aCrossUv.x.mul(18.0).add(bandId.mul(5.41))),
+    vec3(loopCos.mul(15.5), loopSin.mul(15.5), aCrossUv.x.mul(15.0).add(bandId.mul(5.41))),
     float(1.0)
   );
-  const ditherVal = hash31Tsl(pos0.mul(92.0).add(vec3(uTime.mul(0.01))));
+  // Preserve zero-mean contrast variance across derived talcum & stretch fiber modulation
+  const talcumNoise = clamp(
+    float(0.5)
+      .add(crazingNoise.sub(0.5).mul(0.92))
+      .add(crepeGrain.sub(0.5).mul(0.45)),
+    0.0,
+    1.0
+  );
+  const stretchFiber = clamp(
+    float(0.5)
+      .add(crazingNoise.sub(0.5).mul(0.85))
+      .add(crepeGrain.sub(0.5).mul(0.52)),
+    0.0,
+    1.0
+  );
 
   // Kubelka-Munk mineral-dyed body color over chalky slate backing
   const chalkBacking = vec3(
@@ -195,12 +206,11 @@ function createRubberBandMaterial(
     .add(crazingFissure.mul(0.22));
   mat.roughnessNode = clamp(mix(grainRough, float(0.93), bloomMask), 0.3, 0.96);
 
-  // Crisp opaque depth-buffered rendering for active bands; dithered dissolve only when fading
-  mat.opacityNode = select(
-    opacity.greaterThan(0.99),
-    float(1.0),
-    step(ditherVal, opacity)
-  );
+  // Only fade materials use dithered alphaTest; opaque intact bands keep 100% hardware Early-Z
+  if (isFading) {
+    const ditherVal = hash31Tsl(pos0.mul(92.0).add(vec3(uTime.mul(0.01))));
+    mat.opacityNode = step(ditherVal, opacity);
+  }
 
   return mat;
 }
@@ -364,12 +374,14 @@ export function createRubberBallVisuals(specs: readonly BandSpec[]): RubberBallV
   const core = createStarterCore(inferredCoreRadius);
   group.add(core.coreGroup);
 
-  // 2. Materials grouped by PigmentKey
-  const materialsByPigment = new Map<PigmentKey, THREE.MeshStandardNodeMaterial>();
+  // 2. Split opaque Early-Z materials from dither-fade materials grouped by PigmentKey
+  const opaqueMaterialsByPigment = new Map<PigmentKey, THREE.MeshStandardNodeMaterial>();
+  const fadeMaterialsByPigment = new Map<PigmentKey, THREE.MeshStandardNodeMaterial>();
   for (let i = 0; i < specs.length; i++) {
     const p = specs[i].pigment;
-    if (!materialsByPigment.has(p)) {
-      materialsByPigment.set(p, createRubberBandMaterial(p, uHoveredBandId, uTime));
+    if (!opaqueMaterialsByPigment.has(p)) {
+      opaqueMaterialsByPigment.set(p, createRubberBandMaterial(p, uHoveredBandId, uTime, false));
+      fadeMaterialsByPigment.set(p, createRubberBandMaterial(p, uHoveredBandId, uTime, true));
     }
   }
 
@@ -378,6 +390,8 @@ export function createRubberBallVisuals(specs: readonly BandSpec[]): RubberBallV
   interface BandMeshRecord {
     mesh: THREE.Mesh;
     geom: THREE.BufferGeometry;
+    pigment: PigmentKey;
+    isFadingMaterial: boolean;
     posAttr: THREE.BufferAttribute;
     normAttr: THREE.BufferAttribute;
     strainAttr: THREE.BufferAttribute;
@@ -443,7 +457,7 @@ export function createRubberBallVisuals(specs: readonly BandSpec[]): RubberBallV
     // Conservative bounding sphere so frustum culling never clips pulled bands
     geom.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), 3.0);
 
-    const mat = materialsByPigment.get(spec.pigment)!;
+    const mat = opaqueMaterialsByPigment.get(spec.pigment)!;
     const mesh = new THREE.Mesh(geom, mat);
     mesh.castShadow = true;
     mesh.receiveShadow = true;
@@ -454,6 +468,8 @@ export function createRubberBallVisuals(specs: readonly BandSpec[]): RubberBallV
     bandRecords.push({
       mesh,
       geom,
+      pigment: spec.pigment,
+      isFadingMaterial: false,
       posAttr,
       normAttr,
       strainAttr,
@@ -557,6 +573,10 @@ export function createRubberBallVisuals(specs: readonly BandSpec[]): RubberBallV
 
       if (!rt || rt.status === 'gone' || rt.opacity <= 0.005) {
         rec.mesh.visible = false;
+        if (rec.isFadingMaterial) {
+          rec.mesh.material = opaqueMaterialsByPigment.get(rec.pigment)!;
+          rec.isFadingMaterial = false;
+        }
         rec.lastStatus = rt ? rt.status : 'gone';
         rec.lastOpacity = rt ? rt.opacity : 0;
         if (hasGetVersion) {
@@ -564,6 +584,14 @@ export function createRubberBallVisuals(specs: readonly BandSpec[]): RubberBallV
         }
         rec.initialized = true;
         continue;
+      }
+
+      const shouldFade = rt.opacity < 0.995;
+      if (shouldFade !== rec.isFadingMaterial) {
+        rec.mesh.material = shouldFade
+          ? fadeMaterialsByPigment.get(rec.pigment)!
+          : opaqueMaterialsByPigment.get(rec.pigment)!;
+        rec.isFadingMaterial = shouldFade;
       }
 
       const ver = hasGetVersion ? sim.getBandVersion!(b) : -1;
@@ -833,8 +861,10 @@ export function createRubberBallVisuals(specs: readonly BandSpec[]): RubberBallV
     for (let i = 0; i < bandRecords.length; i++) {
       bandRecords[i].geom.dispose();
     }
-    materialsByPigment.forEach((mat) => mat.dispose());
-    materialsByPigment.clear();
+    opaqueMaterialsByPigment.forEach((mat) => mat.dispose());
+    opaqueMaterialsByPigment.clear();
+    fadeMaterialsByPigment.forEach((mat) => mat.dispose());
+    fadeMaterialsByPigment.clear();
     puffGeom.dispose();
     puffMat.dispose();
   }
