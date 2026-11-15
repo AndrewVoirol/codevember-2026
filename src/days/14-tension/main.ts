@@ -13,22 +13,47 @@ declare global {
   }
 }
 
-// Pre-allocated scratch objects for zero-GC pointer interaction
+interface SnapImpulseShape {
+  snapId: number;
+  bandId: number;
+  hitPos: readonly [number, number, number];
+  pullDir: readonly [number, number, number];
+  normal: readonly [number, number, number];
+  intensity: number;
+}
+
+interface SimWithSnapInfo {
+  getLastSnapInfo?: () => SnapImpulseShape | null;
+}
+
+// Pre-allocated scratch objects for zero-GC pointer interaction & torque math
 const _ndc = new THREE.Vector2();
 const _raycaster = new THREE.Raycaster();
+const _localRay = new THREE.Ray();
+const _invGroupMat = new THREE.Matrix4();
 const _rayOriginTuple: [number, number, number] = [0, 0, 0];
 const _rayDirTuple: [number, number, number] = [0, 0, 0];
 const _pullDirTuple: [number, number, number] = [0, 0, 0];
 const _deltaTuple: [number, number, number] = [0, 0, 0];
 const _dragPlane = new THREE.Plane();
 const _camDir = new THREE.Vector3();
+const _camDirLocal = new THREE.Vector3();
+const _camOutLocal = new THREE.Vector3();
 const _hitPoint = new THREE.Vector3();
 const _hitNormal = new THREE.Vector3();
 const _startPlaneHit = new THREE.Vector3();
-const _prevPlaneHit = new THREE.Vector3();
 const _currPlaneHit = new THREE.Vector3();
-const _planeDelta = new THREE.Vector3();
-const _coreSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), 0.3);
+const _cursorDrag = new THREE.Vector3();
+const _tangentDrag = new THREE.Vector3();
+const _targetPullVec = new THREE.Vector3();
+const _sentPullVec = new THREE.Vector3();
+const _deltaVec = new THREE.Vector3();
+const _lastPullHitPos = new THREE.Vector3(0, 0, 0.9);
+const _lastPullDir = new THREE.Vector3(0, 0, 1);
+const _snapPosScratch = new THREE.Vector3();
+const _snapDirScratch = new THREE.Vector3();
+const _snapNormScratch = new THREE.Vector3();
+const _torqueVec = new THREE.Vector3();
 
 const NICK_TRAVEL_THRESHOLD_PX = 6;
 
@@ -40,11 +65,13 @@ interface RubberAudioSynth {
 }
 
 /**
- * Zero-chrome procedural WebAudio synthesizer for rubber-band snaps and twangs.
- * Lazily unlocks on first pointer gesture and degrades silently if AudioContext is unavailable.
+ * Zero-chrome procedural WebAudio synthesizer for dry latex snap cracks,
+ * elastic whip twangs, and dense rubber ball core thumps.
+ * Lazily unlocks on first pointer/key interaction and dispatches queued first-gesture snaps.
  */
 function createRubberAudio(): RubberAudioSynth {
   let ctx: AudioContext | null = null;
+  let masterOut: AudioNode | null = null;
   let noiseBuf: AudioBuffer | null = null;
 
   function ensureContext(): AudioContext | null {
@@ -56,7 +83,16 @@ function createRubberAudio(): RubberAudioSynth {
     if (!ctx) {
       try {
         ctx = new AudioCtor();
-        const len = Math.floor(ctx.sampleRate * 0.06);
+        const comp = ctx.createDynamicsCompressor();
+        comp.threshold.setValueAtTime(-14, ctx.currentTime);
+        comp.knee.setValueAtTime(12, ctx.currentTime);
+        comp.ratio.setValueAtTime(8, ctx.currentTime);
+        comp.attack.setValueAtTime(0.001, ctx.currentTime);
+        comp.release.setValueAtTime(0.08, ctx.currentTime);
+        comp.connect(ctx.destination);
+        masterOut = comp;
+
+        const len = Math.floor(ctx.sampleRate * 0.08);
         noiseBuf = ctx.createBuffer(1, len, ctx.sampleRate);
         const data = noiseBuf.getChannelData(0);
         for (let i = 0; i < len; i++) {
@@ -64,6 +100,7 @@ function createRubberAudio(): RubberAudioSynth {
         }
       } catch {
         ctx = null;
+        masterOut = null;
         return null;
       }
     }
@@ -73,93 +110,173 @@ function createRubberAudio(): RubberAudioSynth {
     return ctx;
   }
 
+  function scheduleSnap(ac: AudioContext, intensity: number): void {
+    const out = masterOut ?? ac.destination;
+    const now = ac.currentTime;
+    const gainScale = Math.min(1.15, Math.max(0.45, intensity));
+
+    // 1. Sharp dry latex whip-crack transient (high click + crisp snap body)
+    if (noiseBuf) {
+      const highSrc = ac.createBufferSource();
+      highSrc.buffer = noiseBuf;
+      const highBp = ac.createBiquadFilter();
+      highBp.type = 'bandpass';
+      highBp.frequency.setValueAtTime(3400, now);
+      highBp.frequency.exponentialRampToValueAtTime(1350, now + 0.014);
+      highBp.Q.value = 1.4;
+      const highGain = ac.createGain();
+      highGain.gain.setValueAtTime(0.42 * gainScale, now);
+      highGain.gain.exponentialRampToValueAtTime(0.001, now + 0.016);
+      highSrc.connect(highBp);
+      highBp.connect(highGain);
+      highGain.connect(out);
+      highSrc.start(now);
+      highSrc.stop(now + 0.02);
+
+      const bodySrc = ac.createBufferSource();
+      bodySrc.buffer = noiseBuf;
+      const bodyBp = ac.createBiquadFilter();
+      bodyBp.type = 'bandpass';
+      bodyBp.frequency.setValueAtTime(1700, now);
+      bodyBp.frequency.exponentialRampToValueAtTime(560, now + 0.028);
+      bodyBp.Q.value = 2.0;
+      const bodyGain = ac.createGain();
+      bodyGain.gain.setValueAtTime(0.32 * gainScale, now);
+      bodyGain.gain.exponentialRampToValueAtTime(0.001, now + 0.032);
+      bodySrc.connect(bodyBp);
+      bodyBp.connect(bodyGain);
+      bodyGain.connect(out);
+      bodySrc.start(now);
+      bodySrc.stop(now + 0.036);
+    }
+
+    // 2. Elastic rubber whip twang (pitch-rebounding fundamental + overtone)
+    const lp = ac.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.setValueAtTime(2600, now);
+    lp.frequency.exponentialRampToValueAtTime(520, now + 0.11);
+    lp.Q.value = 1.8;
+
+    const twangGain = ac.createGain();
+    twangGain.gain.setValueAtTime(0.001, now);
+    twangGain.gain.linearRampToValueAtTime(0.2 * gainScale, now + 0.003);
+    twangGain.gain.exponentialRampToValueAtTime(0.001, now + 0.115);
+
+    const osc = ac.createOscillator();
+    osc.type = 'triangle';
+    const startHz = 420 + gainScale * 170;
+    osc.frequency.setValueAtTime(startHz, now);
+    osc.frequency.exponentialRampToValueAtTime(140, now + 0.045);
+    osc.frequency.exponentialRampToValueAtTime(182, now + 0.095);
+
+    const overOsc = ac.createOscillator();
+    overOsc.type = 'sine';
+    overOsc.frequency.setValueAtTime(startHz * 2.08, now);
+    overOsc.frequency.exponentialRampToValueAtTime(290, now + 0.06);
+
+    const overGain = ac.createGain();
+    overGain.gain.setValueAtTime(0.35, now);
+
+    osc.connect(lp);
+    overOsc.connect(overGain);
+    overGain.connect(lp);
+    lp.connect(twangGain);
+    twangGain.connect(out);
+
+    osc.start(now);
+    osc.stop(now + 0.12);
+    overOsc.start(now);
+    overOsc.stop(now + 0.07);
+
+    // 3. Dense rubber core thump
+    const thump = ac.createOscillator();
+    thump.type = 'sine';
+    thump.frequency.setValueAtTime(138, now);
+    thump.frequency.exponentialRampToValueAtTime(46, now + 0.055);
+
+    const thumpGain = ac.createGain();
+    thumpGain.gain.setValueAtTime(0.24 * gainScale, now);
+    thumpGain.gain.exponentialRampToValueAtTime(0.001, now + 0.06);
+
+    thump.connect(thumpGain);
+    thumpGain.connect(out);
+    thump.start(now);
+    thump.stop(now + 0.065);
+  }
+
+  function scheduleTwang(ac: AudioContext, pullAmount: number): void {
+    const out = masterOut ?? ac.destination;
+    const now = ac.currentTime;
+    const amp = Math.min(0.22, 0.05 + pullAmount * 0.32);
+    const baseHz = 165 + Math.min(240, pullAmount * 300);
+
+    const osc = ac.createOscillator();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(baseHz, now);
+    osc.frequency.exponentialRampToValueAtTime(baseHz * 0.72, now + 0.13);
+
+    const harmonic = ac.createOscillator();
+    harmonic.type = 'sine';
+    harmonic.frequency.setValueAtTime(baseHz * 1.48, now);
+    harmonic.frequency.exponentialRampToValueAtTime(baseHz * 1.05, now + 0.09);
+
+    const harmGain = ac.createGain();
+    harmGain.gain.setValueAtTime(0.3, now);
+
+    const g = ac.createGain();
+    g.gain.setValueAtTime(0.001, now);
+    g.gain.linearRampToValueAtTime(amp, now + 0.004);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.145);
+
+    osc.connect(g);
+    harmonic.connect(harmGain);
+    harmGain.connect(g);
+    g.connect(out);
+
+    osc.start(now);
+    osc.stop(now + 0.15);
+    harmonic.start(now);
+    harmonic.stop(now + 0.1);
+  }
+
   return {
     unlock: () => {
       ensureContext();
     },
     playSnap: (intensity: number) => {
       const ac = ensureContext();
-      if (!ac || ac.state !== 'running') return;
-      const now = ac.currentTime;
-      const gainScale = Math.min(1.0, Math.max(0.35, intensity));
-
-      // 1. Crisp latex crack transient (band-passed noise)
-      if (noiseBuf) {
-        const src = ac.createBufferSource();
-        src.buffer = noiseBuf;
-        const bp = ac.createBiquadFilter();
-        bp.type = 'bandpass';
-        bp.frequency.setValueAtTime(2400, now);
-        bp.frequency.exponentialRampToValueAtTime(750, now + 0.025);
-        bp.Q.value = 2.2;
-
-        const g = ac.createGain();
-        g.gain.setValueAtTime(0.28 * gainScale, now);
-        g.gain.exponentialRampToValueAtTime(0.001, now + 0.028);
-
-        src.connect(bp);
-        bp.connect(g);
-        g.connect(ac.destination);
-        src.start(now);
-        src.stop(now + 0.032);
+      if (!ac) return;
+      if (ac.state === 'running') {
+        scheduleSnap(ac, intensity);
+      } else {
+        const queuedAt = performance.now();
+        void ac.resume().then(() => {
+          if (ac.state === 'running' && performance.now() - queuedAt < 90) {
+            scheduleSnap(ac, intensity);
+          }
+        }).catch(() => {});
       }
-
-      // 2. Elastic whip twang
-      const osc = ac.createOscillator();
-      osc.type = 'triangle';
-      osc.frequency.setValueAtTime(360 + gainScale * 140, now);
-      osc.frequency.exponentialRampToValueAtTime(115, now + 0.11);
-
-      const twangGain = ac.createGain();
-      twangGain.gain.setValueAtTime(0.16 * gainScale, now);
-      twangGain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
-
-      osc.connect(twangGain);
-      twangGain.connect(ac.destination);
-      osc.start(now);
-      osc.stop(now + 0.125);
-
-      // 3. Low ball core thump
-      const thump = ac.createOscillator();
-      thump.type = 'sine';
-      thump.frequency.setValueAtTime(105, now);
-      thump.frequency.exponentialRampToValueAtTime(46, now + 0.06);
-
-      const thumpGain = ac.createGain();
-      thumpGain.gain.setValueAtTime(0.18 * gainScale, now);
-      thumpGain.gain.exponentialRampToValueAtTime(0.001, now + 0.065);
-
-      thump.connect(thumpGain);
-      thumpGain.connect(ac.destination);
-      thump.start(now);
-      thump.stop(now + 0.07);
     },
     playTwang: (pullAmount: number) => {
       if (pullAmount < 0.025) return;
       const ac = ensureContext();
-      if (!ac || ac.state !== 'running') return;
-      const now = ac.currentTime;
-      const amp = Math.min(0.18, pullAmount * 0.25);
-
-      const osc = ac.createOscillator();
-      osc.type = 'sine';
-      const baseHz = 175 + Math.min(220, pullAmount * 260);
-      osc.frequency.setValueAtTime(baseHz, now);
-      osc.frequency.exponentialRampToValueAtTime(baseHz * 0.72, now + 0.14);
-
-      const g = ac.createGain();
-      g.gain.setValueAtTime(amp, now);
-      g.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
-
-      osc.connect(g);
-      g.connect(ac.destination);
-      osc.start(now);
-      osc.stop(now + 0.155);
+      if (!ac) return;
+      if (ac.state === 'running') {
+        scheduleTwang(ac, pullAmount);
+      } else {
+        const queuedAt = performance.now();
+        void ac.resume().then(() => {
+          if (ac.state === 'running' && performance.now() - queuedAt < 90) {
+            scheduleTwang(ac, pullAmount);
+          }
+        }).catch(() => {});
+      }
     },
     dispose: () => {
       if (ctx) {
         void ctx.close().catch(() => {});
         ctx = null;
+        masterOut = null;
         noiseBuf = null;
       }
     },
@@ -181,6 +298,13 @@ export async function bootDay14Tension(): Promise<SpecimenStage> {
   stage.specimenGroup.add(visuals.group);
   const rubberAudio = createRubberAudio();
 
+  const specs = sim.getBandSpecs();
+  const coreRadius =
+    specs.length > 0
+      ? Math.max(0.28, specs[0].baseRadius - specs[0].thickness * 0.5 - 0.008)
+      : 0.36;
+  const _coreSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), coreRadius + 0.02);
+
   const canvas = stage.shell.canvas;
 
   let hoveredBandId: number | null = null;
@@ -192,8 +316,10 @@ export async function bootDay14Tension(): Promise<SpecimenStage> {
   let dragStartClientY = 0;
   let dragMoved = false;
   let prevSnapCount = 0;
+  let lastPullBandId = -1;
+  let lastPullStrength = 0.65;
 
-  // Damped angular spring for subtle rotational jolt when bands snap
+  // Damped angular spring for crisp directional torque recoil when bands snap
   let rotX = 0;
   let rotY = 0;
   let rotZ = 0;
@@ -201,20 +327,23 @@ export async function bootDay14Tension(): Promise<SpecimenStage> {
   let rotVelY = 0;
   let rotVelZ = 0;
 
-  function computeRay(clientX: number, clientY: number): boolean {
+  function computeLocalRay(clientX: number, clientY: number): boolean {
     const rect = canvas.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return false;
     _ndc.x = ((clientX - rect.left) / rect.width) * 2 - 1;
     _ndc.y = -((clientY - rect.top) / rect.height) * 2 + 1;
     _raycaster.setFromCamera(_ndc, stage.camera);
-    const o = _raycaster.ray.origin;
-    const d = _raycaster.ray.direction;
-    _rayOriginTuple[0] = o.x;
-    _rayOriginTuple[1] = o.y;
-    _rayOriginTuple[2] = o.z;
-    _rayDirTuple[0] = d.x;
-    _rayDirTuple[1] = d.y;
-    _rayDirTuple[2] = d.z;
+
+    visuals.group.updateMatrixWorld();
+    _invGroupMat.copy(visuals.group.matrixWorld).invert();
+    _localRay.copy(_raycaster.ray).applyMatrix4(_invGroupMat);
+
+    _rayOriginTuple[0] = _localRay.origin.x;
+    _rayOriginTuple[1] = _localRay.origin.y;
+    _rayOriginTuple[2] = _localRay.origin.z;
+    _rayDirTuple[0] = _localRay.direction.x;
+    _rayDirTuple[1] = _localRay.direction.y;
+    _rayDirTuple[2] = _localRay.direction.z;
     return true;
   }
 
@@ -241,22 +370,49 @@ export async function bootDay14Tension(): Promise<SpecimenStage> {
         dragMoved = true;
       }
 
-      if (!computeRay(e.clientX, e.clientY)) return;
-      if (_raycaster.ray.intersectPlane(_dragPlane, _currPlaneHit)) {
-        _planeDelta.subVectors(_currPlaneHit, _prevPlaneHit);
-        const curDist = _currPlaneHit.distanceTo(_startPlaneHit);
-        const prevDist = _prevPlaneHit.distanceTo(_startPlaneHit);
-        _prevPlaneHit.copy(_currPlaneHit);
+      if (!computeLocalRay(e.clientX, e.clientY)) return;
+      if (_localRay.intersectPlane(_dragPlane, _currPlaneHit)) {
+        _cursorDrag.subVectors(_currPlaneHit, _startPlaneHit);
+        const dragDist = _cursorDrag.length();
 
-        // Combine direct radial projection (strong at limb) with camera-plane pull distance
-        // (essential on front-facing center hits where _hitNormal is nearly parallel to _camDir).
-        const radialProj = _planeDelta.dot(_hitNormal);
-        const facing = Math.abs(_hitNormal.dot(_camDir));
-        const desiredPullDelta = radialProj + facing * facing * (curDist - prevDist);
+        if (dragDist > 1e-5) {
+          const normalComp = _cursorDrag.dot(_hitNormal);
+          _tangentDrag.copy(_cursorDrag).addScaledVector(_hitNormal, -normalComp);
 
-        _deltaTuple[0] = _hitNormal.x * desiredPullDelta;
-        _deltaTuple[1] = _hitNormal.y * desiredPullDelta;
-        _deltaTuple[2] = _hitNormal.z * desiredPullDelta;
+          if (normalComp >= 0) {
+            // Outward or tangent-plane pull: track cursor direction while ensuring positive surface lift
+            const liftNormal = Math.max(normalComp, dragDist * 0.24);
+            _targetPullVec.copy(_tangentDrag).addScaledVector(_hitNormal, liftNormal);
+          } else {
+            // Dragging inward across the ball center from a limb: redirect into camera-facing
+            // front hemisphere + tangential swipe and clamp away from tunneling into the ball
+            _targetPullVec.copy(_tangentDrag).addScaledVector(_camOutLocal, -normalComp * 0.55);
+            const postDot = _targetPullVec.dot(_hitNormal);
+            if (postDot < 0) {
+              _targetPullVec.addScaledVector(_hitNormal, -postDot);
+            }
+            _targetPullVec.addScaledVector(_hitNormal, dragDist * 0.34);
+            const targetLen = _targetPullVec.length();
+            if (targetLen > 1e-5) {
+              _targetPullVec.multiplyScalar((dragDist * 0.96) / targetLen);
+            }
+          }
+        } else {
+          _targetPullVec.set(0, 0, 0);
+        }
+
+        _deltaVec.subVectors(_targetPullVec, _sentPullVec);
+        _sentPullVec.copy(_targetPullVec);
+
+        _deltaTuple[0] = _deltaVec.x;
+        _deltaTuple[1] = _deltaVec.y;
+        _deltaTuple[2] = _deltaVec.z;
+
+        const rt = sim.getBandRuntimes()[activeBandId];
+        if (rt) {
+          _lastPullDir.set(rt.pullDir[0], rt.pullDir[1], rt.pullDir[2]);
+          lastPullStrength = 0.65 + Math.min(0.85, rt.pullAmount * 1.4);
+        }
 
         const snapped = sim.updatePull(_deltaTuple);
         if (snapped) {
@@ -268,7 +424,7 @@ export async function bootDay14Tension(): Promise<SpecimenStage> {
     }
 
     if (isOrbiting) return;
-    if (!computeRay(e.clientX, e.clientY)) return;
+    if (!computeLocalRay(e.clientX, e.clientY)) return;
 
     const hit = sim.raycastBand(_rayOriginTuple, _rayDirTuple);
     hoveredBandId = hit ? hit.bandId : null;
@@ -278,7 +434,7 @@ export async function bootDay14Tension(): Promise<SpecimenStage> {
   const onPointerDown = (e: PointerEvent): void => {
     if (e.button !== 0) return;
     rubberAudio.unlock();
-    if (!computeRay(e.clientX, e.clientY)) return;
+    if (!computeLocalRay(e.clientX, e.clientY)) return;
 
     const hit = sim.raycastBand(_rayOriginTuple, _rayDirTuple);
     if (hit) {
@@ -292,14 +448,24 @@ export async function bootDay14Tension(): Promise<SpecimenStage> {
       _hitPoint.set(hit.hitPoint[0], hit.hitPoint[1], hit.hitPoint[2]);
       _hitNormal.copy(_hitPoint).normalize();
       if (_hitNormal.lengthSq() < 0.5) _hitNormal.set(0, 0, 1);
+
+      lastPullBandId = hit.bandId;
+      _lastPullHitPos.copy(_hitPoint);
+      _lastPullDir.copy(_hitNormal);
+      lastPullStrength = 0.62;
+
       _pullDirTuple[0] = _hitNormal.x;
       _pullDirTuple[1] = _hitNormal.y;
       _pullDirTuple[2] = _hitNormal.z;
 
       stage.camera.getWorldDirection(_camDir);
-      _dragPlane.setFromNormalAndCoplanarPoint(_camDir, _hitPoint);
+      _camDirLocal.copy(_camDir).transformDirection(_invGroupMat).normalize();
+      _camOutLocal.copy(_camDirLocal).negate();
+
+      _dragPlane.setFromNormalAndCoplanarPoint(_camDirLocal, _hitPoint);
       _startPlaneHit.copy(_hitPoint);
-      _prevPlaneHit.copy(_hitPoint);
+      _currPlaneHit.copy(_hitPoint);
+      _sentPullVec.set(0, 0, 0);
 
       sim.startPull(hit.bandId, hit.uHit, _pullDirTuple);
       stage.controls.enabled = false;
@@ -313,7 +479,7 @@ export async function bootDay14Tension(): Promise<SpecimenStage> {
     }
 
     // If all bands are gone and user clicks the exposed starter core, re-wrap a fresh ball
-    if (sim.getDiagnostics().intactCount === 0 && _raycaster.ray.intersectsSphere(_coreSphere)) {
+    if (sim.getDiagnostics().intactCount === 0 && _localRay.intersectsSphere(_coreSphere)) {
       sim.reset();
       hoveredBandId = null;
       canvas.style.cursor = 'default';
@@ -324,8 +490,11 @@ export async function bootDay14Tension(): Promise<SpecimenStage> {
   };
 
   const onPointerUp = (e: PointerEvent): void => {
+    rubberAudio.unlock();
     if (activeBandId !== null && e.pointerId === activePointerId) {
       if (e.type === 'pointerup' && !dragMoved) {
+        lastPullBandId = activeBandId;
+        lastPullStrength = 0.58;
         sim.nickBand(activeBandId, activeUHit);
         hoveredBandId = null;
       } else {
@@ -345,11 +514,16 @@ export async function bootDay14Tension(): Promise<SpecimenStage> {
     sim.reset();
   };
 
+  const onKeyUnlock = (): void => {
+    rubberAudio.unlock();
+  };
+
   canvas.addEventListener('pointermove', onPointerMove);
   canvas.addEventListener('pointerdown', onPointerDown);
   canvas.addEventListener('pointerup', onPointerUp);
   canvas.addEventListener('pointercancel', onPointerUp);
   canvas.addEventListener('dblclick', onDblClick);
+  window.addEventListener('keydown', onKeyUnlock, { passive: true });
 
   stage.shell.registerDispose(() => {
     canvas.removeEventListener('pointermove', onPointerMove);
@@ -357,6 +531,7 @@ export async function bootDay14Tension(): Promise<SpecimenStage> {
     canvas.removeEventListener('pointerup', onPointerUp);
     canvas.removeEventListener('pointercancel', onPointerUp);
     canvas.removeEventListener('dblclick', onDblClick);
+    window.removeEventListener('keydown', onKeyUnlock);
     rubberAudio.dispose();
     visuals.dispose();
   });
@@ -366,13 +541,51 @@ export async function bootDay14Tension(): Promise<SpecimenStage> {
     const diag = sim.getDiagnostics();
     if (diag.snapCount > prevSnapCount) {
       const snapsDelta = Math.min(3, diag.snapCount - prevSnapCount);
-      rubberAudio.playSnap(0.65 + snapsDelta * 0.15);
-      // Crisp rotational torque jolt on each snap
-      const angleSeed = diag.snapCount * 2.39996;
-      const kick = 0.55 * snapsDelta;
-      rotVelX += Math.cos(angleSeed) * kick;
-      rotVelY += Math.sin(angleSeed * 1.3) * kick;
-      rotVelZ += Math.sin(angleSeed * 0.7) * kick * 0.6;
+      const snapInfo = (sim as unknown as SimWithSnapInfo).getLastSnapInfo?.() ?? null;
+
+      let intensity = Math.max(0.68, lastPullStrength);
+      let snapBandId = lastPullBandId;
+
+      if (snapInfo) {
+        _snapPosScratch.set(snapInfo.hitPos[0], snapInfo.hitPos[1], snapInfo.hitPos[2]);
+        _snapDirScratch.set(snapInfo.pullDir[0], snapInfo.pullDir[1], snapInfo.pullDir[2]);
+        _snapNormScratch.set(snapInfo.normal[0], snapInfo.normal[1], snapInfo.normal[2]);
+        intensity = snapInfo.intensity;
+        snapBandId = snapInfo.bandId;
+      } else {
+        _snapPosScratch.copy(_lastPullHitPos);
+        _snapDirScratch.copy(_lastPullDir);
+        const fallbackSpec = snapBandId >= 0 ? specs[snapBandId] : undefined;
+        if (fallbackSpec) {
+          _snapNormScratch.set(
+            fallbackSpec.normal[0],
+            fallbackSpec.normal[1],
+            fallbackSpec.normal[2]
+          );
+        } else {
+          _snapNormScratch.set(0, 1, 0);
+        }
+      }
+
+      rubberAudio.playSnap(Math.min(1.15, intensity + (snapsDelta - 1) * 0.12));
+
+      // Physical rotational torque jolt: hitPos x (-pullDir) kicks the ball away from the snap
+      _torqueVec.crossVectors(_snapPosScratch, _snapDirScratch).negate();
+      const crossMag = _torqueVec.length();
+      if (crossMag < 0.25) {
+        // Pure radial nicks twist cleanly along the severed band's wrap plane
+        const sign = snapBandId % 2 === 0 ? 1 : -1;
+        _torqueVec.addScaledVector(_snapNormScratch, 0.42 * sign);
+      }
+
+      const tLen = _torqueVec.length();
+      if (tLen > 1e-5) {
+        _torqueVec.divideScalar(tLen);
+        const kick = (1.45 + intensity * 1.15) * (1 + (snapsDelta - 1) * 0.28);
+        rotVelX += _torqueVec.x * kick;
+        rotVelY += _torqueVec.y * kick;
+        rotVelZ += _torqueVec.z * kick;
+      }
     } else if (diag.snapCount < prevSnapCount) {
       // Reset occurred
       rotX = 0;
@@ -385,20 +598,20 @@ export async function bootDay14Tension(): Promise<SpecimenStage> {
     prevSnapCount = diag.snapCount;
 
     const dt = Math.min(dtSec, 0.05);
-    const rotK = 210.0;
-    const rotDamp = 16.0;
+    const rotK = 165.0;
+    const rotDamp = 9.5;
     rotVelX += (-rotK * rotX - rotDamp * rotVelX) * dt;
     rotVelY += (-rotK * rotY - rotDamp * rotVelY) * dt;
     rotVelZ += (-rotK * rotZ - rotDamp * rotVelZ) * dt;
-    rotX += rotVelX * dt;
-    rotY += rotVelY * dt;
-    rotZ += rotVelZ * dt;
+    rotX = Math.max(-0.36, Math.min(0.36, rotX + rotVelX * dt));
+    rotY = Math.max(-0.36, Math.min(0.36, rotY + rotVelY * dt));
+    rotZ = Math.max(-0.36, Math.min(0.36, rotZ + rotVelZ * dt));
 
     const recoil = sim.getBallRecoil();
     visuals.group.position.set(recoil[0], recoil[1], recoil[2]);
     visuals.group.rotation.set(rotX, rotY, rotZ);
     visuals.syncFromSim(
-      sim.getBandSpecs(),
+      specs,
       sim.getBandRuntimes(),
       sim.getDustPuffs(),
       sim,

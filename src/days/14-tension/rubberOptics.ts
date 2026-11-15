@@ -3,6 +3,7 @@ import {
   abs,
   attribute,
   clamp,
+  cos,
   exp,
   float,
   length,
@@ -10,10 +11,12 @@ import {
   mix,
   positionLocal,
   select,
+  sin,
   smoothstep,
   step,
   uniform,
   uv,
+  vec2,
   vec3,
 } from 'three/tsl';
 import { CHALKY_SLATE_LINEAR, type PigmentKey } from '../../core/palette';
@@ -33,15 +36,15 @@ import {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type TslNode = any;
 
+type DustPuffCompat = DustPuff & { isSpeck?: boolean };
+
 const VERTS_PER_RING = 8;
-const MAX_RINGS = SEGMENTS_PER_BAND + 1;
-const MAX_VERTS_PER_BAND = MAX_RINGS * VERTS_PER_RING;
-const MAX_INDICES_PER_BAND = SEGMENTS_PER_BAND * VERTS_PER_RING * 6;
-const MAX_DUST_PUFFS = 384;
+const MAX_DUST_PUFFS = 512;
+const TWO_PI = Math.PI * 2;
 
 // Pre-allocated scratch buffers for zero-GC syncFromSim
-const _posScratch = new Float32Array(MAX_RINGS * 3);
-const _strainScratch = new Float32Array(MAX_RINGS);
+let _posScratch = new Float32Array((SEGMENTS_PER_BAND + 1) * 3);
+let _strainScratch = new Float32Array(SEGMENTS_PER_BAND + 1);
 const _dummyMat = new THREE.Matrix4();
 const _dummyPos = new THREE.Vector3();
 const _dummyQuat = new THREE.Quaternion();
@@ -57,6 +60,7 @@ const NORM_B = [-0.28, 0.28, 0.88, 0.88, 0.28, -0.28, -0.88, -0.88] as const;
 
 export interface RubberBallSimReader {
   sampleBandCenterline: (idx: number, pos: Float32Array, strain: Float32Array) => number;
+  getBandVersion?: (idx: number) => number;
 }
 
 export interface RubberBallVisuals {
@@ -111,12 +115,15 @@ function createRubberBandMaterial(
   // Evaluate all procedural 3D noise in uniform control flow
   const crepeGrain = mineralToothFbm(pos0.add(vec3(batchSeed.mul(13.7))), float(62.0));
   const talcumNoise = mineralToothFbm(pos0.add(vec3(batchSeed.mul(5.3))), float(15.5));
+  const loopAng = aCrossUv.y.mul(TWO_PI);
+  const loopCos = cos(loopAng);
+  const loopSin = sin(loopAng);
   const stretchFiber = mineralToothFbm(
-    vec3(aCrossUv.y.mul(48.0), aCrossUv.x.mul(7.5), bandId.mul(3.17)),
+    vec3(loopCos.mul(7.6), loopSin.mul(7.6), aCrossUv.x.mul(7.5).add(bandId.mul(3.17))),
     float(1.0)
   );
   const crazingNoise = mineralToothFbm(
-    vec3(aCrossUv.y.mul(115.0), aCrossUv.x.mul(18.0), bandId.mul(5.41)),
+    vec3(loopCos.mul(18.3), loopSin.mul(18.3), aCrossUv.x.mul(18.0).add(bandId.mul(5.41))),
     float(1.0)
   );
   const ditherVal = hash31Tsl(pos0.mul(92.0).add(vec3(uTime.mul(0.01))));
@@ -199,10 +206,10 @@ function createRubberBandMaterial(
 }
 
 /**
- * Builds the knotted rawUmber & boneCalcite starter core at radius ~0.28
+ * Builds the knotted rawUmber & boneCalcite starter core scaled to match CORE_RADIUS
  * revealed when outer bands are excavated.
  */
-function createStarterCore(): {
+function createStarterCore(coreRadius: number): {
   coreGroup: THREE.Group;
   dispose: () => void;
 } {
@@ -212,7 +219,11 @@ function createStarterCore(): {
   const rawUmber = createPigmentUniforms('rawUmber');
   const boneCalcite = createPigmentUniforms('boneCalcite');
 
-  // Faceted / crumpled rubber nub at r ~ 0.24
+  // Scale snugly inside coreRadius so the exposed nub clears the innermost band without air gaps
+  const coreScale = (coreRadius * 0.995) / 0.286;
+  coreGroup.scale.setScalar(coreScale);
+
+  // Faceted / crumpled rubber nub at base r ~ 0.235 (scaled by coreScale)
   const nubGeom = new THREE.IcosahedronGeometry(0.235, 3);
   const posAttr = nubGeom.getAttribute('position') as THREE.BufferAttribute;
   const arr = posAttr.array as Float32Array;
@@ -296,12 +307,15 @@ function createStarterCore(): {
 }
 
 /**
- * Builds the shared index buffer for an 8-vertex-per-ring ribbon up to SEGMENTS_PER_BAND.
+ * Builds the shared index buffer for an 8-vertex-per-ring ribbon up to segmentsPerBand.
+ * Uses Uint16Array whenever vertex count fits (<= 65535), falling back to Uint32Array otherwise.
  */
-function createSharedRibbonIndices(): THREE.BufferAttribute {
-  const indices = new Uint16Array(MAX_INDICES_PER_BAND);
+function createSharedRibbonIndices(segmentsPerBand: number): THREE.BufferAttribute {
+  const maxVerts = (segmentsPerBand + 1) * VERTS_PER_RING;
+  const maxIndices = segmentsPerBand * VERTS_PER_RING * 6;
+  const indices = maxVerts <= 65535 ? new Uint16Array(maxIndices) : new Uint32Array(maxIndices);
   let ptr = 0;
-  for (let s = 0; s < SEGMENTS_PER_BAND; s++) {
+  for (let s = 0; s < segmentsPerBand; s++) {
     const r0 = s * VERTS_PER_RING;
     const r1 = (s + 1) * VERTS_PER_RING;
     for (let k = 0; k < VERTS_PER_RING; k++) {
@@ -327,14 +341,27 @@ function createSharedRibbonIndices(): THREE.BufferAttribute {
  * Creates the Day 14 mineral-dyed rubber band ball visual layer.
  */
 export function createRubberBallVisuals(specs: readonly BandSpec[]): RubberBallVisuals {
+  const segsPerBand = SEGMENTS_PER_BAND;
+  const ringsPerBand = segsPerBand + 1;
+  const vertsPerBand = ringsPerBand * VERTS_PER_RING;
+
+  if (_strainScratch.length < ringsPerBand) {
+    _posScratch = new Float32Array(ringsPerBand * 3);
+    _strainScratch = new Float32Array(ringsPerBand);
+  }
+
   const group = new THREE.Group();
   group.name = 'rubber-band-ball';
 
   const uHoveredBandId = uniform(-1.0);
   const uTime = uniform(0.0);
 
-  // 1. Starter core
-  const core = createStarterCore();
+  // 1. Starter core (inferred snugly from innermost band spec so it never gaps or protrudes)
+  const inferredCoreRadius =
+    specs.length > 0
+      ? Math.max(0.24, specs[0].baseRadius - specs[0].thickness * 0.5 - 0.009)
+      : 0.36;
+  const core = createStarterCore(inferredCoreRadius);
   group.add(core.coreGroup);
 
   // 2. Materials grouped by PigmentKey
@@ -346,7 +373,7 @@ export function createRubberBallVisuals(specs: readonly BandSpec[]): RubberBallV
     }
   }
 
-  const sharedIndex = createSharedRibbonIndices();
+  const sharedIndex = createSharedRibbonIndices(segsPerBand);
 
   interface BandMeshRecord {
     mesh: THREE.Mesh;
@@ -360,6 +387,11 @@ export function createRubberBallVisuals(specs: readonly BandSpec[]): RubberBallV
     normArr: Float32Array;
     strainArr: Float32Array;
     metaArr: Float32Array;
+    initialized: boolean;
+    lastVersion: number;
+    lastStatus: string;
+    lastOpacity: number;
+    lastChecksum: number;
   }
 
   const bandRecords: BandMeshRecord[] = [];
@@ -369,17 +401,17 @@ export function createRubberBallVisuals(specs: readonly BandSpec[]): RubberBallV
 
   for (let b = 0; b < specs.length; b++) {
     const spec = specs[b];
-    const posArr = new Float32Array(MAX_VERTS_PER_BAND * 3);
-    const normArr = new Float32Array(MAX_VERTS_PER_BAND * 3);
-    const strainArr = new Float32Array(MAX_VERTS_PER_BAND);
-    const crossUvArr = new Float32Array(MAX_VERTS_PER_BAND * 3);
-    const metaArr = new Float32Array(MAX_VERTS_PER_BAND * 4);
+    const posArr = new Float32Array(vertsPerBand * 3);
+    const normArr = new Float32Array(vertsPerBand * 3);
+    const strainArr = new Float32Array(vertsPerBand);
+    const crossUvArr = new Float32Array(vertsPerBand * 3);
+    const metaArr = new Float32Array(vertsPerBand * 4);
 
     // Deterministic batch seed in [0, 1]
     const batchSeed = (((Math.sin(spec.id * 12.9898 + spec.layer * 78.233) * 43758.5453) % 1) + 1) % 1;
 
-    for (let r = 0; r < MAX_RINGS; r++) {
-      const uAlong = r / SEGMENTS_PER_BAND;
+    for (let r = 0; r < ringsPerBand; r++) {
+      const uAlong = r / segsPerBand;
       for (let k = 0; k < VERTS_PER_RING; k++) {
         const vIdx = r * VERTS_PER_RING + k;
         crossUvArr[vIdx * 3] = CORNER_B[k];
@@ -435,10 +467,15 @@ export function createRubberBallVisuals(specs: readonly BandSpec[]): RubberBallV
       normArr,
       strainArr,
       metaArr,
+      initialized: false,
+      lastVersion: -1,
+      lastStatus: '',
+      lastOpacity: -1,
+      lastChecksum: Number.NaN,
     });
   }
 
-  // 3. Instanced billboarded talcum dust puffs (crisp mineral specks + wispy billowing clouds)
+  // 3. Instanced billboarded talcum dust puffs (crisp mineral flecks + brief light powder haze)
   const puffGeom = new THREE.PlaneGeometry(2.0, 2.0);
   // x: life [0..1], y: isSpeck [0|1], z: per-instance seed [0..1]
   const puffMetaArr = new Float32Array(MAX_DUST_PUFFS * 3);
@@ -460,23 +497,34 @@ export function createRubberBallVisuals(specs: readonly BandSpec[]): RubberBallV
 
   const uvCentered = uv().sub(0.5).mul(2.0);
   const radialDist = length(uvCentered);
+  // Seeded per-instance rotation so chalk flecks read as irregular mineral granules
+  const flakeAngle = puffSeed.mul(TWO_PI);
+  const ca = cos(flakeAngle);
+  const sa = sin(flakeAngle);
+  const uvRot = vec2(
+    uvCentered.x.mul(ca).sub(uvCentered.y.mul(sa)),
+    uvCentered.x.mul(sa).add(uvCentered.y.mul(ca))
+  );
+  const speckDist = length(vec2(uvRot.x, uvRot.y.mul(1.55)));
   const puffWisp = mineralToothFbm(
-    vec3(uvCentered, puffSeed.mul(17.3).add(0.35)),
-    float(3.8)
+    vec3(uvRot, puffSeed.mul(17.3).add(0.35)),
+    float(4.2)
   );
 
-  // Billowing plume vs crisp talc granule/flake
-  const plumeAlpha = exp(radialDist.mul(radialDist).mul(-2.7))
-    .mul(smoothstep(1.0, 0.16, radialDist.add(puffWisp.sub(0.5).mul(0.58))))
-    .mul(puffLife.mul(puffLife).mul(0.54));
+  // Brief light fast-dispersing powder haze (low alpha, tight falloff, never lingering grey smoke)
+  const plumeAlpha = exp(radialDist.mul(radialDist).mul(-4.6))
+    .mul(smoothstep(0.95, 0.25, radialDist.add(puffWisp.sub(0.5).mul(0.54))))
+    .mul(puffLife.mul(puffLife).mul(0.24));
 
-  const speckAlpha = smoothstep(0.68, 0.2, radialDist.add(puffWisp.sub(0.5).mul(0.52)))
-    .mul(puffLife)
-    .mul(0.84);
+  // Crisp bright chalky mineral flecks with sharp micro-particle edge falloff
+  const speckShape = speckDist.add(puffWisp.sub(0.5).mul(0.32));
+  const speckAlpha = smoothstep(0.68, 0.34, speckShape)
+    .mul(smoothstep(0.0, 0.35, puffLife))
+    .mul(0.94);
 
   puffMat.colorNode = mix(
-    mix(kaolin.rInf, calcite.rInf, puffWisp),
-    calcite.rInf.mul(1.08),
+    mix(kaolin.rInf, calcite.rInf, float(0.65).add(puffWisp.mul(0.35))),
+    calcite.rInf.mul(1.12),
     isSpeck
   );
   puffMat.opacityNode = max(float(0.0), mix(plumeAlpha, speckAlpha, isSpeck));
@@ -503,7 +551,9 @@ export function createRubberBallVisuals(specs: readonly BandSpec[]): RubberBallV
     uTime.value = elapsedSec;
     uHoveredBandId.value = hoveredBandId !== null ? hoveredBandId : -1.0;
 
-    // Update each band ribbon in-place with zero allocations
+    const hasGetVersion = typeof sim.getBandVersion === 'function';
+
+    // Update only dynamic/dirty band ribbons in-place with zero allocations
     const count = Math.min(syncSpecs.length, bandRecords.length);
     for (let b = 0; b < count; b++) {
       const spec = syncSpecs[b];
@@ -512,35 +562,91 @@ export function createRubberBallVisuals(specs: readonly BandSpec[]): RubberBallV
 
       if (!rt || rt.status === 'gone' || rt.opacity <= 0.005) {
         rec.mesh.visible = false;
+        rec.lastStatus = rt ? rt.status : 'gone';
+        rec.lastOpacity = rt ? rt.opacity : 0;
+        if (hasGetVersion) {
+          rec.lastVersion = sim.getBandVersion!(b);
+        }
+        rec.initialized = true;
+        continue;
+      }
+
+      const ver = hasGetVersion ? sim.getBandVersion!(b) : -1;
+      if (
+        hasGetVersion &&
+        rec.initialized &&
+        rec.mesh.visible &&
+        rec.lastVersion === ver &&
+        rec.lastStatus === rt.status &&
+        Math.abs(rec.lastOpacity - rt.opacity) < 1e-4
+      ) {
         continue;
       }
 
       const activeSegments = sim.sampleBandCenterline(b, _posScratch, _strainScratch);
       if (activeSegments <= 0) {
         rec.mesh.visible = false;
+        rec.lastStatus = rt.status;
+        rec.lastOpacity = rt.opacity;
+        rec.lastVersion = ver;
+        rec.initialized = true;
         continue;
       }
 
-      const clampedSegs = activeSegments > SEGMENTS_PER_BAND ? SEGMENTS_PER_BAND : activeSegments;
+      const clampedSegs = activeSegments > segsPerBand ? segsPerBand : activeSegments;
       const ringCount = clampedSegs + 1;
       const isSnapping = rt.status === 'snapping';
-      const isClosedLoop = !isSnapping && clampedSegs === SEGMENTS_PER_BAND;
-
-      rec.mesh.visible = true;
-      rec.geom.setDrawRange(0, clampedSegs * VERTS_PER_RING * 6);
+      const isClosedLoop = !isSnapping && clampedSegs === segsPerBand;
 
       const fallX = rt.fallOffset[0];
       const fallY = rt.fallOffset[1];
       const fallZ = rt.fallOffset[2];
+      const op = rt.opacity;
+      const snapFlash = isSnapping && rt.curlAmount < 0.34 ? 1.0 - rt.curlAmount / 0.34 : 0.0;
+
+      // Fallback checksum skip when sim doesn't provide getBandVersion()
+      let checksum =
+        activeSegments * 131 +
+        (isSnapping ? 17 : 0) +
+        op * 97 +
+        snapFlash * 53 +
+        fallX * 7 +
+        fallY * 11 +
+        fallZ * 13;
+      if (!hasGetVersion) {
+        for (let r = 0; r < ringCount; r++) {
+          const p3 = r * 3;
+          checksum +=
+            (_posScratch[p3] * 19.3 +
+              _posScratch[p3 + 1] * 23.7 +
+              _posScratch[p3 + 2] * 29.1 +
+              _strainScratch[r] * 31.3) *
+            (1 + r * 0.013);
+        }
+        if (
+          rec.initialized &&
+          rec.mesh.visible &&
+          rec.lastStatus === rt.status &&
+          rec.lastChecksum === checksum
+        ) {
+          continue;
+        }
+      }
+
+      rec.mesh.visible = true;
+      rec.geom.setDrawRange(0, clampedSegs * VERTS_PER_RING * 6);
+
       const halfWBase = spec.width * 0.5;
       const halfTBase = spec.thickness * 0.5;
-      const op = rt.opacity;
-      const snapFlash = isSnapping && rt.curlAmount < 0.28 ? 1.0 - rt.curlAmount / 0.28 : 0.0;
 
       const posArr = rec.posArr;
       const normArr = rec.normArr;
       const strainArr = rec.strainArr;
       const metaArr = rec.metaArr;
+
+      let prevBx = spec.normal[0];
+      let prevBy = spec.normal[1];
+      let prevBz = spec.normal[2];
 
       for (let r = 0; r < ringCount; r++) {
         // For closed loops, copy ring 0 verbatim to final ring so the seam is bit-identical
@@ -591,40 +697,41 @@ export function createRubberBallVisuals(specs: readonly BandSpec[]): RubberBallV
           tz = spec.tangentU[2];
         }
 
-        // Radial vector relative to band's falling center
-        let rx = px - fallX;
-        let ry = py - fallY;
-        let rz = pz - fallZ;
-        const rLen = Math.hypot(rx, ry, rz);
-        if (rLen > 1e-5) {
-          rx /= rLen;
-          ry /= rLen;
-          rz /= rLen;
-        } else {
-          rx = spec.tangentV[0];
-          ry = spec.tangentV[1];
-          rz = spec.tangentV[2];
-        }
-
-        // Lateral binormal B = R x T
-        let bx = ry * tz - rz * ty;
-        let by = rz * tx - rx * tz;
-        let bz = rx * ty - ry * tx;
+        // Keep binormal B anchored to the band's wrap-plane normal (parallel-transport fallback
+        // if T aligns near spec.normal) so sharp pull peaks and curling snap spirals never twist
+        const nDotT = spec.normal[0] * tx + spec.normal[1] * ty + spec.normal[2] * tz;
+        let bx = spec.normal[0] - nDotT * tx;
+        let by = spec.normal[1] - nDotT * ty;
+        let bz = spec.normal[2] - nDotT * tz;
         let bLen = Math.hypot(bx, by, bz);
+
+        if (bLen < 0.15) {
+          const pDotT = prevBx * tx + prevBy * ty + prevBz * tz;
+          bx = prevBx - pDotT * tx;
+          by = prevBy - pDotT * ty;
+          bz = prevBz - pDotT * tz;
+          bLen = Math.hypot(bx, by, bz);
+        }
         if (bLen < 1e-4) {
-          bx = spec.normal[0];
-          by = spec.normal[1];
-          bz = spec.normal[2];
+          const rx0 = px - fallX;
+          const ry0 = py - fallY;
+          const rz0 = pz - fallZ;
+          bx = ry0 * tz - rz0 * ty;
+          by = rz0 * tx - rx0 * tz;
+          bz = rx0 * ty - ry0 * tx;
           bLen = Math.hypot(bx, by, bz) || 1.0;
         }
         bx /= bLen;
         by /= bLen;
         bz /= bLen;
+        prevBx = bx;
+        prevBy = by;
+        prevBz = bz;
 
-        // Orthonormalize radial normal R = T x B
-        rx = ty * bz - tz * by;
-        ry = tz * bx - tx * bz;
-        rz = tx * by - ty * bx;
+        // Orthonormal radial normal R = T x B
+        let rx = ty * bz - tz * by;
+        let ry = tz * bx - tx * bz;
+        let rz = tx * by - ty * bx;
         const rOrthoLen = Math.hypot(rx, ry, rz) || 1.0;
         rx /= rOrthoLen;
         ry /= rOrthoLen;
@@ -647,8 +754,8 @@ export function createRubberBallVisuals(specs: readonly BandSpec[]): RubberBallV
           }
           // Pinch cut ends cleanly so snapping tips look like solid severed rubber
           if (r === 0 || r === ringCount - 1) {
-            ht *= 0.22;
-            hw *= 0.78;
+            ht *= 0.28;
+            hw *= 0.84;
           }
         }
 
@@ -675,23 +782,31 @@ export function createRubberBallVisuals(specs: readonly BandSpec[]): RubberBallV
         }
       }
 
+      rec.initialized = true;
+      rec.lastVersion = ver;
+      rec.lastStatus = rt.status;
+      rec.lastOpacity = op;
+      rec.lastChecksum = checksum;
+
       rec.posAttr.needsUpdate = true;
       rec.normAttr.needsUpdate = true;
       rec.strainAttr.needsUpdate = true;
       rec.metaAttr.needsUpdate = true;
     }
 
-    // Update talcum dust puffs
+    // Update talcum dust puffs (crisp micro-specks + fleeting airy powder haze)
     let activePuffs = 0;
     const puffCap = Math.min(puffs.length, MAX_DUST_PUFFS);
     for (let i = 0; i < puffCap; i++) {
-      const p = puffs[i];
+      const p = puffs[i] as DustPuffCompat;
       if (!p.active || p.maxAgeSec <= 0) continue;
       const life = 1.0 - p.ageSec / p.maxAgeSec;
       if (life <= 0.005) continue;
 
-      const isSpeck = p.size < 0.012 ? 1.0 : 0.0;
-      const expand = isSpeck > 0.5 ? 0.9 + (1.0 - life) * 0.6 : 0.8 + (1.0 - life) * 2.5;
+      const speckFlag = (p.isSpeck !== undefined ? p.isSpeck : p.size < 0.012) ? 1.0 : 0.0;
+      const expand = speckFlag > 0.5
+        ? 1.05 - (1.0 - life) * 0.2
+        : 0.75 + (1.0 - life) * 0.95;
       const s = p.size * expand;
 
       _dummyPos.set(p.pos[0], p.pos[1], p.pos[2]);
@@ -706,7 +821,7 @@ export function createRubberBallVisuals(specs: readonly BandSpec[]): RubberBallV
 
       const m3 = activePuffs * 3;
       puffMetaArr[m3] = life;
-      puffMetaArr[m3 + 1] = isSpeck;
+      puffMetaArr[m3 + 1] = speckFlag;
       puffMetaArr[m3 + 2] = ((i * 0.61803398875) % 1 + 1) % 1;
       activePuffs++;
     }
