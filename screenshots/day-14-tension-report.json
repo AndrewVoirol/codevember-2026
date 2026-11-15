@@ -8,14 +8,14 @@
     "drawerCount": 30
   },
   "telemetry": {
-    "frameCount": 397,
-    "avgFrameMs": 8.34,
-    "p95FrameMs": 9.2,
+    "frameCount": 413,
+    "avgFrameMs": 8.36,
+    "p95FrameMs": 9.3,
     "sceneState": {
       "day": 14,
       "slug": "14-tension",
       "headerLabel": "Day 14 - Tension",
-      "frameCount": 397,
+      "frameCount": 413,
       "cameraPos": [
         0,
         0.15000000000000005,
@@ -27,21 +27,21 @@
         0.009138366456550528
       ],
       "pointerSpeed": 0,
-      "pointerDwellSec": 2.4557,
-      "pointerImpulse": 0.0006,
-      "totalBands": 180,
-      "intactCount": 180,
+      "pointerDwellSec": 0.6559,
+      "pointerImpulse": 0,
+      "totalBands": 200,
+      "intactCount": 199,
       "snappingCount": 0,
-      "goneCount": 0,
-      "avgStrain": 0.3515480518434122,
-      "ballRadius": 0.9519743919372559,
+      "goneCount": 1,
+      "avgStrain": 0.3073208297387842,
+      "ballRadius": 1.0460723638534546,
       "activePullBandId": null,
-      "snapCount": 0
+      "snapCount": 1
     }
   },
   "metrics": {
-    "specimenCoverageRatio": 0.3285,
-    "interactionMad": 7.079
+    "specimenCoverageRatio": 0.3816,
+    "interactionMad": 6.697
   },
   "gpuErrors": [],
   "gateFailures": [],
