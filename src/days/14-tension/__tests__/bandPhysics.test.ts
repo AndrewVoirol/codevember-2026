@@ -957,4 +957,76 @@ describe('RubberBandBallSim', () => {
       }
     }
   });
+
+  it('prevents post-release overshoot and maintains zero penetrations across 0-150ms after releasePull', () => {
+    const sim = new RubberBandBallSim();
+    const specs = sim.getBandSpecs();
+    const runtimes = sim.getBandRuntimes();
+
+    const hit =
+      sim.raycastBand([0.48, 0.48, 4], [0, 0, -1]) ?? sim.raycastBand([0.2, 0.2, 4], [0, 0, -1]);
+    expect(hit).not.toBeNull();
+    if (!hit) return;
+
+    const bandId = Math.min(hit.bandId, TOTAL_BANDS - 10);
+    const posBuf = new Float32Array((SEGMENTS_PER_BAND + 1) * 3);
+    const strainBuf = new Float32Array(SEGMENTS_PER_BAND + 1);
+    sim.sampleBandCenterline(bandId, posBuf, strainBuf);
+
+    // Pull obliquely at a front-limb angle without breaking
+    const uPull = 0.35;
+    const uIdx = Math.floor(uPull * SEGMENTS_PER_BAND) * 3;
+    const pLen = Math.hypot(posBuf[uIdx], posBuf[uIdx + 1], posBuf[uIdx + 2]) || 1;
+    const pullNormal: [number, number, number] = [
+      posBuf[uIdx] / pLen,
+      posBuf[uIdx + 1] / pLen,
+      posBuf[uIdx + 2] / pLen,
+    ];
+    sim.startPull(bandId, uPull, pullNormal);
+    const broke = sim.updatePull([
+      pullNormal[0] * 0.26 + 0.08,
+      pullNormal[1] * 0.26 + 0.08,
+      pullNormal[2] * 0.26,
+    ]);
+    expect(broke).toBe(false);
+    expect(runtimes[bandId].status).toBe('pulled');
+
+    const preMaxR = new Float32Array(TOTAL_BANDS);
+    for (let b = 0; b < TOTAL_BANDS; b++) {
+      const n = sim.sampleBandCenterline(b, posBuf, strainBuf);
+      let maxR = 0;
+      for (let k = 0; k < n; k++) {
+        const r = Math.hypot(posBuf[k * 3], posBuf[k * 3 + 1], posBuf[k * 3 + 2]);
+        if (r > maxR) maxR = r;
+      }
+      preMaxR[b] = maxR;
+    }
+
+    sim.releasePull();
+    expect(runtimes[bandId].status).toBe('intact');
+
+    // Step across 0..150ms (18 steps @ 120Hz) and verify zero overshoot spike and zero intersections
+    const penSampleSteps = new Set([0, 5]); // 0ms immediate release, 41.7ms (~f#117 rebound peak)
+    for (let s = 0; s <= 18; s++) {
+      for (let b = 0; b < TOTAL_BANDS; b++) {
+        const n = sim.sampleBandCenterline(b, posBuf, strainBuf);
+        for (let k = 0; k < n; k++) {
+          const r = Math.hypot(posBuf[k * 3], posBuf[k * 3 + 1], posBuf[k * 3 + 2]);
+          expect(r - preMaxR[b]).toBeLessThan(0.025);
+        }
+      }
+
+      if (penSampleSteps.has(s)) {
+        const frames: BandFrame[] = [];
+        for (let b = 0; b < TOTAL_BANDS; b++) {
+          frames.push(buildExactRibbonGeometry(sim, b));
+        }
+        const pen = measureRibbonPenetrations(specs, frames);
+        expect(pen.count).toBe(0);
+        expect(pen.maxDepth).toBe(0);
+      }
+
+      sim.step(1 / 120);
+    }
+  });
 });

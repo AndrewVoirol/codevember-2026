@@ -95,7 +95,9 @@ export class RubberBandBallSim {
   private readonly minBandRadius = new Float32Array(TOTAL_BANDS);
   private readonly maxBandRadius = new Float32Array(TOTAL_BANDS);
   private readonly floorScratch = new Float32Array(RINGS_PER_BAND);
+  private readonly filletScratch = new Float32Array(RINGS_PER_BAND);
   private readonly dynEnvScratch = new Float32Array(RINGS_PER_BAND);
+  private readonly twangHalfArc = new Float32Array(TOTAL_BANDS);
 
   // Precomputed 3D segment OBBs for resting bands + zero-GC scratch for exact clearance
   private readonly restSegCenter = new Float32Array(TOTAL_BANDS * SEGMENTS_PER_BAND * 3);
@@ -342,6 +344,7 @@ export class RubberBandBallSim {
       this.snapHalfArc[i] = 0.18;
       this.snapAsym[i] = 1;
       this.snapSideSign[i] = 1;
+      this.twangHalfArc[i] = 0.20;
 
       const ringOffset = i * RINGS_PER_BAND * 3;
       for (let k = 0; k < RINGS_PER_BAND; k++) {
@@ -1113,9 +1116,10 @@ export class RubberBandBallSim {
     outOffset: number,
     sweeps: number,
     sagSlack = 0.0004,
-    filletPasses = 4
+    filletPasses = 5
   ): void {
     const floor = this.floorScratch;
+    const filletBuf = this.filletScratch;
     const lastSeg = SEGMENTS_PER_BAND - 1;
     for (let k = 0; k < RINGS_PER_BAND; k++) {
       profileOut[outOffset + k] = floor[k];
@@ -1156,14 +1160,14 @@ export class RubberBandBallSim {
       if (maxDelta < 2e-6) break;
     }
 
-    // Upward-only Laplacian curvature fillet to round sharp C^0 slope elbows at isolated peaks
+    // Upward-only Laplacian curvature fillet to round concave C^0 transitions first
     for (let fPass = 0; fPass < filletPasses; fPass++) {
       let maxDelta = 0;
       for (let k = 0; k < SEGMENTS_PER_BAND; k++) {
         const kPrev = k === 0 ? lastSeg : k - 1;
         const kNext = k === lastSeg ? 0 : k + 1;
         const rCur = profileOut[outOffset + k];
-        const filletSag = 0.16 * (HALF_DTHETA_SQ * rCur + sagSlack);
+        const filletSag = 0.34 * (HALF_DTHETA_SQ * rCur + sagSlack);
         const avg =
           0.25 * profileOut[outOffset + kPrev] +
           0.5 * rCur +
@@ -1180,7 +1184,7 @@ export class RubberBandBallSim {
         const kPrev = k === 0 ? lastSeg : k - 1;
         const kNext = k === lastSeg ? 0 : k + 1;
         const rCur = profileOut[outOffset + k];
-        const filletSag = 0.16 * (HALF_DTHETA_SQ * rCur + sagSlack);
+        const filletSag = 0.34 * (HALF_DTHETA_SQ * rCur + sagSlack);
         const avg =
           0.25 * profileOut[outOffset + kPrev] +
           0.5 * rCur +
@@ -1193,6 +1197,30 @@ export class RubberBandBallSim {
       }
       profileOut[outOffset + SEGMENTS_PER_BAND] = profileOut[outOffset];
       if (maxDelta < 2e-6) break;
+    }
+
+    // Localized convex peak-shoulder rounding after fillet (lifts shoulders beside sharp crossing knees <= peak r[k])
+    for (let pPass = 0; pPass < 3; pPass++) {
+      for (let k = 0; k < SEGMENTS_PER_BAND; k++) {
+        filletBuf[k] = profileOut[outOffset + k];
+      }
+      let anyLift = false;
+      for (let k = 0; k < SEGMENTS_PER_BAND; k++) {
+        const kPrev = k === 0 ? lastSeg : k - 1;
+        const kNext = k === lastSeg ? 0 : k + 1;
+        const rCur = filletBuf[k];
+        const excess = rCur - 0.5 * (filletBuf[kPrev] + filletBuf[kNext]);
+        if (excess > 0.0014) {
+          anyLift = true;
+          const lift = 0.30 * excess;
+          const nextPrev = Math.min(rCur, filletBuf[kPrev] + lift);
+          const nextNext = Math.min(rCur, filletBuf[kNext] + lift);
+          if (nextPrev > profileOut[outOffset + kPrev]) profileOut[outOffset + kPrev] = nextPrev;
+          if (nextNext > profileOut[outOffset + kNext]) profileOut[outOffset + kNext] = nextNext;
+        }
+      }
+      profileOut[outOffset + SEGMENTS_PER_BAND] = profileOut[outOffset];
+      if (!anyLift) break;
     }
   }
 
@@ -1618,7 +1646,12 @@ export class RubberBandBallSim {
 
       // Construct 3D centerline points & strains for band i
       if (this.dynActive[i] === 1) {
-        const twangSin = hasTwang ? Math.sin(rt.twangPhase) * rt.twangAmp : 0;
+        const twangFactor = hasTwang
+          ? rt.twangPhase < Math.PI * 0.5
+            ? Math.cos(rt.twangPhase)
+            : Math.max(0, Math.abs(Math.cos(rt.twangPhase)) * 0.24)
+          : 0;
+        const twangSin = hasTwang ? twangFactor * rt.twangAmp : 0;
         const nearBreak = isPulled
           ? Math.max(
               0,
@@ -1639,16 +1672,17 @@ export class RubberBandBallSim {
               0.24,
               Math.max(0.13, Math.acos(Math.min(0.98, avgR / (avgR + rt.pullAmount + 0.03))) / TWO_PI)
             )
-          : 0.22;
+          : this.twangHalfArc[i];
 
         let maxLift = 0;
         for (let k = 0; k <= SEGMENTS_PER_BAND; k++) {
           const u = k === SEGMENTS_PER_BAND ? 0 : k / SEGMENTS_PER_BAND;
           const pIdx = ptsOffset + k * 3;
           const rLayer = this.dynRadii[profOffset + k];
-          let px = rLayer * this.unitCirclePts[pIdx];
-          let py = rLayer * this.unitCirclePts[pIdx + 1];
-          let pz = rLayer * this.unitCirclePts[pIdx + 2];
+          const restR = Math.max(minCoreR, this.radialProfile[profOffset + k] + breathShift);
+          let px: number;
+          let py: number;
+          let pz: number;
           let strain = rt.currentStrain;
           let ringMoved = Math.abs(rLayer - (this.radialProfile[profOffset + k] + breathShift)) > 1e-5;
 
@@ -1657,9 +1691,9 @@ export class RubberBandBallSim {
             const vShape = evalPullArch(d, pullHalfArc);
             const disp = Math.max(0, (rt.pullAmount + tremble) * vShape);
             if (disp > 1e-5) ringMoved = true;
-            px += rt.pullDir[0] * disp;
-            py += rt.pullDir[1] * disp;
-            pz += rt.pullDir[2] * disp;
+            px = restR * this.unitCirclePts[pIdx] + rt.pullDir[0] * disp;
+            py = restR * this.unitCirclePts[pIdx + 1] + rt.pullDir[1] * disp;
+            pz = restR * this.unitCirclePts[pIdx + 2] + rt.pullDir[2] * disp;
             strain = spec.restStrain + (rt.currentStrain - spec.restStrain) * (0.35 + 0.65 * vShape);
 
             const pDist = Math.hypot(px, py, pz);
@@ -1671,12 +1705,12 @@ export class RubberBandBallSim {
             }
           } else if (hasTwang) {
             const d = shortestArcDist(u, rt.pullU);
-            const env = Math.exp(-d * d * 18.0);
+            const env = evalPullArch(d, pullHalfArc);
             const disp = Math.max(0, twangSin * env);
             if (disp > 1e-5) ringMoved = true;
-            px += rt.pullDir[0] * disp;
-            py += rt.pullDir[1] * disp;
-            pz += rt.pullDir[2] * disp;
+            px = restR * this.unitCirclePts[pIdx] + rt.pullDir[0] * disp;
+            py = restR * this.unitCirclePts[pIdx + 1] + rt.pullDir[1] * disp;
+            pz = restR * this.unitCirclePts[pIdx + 2] + rt.pullDir[2] * disp;
 
             const pDist = Math.hypot(px, py, pz);
             if (pDist < rLayer && pDist > 1e-5) {
@@ -1687,7 +1721,9 @@ export class RubberBandBallSim {
             }
           } else {
             // Bowed overlying band: strain bumps gently proportional to outward bow
-            const restR = Math.max(minCoreR, this.radialProfile[profOffset + k] + breathShift);
+            px = rLayer * this.unitCirclePts[pIdx];
+            py = rLayer * this.unitCirclePts[pIdx + 1];
+            pz = rLayer * this.unitCirclePts[pIdx + 2];
             const bowLift = Math.max(0, rLayer - restR);
             if (bowLift > maxLift) maxLift = bowLift;
             strain = Math.min(spec.breakStrain * 0.96, spec.restStrain + bowLift * 0.65);
@@ -2419,8 +2455,9 @@ export class RubberBandBallSim {
       const rj = this.runtimes[j];
       const maxBow = this.topBowAmps[ti];
       const maxK = this.topBowKs[ti];
-      rj.twangAmp = Math.max(rj.twangAmp, maxBow * 0.9);
-      rj.twangPhase = Math.PI * 0.5;
+      rj.twangAmp = Math.max(rj.twangAmp, Math.min(0.055, maxBow * 0.22));
+      rj.twangPhase = 0;
+      this.twangHalfArc[j] = 0.20;
       rj.pullU = maxK / SEGMENTS_PER_BAND;
       this.evalWrappedPoint(j, rj.pullU, this.scratchPoint);
       const len = Math.hypot(this.scratchPoint[0], this.scratchPoint[1], this.scratchPoint[2]) || 1;
@@ -2428,6 +2465,17 @@ export class RubberBandBallSim {
       rj.pullDir[1] = this.scratchPoint[1] / len;
       rj.pullDir[2] = this.scratchPoint[2] / len;
     }
+
+    let avgR = 0;
+    const profId = id * RINGS_PER_BAND;
+    for (let k = 0; k < SEGMENTS_PER_BAND; k++) {
+      avgR += this.dynRadii[profId + k];
+    }
+    avgR /= SEGMENTS_PER_BAND;
+    this.twangHalfArc[id] = Math.min(
+      0.24,
+      Math.max(0.13, Math.acos(Math.min(0.98, avgR / (avgR + rt.pullAmount + 0.03))) / TWO_PI)
+    );
 
     rt.status = 'intact';
     rt.twangAmp = rt.pullAmount;
@@ -2513,9 +2561,9 @@ export class RubberBandBallSim {
     const antipodeRadX = -radX;
     const antipodeRadY = -radY;
     const antipodeRadZ = -radZ;
-    const outwardKick = fromPull ? 0.55 : 0.45;
-    const sideKick = (fromPull ? 1.55 : 1.3) * latSign;
-    const upKick = (fromPull ? 0.85 : 0.65) + Math.max(0, -antipodeRadY) * 0.45;
+    const outwardKick = fromPull ? 0.42 : 0.35;
+    const sideKick = (fromPull ? 1.25 : 0.95) * latSign;
+    const upKick = (fromPull ? 0.72 : 0.55) + Math.max(0, -antipodeRadY) * 0.40;
     rt.fallOffset[0] = 0;
     rt.fallOffset[1] = 0;
     rt.fallOffset[2] = 0;
@@ -2608,6 +2656,7 @@ export class RubberBandBallSim {
             Math.max(0.25, align);
         nrt.twangAmp = Math.max(nrt.twangAmp, amp);
         nrt.twangPhase = 0;
+        this.twangHalfArc[i] = 0.20;
         const nu =
           hitX * nspec.tangentU[0] + hitY * nspec.tangentU[1] + hitZ * nspec.tangentU[2];
         const nv =
@@ -2707,7 +2756,7 @@ export class RubberBandBallSim {
     // 2. Update band physics (breathing, twang, readable whip-back & spiral C-curl)
     const breathBlend = 1 - Math.exp(-12.0 * dt);
     const twangDecay = Math.exp(-TWANG_DAMP * dt);
-    const arcDamp = Math.exp(-7.5 * dt);
+    const arcDamp = Math.exp(-4.8 * dt);
     let needDynamicUpdate = false;
 
     for (let i = 0; i < TOTAL_BANDS; i++) {
@@ -2735,7 +2784,7 @@ export class RubberBandBallSim {
             rt.currentStrain = spec.restStrain;
           } else {
             rt.currentStrain =
-              spec.restStrain + Math.abs(Math.sin(rt.twangPhase)) * rt.twangAmp * 0.4;
+              spec.restStrain + Math.abs(Math.cos(rt.twangPhase)) * rt.twangAmp * 0.4;
           }
           this.bandVersion[i]++;
         }
@@ -2743,8 +2792,8 @@ export class RubberBandBallSim {
         this.snapAgeSec[i] += dt;
         rt.leftVel *= arcDamp;
         rt.rightVel *= arcDamp;
-        rt.leftArc = Math.max(0.14, rt.leftArc - rt.leftVel * dt);
-        rt.rightArc = Math.max(0.14, rt.rightArc - rt.rightVel * dt);
+        rt.leftArc = Math.max(0.09, rt.leftArc - rt.leftVel * dt);
+        rt.rightArc = Math.max(0.09, rt.rightArc - rt.rightVel * dt);
         rt.curlAmount = Math.min(1, rt.curlAmount + dt * 9.5);
 
         if (this.snapAgeSec[i] > 0.04) {
@@ -2756,8 +2805,8 @@ export class RubberBandBallSim {
 
         rt.currentStrain = Math.max(0, rt.currentStrain - dt * 4.5);
 
-        if (this.snapAgeSec[i] > 0.18 || rt.fallOffset[1] < -0.85) {
-          rt.opacity = Math.max(0, rt.opacity - dt * 6.5);
+        if (this.snapAgeSec[i] > 0.135 || rt.fallOffset[1] < -0.75) {
+          rt.opacity = Math.max(0, rt.opacity - dt * 7.2);
         }
 
         if (rt.opacity <= 0.005) {
@@ -2870,10 +2919,10 @@ export class RubberBandBallSim {
       const lashEnv = Math.exp(-6.5 * age) * Math.min(1, age * 45.0);
       const sideSign = this.snapSideSign[bandIndex];
 
-      // Fast outward peel & 3D oblique tumble once severed so the coiled scrap springs clear of the ball
-      const peelBase = Math.min(0.20, age * 2.4);
-      const tumbleBlend = age > 0.04 ? Math.min(1, (age - 0.04) / 0.14) : 0;
-      const tumbleAngle = sideSign * tumbleBlend * Math.max(0, age - 0.04) * 10.0;
+      // Compact outward peel & 3D oblique tumble once severed so the coiled scrap stays tight and never flares across frame
+      const peelBase = Math.min(0.14, age * 1.9);
+      const tumbleBlend = age > 0.04 ? Math.min(1, (age - 0.04) / 0.13) : 0;
+      const tumbleAngle = sideSign * tumbleBlend * Math.max(0, age - 0.04) * 10.5;
       const cosT = Math.cos(tumbleAngle);
       const sinT = Math.sin(tumbleAngle);
 
@@ -2901,8 +2950,8 @@ export class RubberBandBallSim {
         const uBase = antipodeU + uOffset;
         const uBaseWrapped = ((uBase % 1) + 1) % 1;
 
-        // Smooth continuous inward/tangential C-bend across the entire scrap (no rigid middle shaft)
-        const uBend = uOffset * (1 + 0.16 * curl * endDist * endDist);
+        // Smooth angular C-contraction as tension unloads so the detached scrap curls compactly around its antipode
+        const uBend = uOffset * (1 - 0.56 * curl * Math.pow(endDist, 1.3));
         const u = antipodeU + uBend;
         const theta = u * TWO_PI;
         const c = Math.cos(theta);
@@ -2919,14 +2968,14 @@ export class RubberBandBallSim {
           breathShift;
 
         const whipLash =
-          0.095 *
+          0.082 *
           endDist *
           lashEnv *
           (0.35 + 0.65 * Math.sin(endDist * 7.5 - age * 34.0));
         const liftFrac = 0.55 + 0.45 * endDist * endDist;
-        const tipPhi = 2.2 * Math.pow(endDist, 1.8) * curl;
-        const radHook = -0.055 * Math.sin(tipPhi * 0.85) * endDist * curl;
-        const waveRad = 0.026 * Math.sin(frac * Math.PI * 2.4 - age * 20.0) * endDist * curl;
+        const tipPhi = 3.4 * Math.pow(endDist, 1.6) * curl;
+        const radHook = -0.08 * Math.sin(tipPhi * 0.85) * endDist * curl;
+        const waveRad = 0.024 * Math.sin(frac * Math.PI * 2.4 - age * 20.0) * endDist * curl;
         const radCircle = Math.max(minClearR, rWrap) + peelBase * liftFrac + whipLash + radHook + waveRad;
 
         const erx = c * tu[0] + s * tv[0];
@@ -2936,11 +2985,11 @@ export class RubberBandBallSim {
         const ety = -s * tu[1] + c * tv[1];
         const etz = -s * tu[2] + c * tv[2];
 
-        // Tangential tip curl-back (shepherd's hook) + bold out-of-plane 3D S-wave along nj
-        const tanHook = -sSigned * 0.032 * (1 - Math.cos(tipPhi));
+        // Compact tangential shepherd's crook + out-of-plane 3D S-wave along nj
+        const tanHook = -sSigned * 0.082 * (1 - Math.cos(tipPhi)) * curl;
         const waveLat =
-          (0.068 * Math.sin(frac * Math.PI * 2.2 + sideSign * age * 11.0) +
-            sideSign * 0.034 * sSigned * endDist) *
+          (0.068 * Math.sin(frac * Math.PI * 2.5 + sideSign * age * 12.0) +
+            sideSign * 0.036 * sSigned * endDist) *
           curl;
 
         let cx = radCircle * erx + tanHook * etx + waveLat * nj[0];
