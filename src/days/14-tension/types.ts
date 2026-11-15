@@ -2,7 +2,9 @@ import type { PigmentKey } from '../../core/palette';
 
 export type { PigmentKey };
 
-export const SEGMENTS_PER_BAND = 64;
+export const SEGMENTS_PER_BAND = 128;
+export const TOTAL_BANDS = 200;
+export const CORE_RADIUS = 0.36;
 
 export type BandStatus = 'intact' | 'pulled' | 'snapping' | 'gone';
 
@@ -42,11 +44,21 @@ export interface BandRuntime {
 
 export interface DustPuff {
   active: boolean;
+  isSpeck: boolean;
   pos: [number, number, number];
   vel: [number, number, number];
   ageSec: number;
   maxAgeSec: number;
   size: number;
+}
+
+export interface SnapImpulseInfo {
+  snapId: number;
+  bandId: number;
+  hitPos: [number, number, number];
+  pullDir: [number, number, number];
+  normal: [number, number, number];
+  intensity: number;
 }
 
 export interface RubberBallDiagnostics {
