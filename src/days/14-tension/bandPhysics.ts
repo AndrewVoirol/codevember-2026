@@ -95,6 +95,7 @@ export class RubberBandBallSim {
   private readonly minBandRadius = new Float32Array(TOTAL_BANDS);
   private readonly maxBandRadius = new Float32Array(TOTAL_BANDS);
   private readonly floorScratch = new Float32Array(RINGS_PER_BAND);
+  private readonly dynEnvScratch = new Float32Array(RINGS_PER_BAND);
 
   // Precomputed 3D segment OBBs for resting bands + zero-GC scratch for exact clearance
   private readonly restSegCenter = new Float32Array(TOTAL_BANDS * SEGMENTS_PER_BAND * 3);
@@ -509,6 +510,9 @@ export class RubberBandBallSim {
     const spec = this.specs[bandIdx];
     const halfWBase = spec.width * 0.5;
     const halfTBase = spec.thickness * 0.5;
+    let prevBx = spec.normal[0];
+    let prevBy = spec.normal[1];
+    let prevBz = spec.normal[2];
 
     for (let r = 0; r < SEGMENTS_PER_BAND; r++) {
       const rIdx = ptsOffset + r * 3;
@@ -526,31 +530,36 @@ export class RubberBandBallSim {
       ty /= tLen;
       tz /= tLen;
 
-      let rx = px;
-      let ry = py;
-      let rz = pz;
-      const rLen = Math.hypot(rx, ry, rz) || 1;
-      rx /= rLen;
-      ry /= rLen;
-      rz /= rLen;
-
-      let bx = ry * tz - rz * ty;
-      let by = rz * tx - rx * tz;
-      let bz = rx * ty - ry * tx;
+      // Anchor binormal B to wrap-plane normal (parallel-transport fallback -> P x T) matching rubberOptics
+      const nDotT = spec.normal[0] * tx + spec.normal[1] * ty + spec.normal[2] * tz;
+      let bx = spec.normal[0] - nDotT * tx;
+      let by = spec.normal[1] - nDotT * ty;
+      let bz = spec.normal[2] - nDotT * tz;
       let bLen = Math.hypot(bx, by, bz);
+
+      if (bLen < 0.15) {
+        const pDotT = prevBx * tx + prevBy * ty + prevBz * tz;
+        bx = prevBx - pDotT * tx;
+        by = prevBy - pDotT * ty;
+        bz = prevBz - pDotT * tz;
+        bLen = Math.hypot(bx, by, bz);
+      }
       if (bLen < 1e-4) {
-        bx = spec.normal[0];
-        by = spec.normal[1];
-        bz = spec.normal[2];
+        bx = py * tz - pz * ty;
+        by = pz * tx - px * tz;
+        bz = px * ty - py * tx;
         bLen = Math.hypot(bx, by, bz) || 1;
       }
       bx /= bLen;
       by /= bLen;
       bz /= bLen;
+      prevBx = bx;
+      prevBy = by;
+      prevBz = bz;
 
-      rx = ty * bz - tz * by;
-      ry = tz * bx - tx * bz;
-      rz = tx * by - ty * bx;
+      let rx = ty * bz - tz * by;
+      let ry = tz * bx - tx * bz;
+      let rz = tx * by - ty * bx;
       const rOrtho = Math.hypot(rx, ry, rz) || 1;
       rx /= rOrtho;
       ry /= rOrtho;
@@ -601,6 +610,9 @@ export class RubberBandBallSim {
     const spec = this.specs[bandIdx];
     const halfWBase = spec.width * 0.5;
     const halfTBase = spec.thickness * 0.5;
+    let prevBx = spec.normal[0];
+    let prevBy = spec.normal[1];
+    let prevBz = spec.normal[2];
 
     for (let s = 0; s < SEGMENTS_PER_BAND; s++) {
       const a3 = ptsOffset + s * 3;
@@ -625,19 +637,31 @@ export class RubberBandBallSim {
       segT[d3 + 1] = ty;
       segT[d3 + 2] = tz;
 
-      let bx = my * tz - mz * ty;
-      let by = mz * tx - mx * tz;
-      let bz = mx * ty - my * tx;
+      const nDotT = spec.normal[0] * tx + spec.normal[1] * ty + spec.normal[2] * tz;
+      let bx = spec.normal[0] - nDotT * tx;
+      let by = spec.normal[1] - nDotT * ty;
+      let bz = spec.normal[2] - nDotT * tz;
       let bLen = Math.hypot(bx, by, bz);
+
+      if (bLen < 0.15) {
+        const pDotT = prevBx * tx + prevBy * ty + prevBz * tz;
+        bx = prevBx - pDotT * tx;
+        by = prevBy - pDotT * ty;
+        bz = prevBz - pDotT * tz;
+        bLen = Math.hypot(bx, by, bz);
+      }
       if (bLen < 1e-4) {
-        bx = spec.normal[0];
-        by = spec.normal[1];
-        bz = spec.normal[2];
+        bx = my * tz - mz * ty;
+        by = mz * tx - mx * tz;
+        bz = mx * ty - my * tx;
         bLen = Math.hypot(bx, by, bz) || 1;
       }
       bx /= bLen;
       by /= bLen;
       bz /= bLen;
+      prevBx = bx;
+      prevBy = by;
+      prevBz = bz;
       segB[d3] = bx;
       segB[d3 + 1] = by;
       segB[d3 + 2] = bz;
@@ -1087,7 +1111,7 @@ export class RubberBandBallSim {
     profileOut: Float32Array,
     outOffset: number,
     sweeps: number,
-    sagSlack = 0.0014
+    sagSlack = 0.0004
   ): void {
     const floor = this.floorScratch;
     for (let k = 0; k < RINGS_PER_BAND; k++) {
@@ -1314,11 +1338,11 @@ export class RubberBandBallSim {
 
       this.floorScratch[SEGMENTS_PER_BAND] = this.floorScratch[0];
 
-      // Smooth taut elastic bridging between crossings
-      this.smoothElasticEnvelope(this.radialProfile, profOffset, 32, 0.0014);
+      // Smooth taut elastic bridging between crossings (convex tension, no concave dips)
+      this.smoothElasticEnvelope(this.radialProfile, profOffset, 32, 0.0004);
 
       // Exact 3D chamfered-vertex & chord-midpoint verification against resting OBBs j < i
-      for (let pass = 0; pass < 3; pass++) {
+      for (let pass = 0; pass < 4; pass++) {
         for (let k = 0; k < RINGS_PER_BAND; k++) {
           const rk = this.radialProfile[profOffset + k];
           this.floorScratch[k] = rk;
@@ -1393,9 +1417,9 @@ export class RubberBandBallSim {
         }
 
         if (!anyPassLift) break;
-        for (let k = 0; k < RINGS_PER_BAND; k++) {
-          this.radialProfile[profOffset + k] = this.floorScratch[k];
-        }
+        // Re-smooth lifted elbows back into taut convex bridges (clamped >= floorScratch) before re-verifying
+        this.floorScratch[SEGMENTS_PER_BAND] = this.floorScratch[0];
+        this.smoothElasticEnvelope(this.radialProfile, profOffset, 16, 0.00045);
       }
 
       // Build finalized 3D resting centerlines & segment OBB for band i
@@ -1522,9 +1546,9 @@ export class RubberBandBallSim {
       const rt = this.runtimes[i];
       if (rt.status !== 'intact' && rt.status !== 'pulled') continue;
 
-      const isSelfDriven =
-        (rt.status === 'pulled' && rt.pullAmount > 0) ||
-        (rt.status === 'intact' && rt.twangAmp > 1e-4);
+      const isPulled = rt.status === 'pulled' && rt.pullAmount > 0;
+      const hasTwang = !isPulled && rt.twangAmp > 1e-4;
+      const isSelfDriven = isPulled || hasTwang;
       const isCoupledLift = this.dynActive[i] === 1 && !isSelfDriven;
 
       const spec = this.specs[i];
@@ -1533,18 +1557,16 @@ export class RubberBandBallSim {
       const breathShift = this.currentBreath[i] - this.targetBreath[i];
       const minCoreR = coreMinCenter + spec.thickness * 0.5;
 
-      // Smooth bowed overlying bands tightly back to rest so bumps stay localized to the crossing
-      if (isCoupledLift) {
+      // Smooth bowed overlying & twanging bands into elastic arches (never jagged sawtooth zigzags)
+      if (this.dynActive[i] === 1 && !isPulled) {
         for (let k = 0; k < RINGS_PER_BAND; k++) {
           this.floorScratch[k] = this.dynRadii[profOffset + k];
         }
-        this.smoothElasticEnvelope(this.dynRadii, profOffset, 6, 0.01);
+        this.smoothElasticEnvelope(this.dynRadii, profOffset, 10, 0.0005);
       }
 
       // Construct 3D centerline points & strains for band i
       if (this.dynActive[i] === 1) {
-        const isPulled = rt.status === 'pulled' && rt.pullAmount > 0;
-        const hasTwang = !isPulled && rt.twangAmp > 1e-4;
         const twangSin = hasTwang ? Math.sin(rt.twangPhase) * rt.twangAmp : 0;
         const nearBreak = isPulled
           ? Math.max(
@@ -2100,16 +2122,21 @@ export class RubberBandBallSim {
       }
 
       if (!anyLift) break;
+      this.floorScratch[SEGMENTS_PER_BAND] = this.floorScratch[0];
+      const smoothSweeps = isSelfDrivenI ? 4 : 8;
+      this.smoothElasticEnvelope(this.dynEnvScratch, 0, smoothSweeps, 0.0005);
       for (let k = 0; k < RINGS_PER_BAND; k++) {
         const p3 = ptsOffsetI + k * 3;
         const curR = Math.hypot(this.dynPts[p3], this.dynPts[p3 + 1], this.dynPts[p3 + 2]);
-        const targetR = this.floorScratch[k];
+        const targetR = this.dynEnvScratch[k];
         if (targetR > curR && curR > 1e-5) {
           const scale = targetR / curR;
           this.dynPts[p3] *= scale;
           this.dynPts[p3 + 1] *= scale;
           this.dynPts[p3 + 2] *= scale;
-          this.dynRadii[profI + k] = targetR;
+          if (!isSelfDrivenI) {
+            this.dynRadii[profI + k] = targetR;
+          }
           this.dynRingMoved[profI + k] = 1;
         }
       }
@@ -2426,21 +2453,27 @@ export class RubberBandBallSim {
     rt.twangAmp = 0;
     rt.opacity = 1;
 
-    // Lateral tangent at snap point so the band peels & tumbles off the ball rather than tunneling
+    // Kick the coiled scrap outward from its antipode center and sideways clear of the ball (no 6 o'clock slide)
     const thetaSnap = uNorm * TWO_PI;
     const tx = -Math.sin(thetaSnap) * spec.tangentU[0] + Math.cos(thetaSnap) * spec.tangentV[0];
     const ty = -Math.sin(thetaSnap) * spec.tangentU[1] + Math.cos(thetaSnap) * spec.tangentV[1];
     const tz = -Math.sin(thetaSnap) * spec.tangentU[2] + Math.cos(thetaSnap) * spec.tangentV[2];
 
-    const outwardKick = fromPull ? 0.36 : 0.24;
-    const sideKick = (fromPull ? 0.68 : 0.48) * latSign;
-    const upKick = fromPull ? 0.52 : 0.34;
+    const antipodeRadX = -radX;
+    const antipodeRadY = -radY;
+    const antipodeRadZ = -radZ;
+    const outwardKick = fromPull ? 0.55 : 0.45;
+    const sideKick = (fromPull ? 1.55 : 1.3) * latSign;
+    const upKick = (fromPull ? 0.85 : 0.65) + Math.max(0, -antipodeRadY) * 0.45;
     rt.fallOffset[0] = 0;
     rt.fallOffset[1] = 0;
     rt.fallOffset[2] = 0;
-    rt.fallVel[0] = radX * outwardKick + tx * sideKick + spec.normal[0] * latSign * 0.24;
-    rt.fallVel[1] = radY * outwardKick + ty * sideKick + upKick;
-    rt.fallVel[2] = radZ * outwardKick + tz * sideKick + spec.normal[2] * latSign * 0.24;
+    rt.fallVel[0] =
+      antipodeRadX * outwardKick + spec.normal[0] * sideKick - tx * latSign * 0.28;
+    rt.fallVel[1] =
+      antipodeRadY * outwardKick + spec.normal[1] * sideKick - ty * latSign * 0.28 + upKick;
+    rt.fallVel[2] =
+      antipodeRadZ * outwardKick + spec.normal[2] * sideKick - tz * latSign * 0.28;
 
     // Punchy ball recoil opposite the snap launch vector
     const lx = this.snapLaunchDir[bandId * 3];
@@ -2467,9 +2500,9 @@ export class RubberBandBallSim {
     this.lastSnapInfo.normal[2] = spec.normal[2];
     this.lastSnapInfo.intensity = Math.min(1.0, (fromPull ? 0.72 : 0.48) + strainFactor * 0.35);
 
-    // Crisp micro-speck talc burst (~35 fast chalk specks + ~5 brief light haze wisps <= 0.32s)
+    // Crisp micro-speck talc burst (~44 fast bright chalk specks + ~8 quick-pop burst wisps <= 0.28s)
     const burstScale = 0.95 + strainFactor * 0.45;
-    this.spawnDustPuffs(hitX, hitY, hitZ, radX, radY, radZ, tx, ty, tz, spec.width, 28, 4, burstScale);
+    this.spawnDustPuffs(hitX, hitY, hitZ, radX, radY, radZ, tx, ty, tz, spec.width, 32, 6, burstScale);
     const wakeOffsets = [-0.075, 0.075] as const;
     for (let w = 0; w < wakeOffsets.length; w++) {
       const uWake = (((uNorm + wakeOffsets[w]) % 1) + 1) % 1;
@@ -2490,7 +2523,7 @@ export class RubberBandBallSim {
         wty,
         wtz,
         spec.width,
-        5,
+        6,
         1,
         0.85 * burstScale
       );
@@ -2571,16 +2604,16 @@ export class RubberBandBallSim {
       puff.pos[1] = py + (this.rng() - 0.5) * spread;
       puff.pos[2] = pz + (this.rng() - 0.5) * spread;
 
-      const speed = (isSpeck ? 2.1 + this.rng() * 2.2 : 1.15 + this.rng() * 0.95) * energyScale;
-      const tangSpray = (this.rng() - 0.5) * (isSpeck ? 2.2 : 1.2) * energyScale;
-      const jitter = (isSpeck ? 1.45 : 0.95) * energyScale;
+      const speed = (isSpeck ? 1.55 + this.rng() * 1.65 : 0.95 + this.rng() * 0.75) * energyScale;
+      const tangSpray = (this.rng() - 0.5) * (isSpeck ? 1.9 : 1.1) * energyScale;
+      const jitter = (isSpeck ? 1.25 : 0.85) * energyScale;
       puff.vel[0] = nx * speed + tx * tangSpray + (this.rng() - 0.5) * jitter;
       puff.vel[1] = ny * speed + ty * tangSpray + (this.rng() - 0.5) * jitter + 0.1;
       puff.vel[2] = nz * speed + tz * tangSpray + (this.rng() - 0.5) * jitter;
 
       puff.ageSec = 0;
-      puff.maxAgeSec = isSpeck ? 0.16 + this.rng() * 0.15 : 0.18 + this.rng() * 0.12;
-      puff.size = isSpeck ? 0.0038 + this.rng() * 0.0044 : 0.014 + this.rng() * 0.01;
+      puff.maxAgeSec = isSpeck ? 0.18 + this.rng() * 0.10 : 0.12 + this.rng() * 0.08;
+      puff.size = isSpeck ? 0.007 + this.rng() * 0.007 : 0.02 + this.rng() * 0.012;
       spawned++;
     }
   }
@@ -2661,7 +2694,7 @@ export class RubberBandBallSim {
         rt.rightVel *= arcDamp;
         rt.leftArc = Math.max(0.085, rt.leftArc - rt.leftVel * dt);
         rt.rightArc = Math.max(0.085, rt.rightArc - rt.rightVel * dt);
-        rt.curlAmount = Math.min(1, rt.curlAmount + dt * 5.8);
+        rt.curlAmount = Math.min(1, rt.curlAmount + dt * 9.0);
 
         if (this.snapAgeSec[i] > 0.04) {
           rt.fallVel[1] -= GRAVITY * dt;
@@ -2672,8 +2705,8 @@ export class RubberBandBallSim {
 
         rt.currentStrain = Math.max(0, rt.currentStrain - dt * 4.5);
 
-        if (this.snapAgeSec[i] > 0.46 || rt.fallOffset[1] < -1.0) {
-          rt.opacity = Math.max(0, rt.opacity - dt * 2.8);
+        if (this.snapAgeSec[i] > 0.24 || rt.fallOffset[1] < -0.9) {
+          rt.opacity = Math.max(0, rt.opacity - dt * 6.5);
         }
 
         if (rt.opacity <= 0.005) {
@@ -2699,8 +2732,8 @@ export class RubberBandBallSim {
       }
     }
 
-    // 3. Update talc specks & brief haze (crisp deceleration, rapid fade <= 0.32s)
-    const speckDrag = Math.exp(-5.5 * dt);
+    // 3. Update talc specks & brief haze (crisp deceleration, rapid fade <= 0.28s)
+    const speckDrag = Math.exp(-4.8 * dt);
     const hazeDrag = Math.exp(-8.5 * dt);
     for (let i = 0; i < MAX_DUST_PUFFS; i++) {
       const puff = this.dustPuffs[i];
@@ -2784,16 +2817,31 @@ export class RubberBandBallSim {
 
       const rAvg = 0.5 * (this.minBandRadius[bandIndex] + this.maxBandRadius[bandIndex]) + breathShift;
       const minClearR = Math.max(minCoreR, spec.baseRadius + spec.thickness * 0.5);
-      const lashEnv = Math.exp(-4.8 * age);
+      const lashEnv = Math.exp(-7.2 * age);
 
-      // Gentle peel lift + subtle tumbling twist once the scrap separates from the ball
-      const peelBase = Math.min(0.055, age * 0.28);
-      const tumbleBlend = age > 0.09 ? Math.min(1, (age - 0.09) / 0.25) : 0;
-      const tumbleAngle = this.snapSideSign[bandIndex] * tumbleBlend * age * 5.2;
+      // Fast outward peel & 3D oblique tumble once severed so the coiled scrap springs clear of the ball
+      const peelBase = Math.min(0.24, age * 2.2);
+      const tumbleBlend = age > 0.045 ? Math.min(1, (age - 0.045) / 0.16) : 0;
+      const tumbleAngle = this.snapSideSign[bandIndex] * tumbleBlend * Math.max(0, age - 0.045) * 9.5;
       const cosT = Math.cos(tumbleAngle);
       const sinT = Math.sin(tumbleAngle);
 
-      const hingeDist = 0.62;
+      const thAnt = antipodeU * TWO_PI;
+      const cAnt = Math.cos(thAnt);
+      const sAnt = Math.sin(thAnt);
+      const antRx = cAnt * tu[0] + sAnt * tv[0];
+      const antRy = cAnt * tu[1] + sAnt * tv[1];
+      const antRz = cAnt * tu[2] + sAnt * tv[2];
+      const antCenterR = rAvg + peelBase * 0.38;
+      const antCx = antCenterR * antRx;
+      const antCy = antCenterR * antRy;
+      const antCz = antCenterR * antRz;
+
+      const tax = antRx;
+      const tay = antRy;
+      const taz = antRz;
+
+      const hingeDist = 0.56;
       const uHingeLeft = antipodeU - rt.leftArc * hingeDist;
       const uHingeRight = antipodeU + rt.rightArc * hingeDist;
       const thHL = uHingeLeft * TWO_PI;
@@ -2803,9 +2851,35 @@ export class RubberBandBallSim {
       const cHR = Math.cos(thHR);
       const sHR = Math.sin(thHR);
 
-      // Hinge anchor radii + local radial/tangent basis for seamless C^1 C-loop curl
-      const rHL = rAvg + peelBase * hingeDist * hingeDist;
-      const rHR = rAvg + peelBase * hingeDist * hingeDist;
+      // Evaluate exact wrapped radius at both hinge anchors for C^0 continuous spiral attachment
+      const uHLW = ((uHingeLeft % 1) + 1) % 1;
+      const kHLF = uHLW * SEGMENTS_PER_BAND;
+      const kHL0 = Math.floor(kHLF) % SEGMENTS_PER_BAND;
+      const kHL1 = (kHL0 + 1) % SEGMENTS_PER_BAND;
+      const fHL = kHLF - Math.floor(kHLF);
+      const rWrapHL =
+        this.radialProfile[profOffset + kHL0] * (1 - fHL) +
+        this.radialProfile[profOffset + kHL1] * fHL +
+        breathShift;
+
+      const uHRW = ((uHingeRight % 1) + 1) % 1;
+      const kHRF = uHRW * SEGMENTS_PER_BAND;
+      const kHR0 = Math.floor(kHRF) % SEGMENTS_PER_BAND;
+      const kHR1 = (kHR0 + 1) % SEGMENTS_PER_BAND;
+      const fHR = kHRF - Math.floor(kHRF);
+      const rWrapHR =
+        this.radialProfile[profOffset + kHR0] * (1 - fHR) +
+        this.radialProfile[profOffset + kHR1] * fHR +
+        breathShift;
+
+      const hingeLiftFrac = 0.38 + 0.62 * hingeDist * hingeDist;
+      const hingeWhip =
+        0.11 *
+        hingeDist *
+        lashEnv *
+        (0.4 + 0.6 * Math.max(0, Math.sin(hingeDist * 8.5 - age * 38.0)));
+      const rHL = Math.max(minClearR, rWrapHL) + peelBase * hingeLiftFrac + hingeWhip;
+      const rHR = Math.max(minClearR, rWrapHR) + peelBase * hingeLiftFrac + hingeWhip;
 
       const erLx = cHL * tu[0] + sHL * tv[0];
       const erLy = cHL * tu[1] + sHL * tv[1];
@@ -2821,8 +2895,8 @@ export class RubberBandBallSim {
       const etRy = -sHR * tu[1] + cHR * tv[1];
       const etRz = -sHR * tu[2] + cHR * tv[2];
 
-      const totalPhi = 3.55; // ~203 deg spiral C-loop
-      const spiralR0 = 0.052;
+      const totalPhi = 4.4; // ~252 deg tight 3D helical C-loop
+      const spiralR0 = 0.042;
 
       for (let k = 0; k <= activeSegs; k++) {
         const frac = k / activeSegs;
@@ -2844,32 +2918,32 @@ export class RubberBandBallSim {
           breathShift;
 
         const endDist = Math.abs(frac - 0.5) * 2;
-        const whipWave =
-          Math.max(0, Math.sin(endDist * 9.5 - age * 42.0)) *
-          0.048 *
+        const whipLash =
+          0.11 *
           endDist *
-          endDist *
-          lashEnv;
-        const radCircle = Math.max(minClearR, rWrap) + peelBase * endDist * endDist + whipWave;
+          lashEnv *
+          (0.4 + 0.6 * Math.max(0, Math.sin(endDist * 8.5 - age * 38.0)));
+        const liftFrac = 0.38 + 0.62 * endDist * endDist;
+        const radCircle = Math.max(minClearR, rWrap) + peelBase * liftFrac + whipLash;
 
         let cx = radCircle * (c * tu[0] + s * tv[0]);
         let cy = radCircle * (c * tu[1] + s * tv[1]);
         let cz = radCircle * (c * tu[2] + s * tv[2]);
 
-        // Smoothly curl free tips (> 62% toward tip) into a natural tangential/outward C-loop spiral
+        // Smoothly curl free tips (> 56% toward tip) into a tight 3D helical C-loop spiral
         if (endDist > hingeDist && curl > 1e-4) {
           const tipS = (endDist - hingeDist) / (1 - hingeDist);
-          const phi = totalPhi * Math.pow(tipS, 1.12);
-          const rho = spiralR0 * (1 - 0.24 * tipS);
+          const phi = totalPhi * Math.pow(tipS, 1.08);
+          const rho = spiralR0 * (1 - 0.32 * tipS);
           const dsTan = rho * Math.sin(phi);
           const dsRad = rho * (1 - Math.cos(phi));
           const sideSign = frac >= 0.5 ? 1 : -1;
-          const dsLat = sideSign * 0.02 * Math.sin(phi * 0.85);
+          const dsLat = sideSign * 0.036 * Math.sin(phi * 1.15);
 
           const isRight = frac >= 0.5;
-          const hx = (isRight ? rHR * erRx : rHL * erLx);
-          const hy = (isRight ? rHR * erRy : rHL * erLy);
-          const hz = (isRight ? rHR * erRz : rHL * erLz);
+          const hx = isRight ? rHR * erRx : rHL * erLx;
+          const hy = isRight ? rHR * erRy : rHL * erLy;
+          const hz = isRight ? rHR * erRz : rHL * erLz;
 
           const erx = isRight ? erRx : erLx;
           const ery = isRight ? erRy : erLy;
@@ -2897,14 +2971,18 @@ export class RubberBandBallSim {
           cz += lz * crownLift;
         }
 
-        // Subtle mid-air tumble rotation around tangential axis while falling
+        // 3D oblique tumble around the coiled scrap's own center while springing away from the ball
         if (tumbleBlend > 1e-4) {
-          const rx0 = cx * cosT + (nj[1] * cz - nj[2] * cy) * sinT;
-          const ry0 = cy * cosT + (nj[2] * cx - nj[0] * cz) * sinT;
-          const rz0 = cz * cosT + (nj[0] * cy - nj[1] * cx) * sinT;
-          cx = cx + (rx0 - cx) * tumbleBlend;
-          cy = cy + (ry0 - cy) * tumbleBlend;
-          cz = cz + (rz0 - cz) * tumbleBlend;
+          const dx = cx - antCx;
+          const dy = cy - antCy;
+          const dz = cz - antCz;
+          const aDotD = (tax * dx + tay * dy + taz * dz) * (1 - cosT);
+          const crx = tay * dz - taz * dy;
+          const cry = taz * dx - tax * dz;
+          const crz = tax * dy - tay * dx;
+          cx = antCx + dx * cosT + crx * sinT + tax * aDotD;
+          cy = antCy + dy * cosT + cry * sinT + tay * aDotD;
+          cz = antCz + dz * cosT + crz * sinT + taz * aDotD;
         }
 
         let px = cx + fx;
@@ -3043,6 +3121,9 @@ export class RubberBandBallSim {
       const profOffset = i * RINGS_PER_BAND;
       const ptsOffset = profOffset * 3;
       const useDyn = this.dynActive[i] === 1;
+      let prevBx = nj[0];
+      let prevBy = nj[1];
+      let prevBz = nj[2];
 
       for (let k = 0; k < SEGMENTS_PER_BAND; k++) {
         let ax: number;
@@ -3088,20 +3169,31 @@ export class RubberBandBallSim {
         ty /= segLen;
         tz /= segLen;
 
-        // Binormal B = normalize(M x T) (matches rubberOptics)
-        let binX = my * tz - mz * ty;
-        let binY = mz * tx - mx * tz;
-        let binZ = mx * ty - my * tx;
-        const binLen = Math.hypot(binX, binY, binZ);
-        if (binLen < 1e-5) {
-          binX = nj[0];
-          binY = nj[1];
-          binZ = nj[2];
-        } else {
-          binX /= binLen;
-          binY /= binLen;
-          binZ /= binLen;
+        // Wrap-plane-anchored binormal matching rubberOptics / buildBandOBB
+        const nDotT = nj[0] * tx + nj[1] * ty + nj[2] * tz;
+        let binX = nj[0] - nDotT * tx;
+        let binY = nj[1] - nDotT * ty;
+        let binZ = nj[2] - nDotT * tz;
+        let binLen = Math.hypot(binX, binY, binZ);
+        if (binLen < 0.15) {
+          const pDotT = prevBx * tx + prevBy * ty + prevBz * tz;
+          binX = prevBx - pDotT * tx;
+          binY = prevBy - pDotT * ty;
+          binZ = prevBz - pDotT * tz;
+          binLen = Math.hypot(binX, binY, binZ);
         }
+        if (binLen < 1e-4) {
+          binX = my * tz - mz * ty;
+          binY = mz * tx - mx * tz;
+          binZ = mx * ty - my * tx;
+          binLen = Math.hypot(binX, binY, binZ) || 1;
+        }
+        binX /= binLen;
+        binY /= binLen;
+        binZ /= binLen;
+        prevBx = binX;
+        prevBy = binY;
+        prevBz = binZ;
 
         // Radial axis R = T x B
         let radX = ty * binZ - tz * binY;

@@ -44,6 +44,9 @@ function buildExactRibbonGeometry(sim: RubberBandBallSim, bandIdx: number): Band
   const verts = new Float32Array((segs + 1) * 8 * 3);
   const halfWBase = spec.width * 0.5;
   const halfTBase = spec.thickness * 0.5;
+  let prevBx = spec.normal[0];
+  let prevBy = spec.normal[1];
+  let prevBz = spec.normal[2];
 
   for (let r = 0; r <= segs; r++) {
     if (r === segs) {
@@ -64,31 +67,34 @@ function buildExactRibbonGeometry(sim: RubberBandBallSim, bandIdx: number): Band
     ty /= tLen;
     tz /= tLen;
 
-    let rx = px;
-    let ry = py;
-    let rz = pz;
-    const rLen = Math.hypot(rx, ry, rz) || 1;
-    rx /= rLen;
-    ry /= rLen;
-    rz /= rLen;
-
-    let bx = ry * tz - rz * ty;
-    let by = rz * tx - rx * tz;
-    let bz = rx * ty - ry * tx;
+    const nDotT = spec.normal[0] * tx + spec.normal[1] * ty + spec.normal[2] * tz;
+    let bx = spec.normal[0] - nDotT * tx;
+    let by = spec.normal[1] - nDotT * ty;
+    let bz = spec.normal[2] - nDotT * tz;
     let bLen = Math.hypot(bx, by, bz);
+    if (bLen < 0.15) {
+      const pDotT = prevBx * tx + prevBy * ty + prevBz * tz;
+      bx = prevBx - pDotT * tx;
+      by = prevBy - pDotT * ty;
+      bz = prevBz - pDotT * tz;
+      bLen = Math.hypot(bx, by, bz);
+    }
     if (bLen < 1e-4) {
-      bx = spec.normal[0];
-      by = spec.normal[1];
-      bz = spec.normal[2];
+      bx = py * tz - pz * ty;
+      by = pz * tx - px * tz;
+      bz = px * ty - py * tx;
       bLen = Math.hypot(bx, by, bz) || 1;
     }
     bx /= bLen;
     by /= bLen;
     bz /= bLen;
+    prevBx = bx;
+    prevBy = by;
+    prevBz = bz;
 
-    rx = ty * bz - tz * by;
-    ry = tz * bx - tx * bz;
-    rz = tx * by - ty * bx;
+    let rx = ty * bz - tz * by;
+    let ry = tz * bx - tx * bz;
+    let rz = tx * by - ty * bx;
     const rOrtho = Math.hypot(rx, ry, rz) || 1;
     rx /= rOrtho;
     ry /= rOrtho;
@@ -116,6 +122,9 @@ function buildExactRibbonGeometry(sim: RubberBandBallSim, bandIdx: number): Band
   const segHalfL = new Float32Array(segs);
   const segHalfW = new Float32Array(segs);
   const segHalfH = new Float32Array(segs);
+  let prevSegBx = spec.normal[0];
+  let prevSegBy = spec.normal[1];
+  let prevSegBz = spec.normal[2];
 
   for (let s = 0; s < segs; s++) {
     const a3 = s * 3;
@@ -138,13 +147,30 @@ function buildExactRibbonGeometry(sim: RubberBandBallSim, bandIdx: number): Band
     segT[a3 + 1] = ty;
     segT[a3 + 2] = tz;
 
-    let bx = my * tz - mz * ty;
-    let by = mz * tx - mx * tz;
-    let bz = mx * ty - my * tx;
-    const bLen = Math.hypot(bx, by, bz) || 1;
+    const nDotT = spec.normal[0] * tx + spec.normal[1] * ty + spec.normal[2] * tz;
+    let bx = spec.normal[0] - nDotT * tx;
+    let by = spec.normal[1] - nDotT * ty;
+    let bz = spec.normal[2] - nDotT * tz;
+    let bLen = Math.hypot(bx, by, bz);
+    if (bLen < 0.15) {
+      const pDotT = prevSegBx * tx + prevSegBy * ty + prevSegBz * tz;
+      bx = prevSegBx - pDotT * tx;
+      by = prevSegBy - pDotT * ty;
+      bz = prevSegBz - pDotT * tz;
+      bLen = Math.hypot(bx, by, bz);
+    }
+    if (bLen < 1e-4) {
+      bx = my * tz - mz * ty;
+      by = mz * tx - mx * tz;
+      bz = mx * ty - my * tx;
+      bLen = Math.hypot(bx, by, bz) || 1;
+    }
     bx /= bLen;
     by /= bLen;
     bz /= bLen;
+    prevSegBx = bx;
+    prevSegBy = by;
+    prevSegBz = bz;
     segB[a3] = bx;
     segB[a3 + 1] = by;
     segB[a3 + 2] = bz;
