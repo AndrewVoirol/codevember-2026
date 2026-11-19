@@ -210,12 +210,12 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
   createDay(
     15,
     'Mirage',
-    'upcoming',
-    'wgsl',
+    'complete',
+    'tsl',
     'realgarAmber',
     'lapisUltramarine',
-    'Non-linear Fermat thermal boundary-layer slab bending rays into inverted inferior & Fata Morgana mirages',
-    'Pointer injects rising thermal plumes that warp, invert, and stack refracted slices of the suspended artifact'
+    'Suspended open cotton-rag sketchbook carved through seven torn-paper mineral arches where a contra-jour charcoal silhouette of a curled young woman re-signifies in parallax and ember light into cupped hands cradling glowing Realgar-Amber origami moths',
+    'Hover to shear the seven carved paper arches in parallax; click to stoke the crease ember and wake dormant charcoal facets into fluttering amber origami moths; scroll or drag to dolly and arc 42° inside the lantern'
   ),
   createDay(
     16,

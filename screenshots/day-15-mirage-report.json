@@ -1,0 +1,54 @@
+{
+  "day": 15,
+  "slug": "15-mirage",
+  "expectedHeader": "Day 15 - Mirage",
+  "domAudit": {
+    "headerText": "Day 15 - Mirage",
+    "bodyBg": "rgb(33, 37, 41)",
+    "drawerCount": 30
+  },
+  "telemetry": {
+    "frameCount": 372,
+    "avgFrameMs": 9.58,
+    "p95FrameMs": 8.8,
+    "sceneState": {
+      "day": 15,
+      "slug": "15-mirage",
+      "headerLabel": "Day 15 - Mirage",
+      "frameCount": 372,
+      "cameraPos": [
+        -0.21622532094303082,
+        -0.05478956285525073,
+        2.359600588903055
+      ],
+      "pointerWorld": [
+        0.18448004175472515,
+        -0.14596915627673443,
+        0.013515678339232728
+      ],
+      "pointerSpeed": 0,
+      "pointerDwellSec": 1.9279,
+      "pointerImpulse": 0.0009,
+      "uReveal": 0.3369,
+      "uAwake": 0,
+      "effectiveAwake": 0.393,
+      "activeMothCount": 5,
+      "arcAngleDeg": 5.27,
+      "faceDotLight": -0.735,
+      "handSeparationPxRatio": 1.358,
+      "maxRayLockErrorAtRest": 0
+    }
+  },
+  "metrics": {
+    "specimenCoverageRatio": 0.3479,
+    "interactionMad": 41.424
+  },
+  "gpuErrors": [],
+  "gateFailures": [],
+  "artifacts": {
+    "contactSheet": "screenshots/day-15-mirage-contact-sheet.png",
+    "initial": "screenshots/day-15-mirage-initial.png",
+    "drawer": "screenshots/day-15-mirage-drawer.png"
+  },
+  "passed": true
+}
