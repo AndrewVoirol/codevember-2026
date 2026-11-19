@@ -1,0 +1,46 @@
+{
+  "day": 16,
+  "slug": "16-spore",
+  "expectedHeader": "Day 16 - Spore",
+  "domAudit": {
+    "headerText": "Day 16 - Spore",
+    "bodyBg": "rgb(33, 37, 41)",
+    "drawerCount": 30
+  },
+  "telemetry": {
+    "frameCount": 403,
+    "avgFrameMs": 8.34,
+    "p95FrameMs": 9.3,
+    "sceneState": {
+      "day": 16,
+      "slug": "16-spore",
+      "headerLabel": "Day 16 - Spore",
+      "frameCount": 403,
+      "cameraPos": [
+        -2.395004143894485,
+        5.285046838614697,
+        -0.2834608486788716
+      ],
+      "pointerWorld": [
+        -0.2875718679858963,
+        -0.11277707352447308,
+        0.39069956882951035
+      ],
+      "pointerSpeed": 0,
+      "pointerDwellSec": 2.2206,
+      "pointerImpulse": 0.0003
+    }
+  },
+  "metrics": {
+    "specimenCoverageRatio": 0.2118,
+    "interactionMad": 13.813
+  },
+  "gpuErrors": [],
+  "gateFailures": [],
+  "artifacts": {
+    "contactSheet": "screenshots/day-16-spore-contact-sheet.png",
+    "initial": "screenshots/day-16-spore-initial.png",
+    "drawer": "screenshots/day-16-spore-drawer.png"
+  },
+  "passed": true
+}

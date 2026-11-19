@@ -220,12 +220,12 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
   createDay(
     16,
     'Spore',
-    'upcoming',
+    'complete',
     'tsl-compute',
     'sporeSulfur',
     'rawUmber',
-    'Puffball gasteromycete fruiting body releasing turbulent buoyant clouds of sulfur-gold spores',
-    'Tapping the peridium triggers a peristome burst; pointer velocity stirs curl-noise vortex rings'
+    'Suspended Earthstar puffball (Geastrum triplex) with a papery Warm Kaolin spore sac, fluted sulfur-dusted peristome chimney, seven recurved cracked Bone Calcite & Raw Umber exoperidium claws, hanging mycelial rootlets, and a 49,152-particle WebGPU TSL-compute toroidal vortex-ring spore plume',
+    'Click or squeeze and knead the papery spore sac to indent its skin and launch leapfrogging toroidal sulfur vortex rings (off-center pokes tilt the plume); sweep across the drifting cloud to stir 3D curl-noise eddies, or drag open space to orbit'
   ),
   createDay(
     17,
