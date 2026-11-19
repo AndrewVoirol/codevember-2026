@@ -230,12 +230,12 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
   createDay(
     17,
     'Kelp',
-    'upcoming',
-    'tsl-compute',
+    'complete',
+    'tsl',
     'mossUmbrous',
     'realgarAmber',
-    'Submerged Macrocystis kelp blades and pneumatocyst bladders swaying in a turbid coastal surge column',
-    'Pointer sweeps underwater current eddies, bending translucent amber-olive fronds with subsurface scatter'
+    'Suspended cured kelp-leather and alginate parchment pendant lantern tensioned over six bent dark-walnut ribs with crisscross whip-stitched seams, crinkled olive-umber outer frills, aged-brass knurled canopy, and a warm glowing tubular Edison filament core',
+    'Hover over any parchment panel to flex the cured kelp skin; drag the lantern to swing and spin it on its braided hemp cord; click to pluck a drumhead ripple and cycle filament warmth (warm, bright, ember), or drag open space to orbit'
   ),
   createDay(
     18,

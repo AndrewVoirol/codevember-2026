@@ -1,0 +1,46 @@
+{
+  "day": 17,
+  "slug": "17-kelp",
+  "expectedHeader": "Day 17 - Kelp",
+  "domAudit": {
+    "headerText": "Day 17 - Kelp",
+    "bodyBg": "rgb(33, 37, 41)",
+    "drawerCount": 30
+  },
+  "telemetry": {
+    "frameCount": 355,
+    "avgFrameMs": 8.28,
+    "p95FrameMs": 9,
+    "sceneState": {
+      "day": 17,
+      "slug": "17-kelp",
+      "headerLabel": "Day 17 - Kelp",
+      "frameCount": 355,
+      "cameraPos": [
+        0,
+        0.2199999999999996,
+        5.150000000000001
+      ],
+      "pointerWorld": [
+        0.38585919158096693,
+        -0.16462270492023204,
+        0.0025572459016736104
+      ],
+      "pointerSpeed": 0,
+      "pointerDwellSec": 2.2391,
+      "pointerImpulse": 0.0008
+    }
+  },
+  "metrics": {
+    "specimenCoverageRatio": 0.2097,
+    "interactionMad": 7.576
+  },
+  "gpuErrors": [],
+  "gateFailures": [],
+  "artifacts": {
+    "contactSheet": "screenshots/day-17-kelp-contact-sheet.png",
+    "initial": "screenshots/day-17-kelp-initial.png",
+    "drawer": "screenshots/day-17-kelp-drawer.png"
+  },
+  "passed": true
+}
