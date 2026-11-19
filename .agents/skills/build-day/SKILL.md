@@ -94,3 +94,26 @@ Once verified with `0` console/WebGPU errors and `avgFrameMs <= 16.6 ms`:
 4. **Concurrent Multi-Day Shared-Checkout Safety**:
    - Before running `bench:optical` or committing Day `<XX>`, check `git status -s` and `git diff src/core/manifest.ts SPECIMEN_CATALOG.md` for concurrent uncommitted sibling days.
    - Never run `git add -A` or stage another uncommitted day's `'complete'` hunk in `manifest.ts` (which breaks production `/` `getLatestActiveDay()` when its `src/days/` module is untracked, and bakes an unlocked future day into `day-<XX>-drawer.png`). Save sibling-day hunks to `<ArtifactDir>/scratch/` during `bench:optical` + explicit-path `git add` + `git commit`, then immediately re-apply the sibling day's working-tree patch.
+
+---
+
+## Step 6: Deterministic 60fps Lockstep Demo Video Capture (When Requested)
+
+When recording a `1920×1080` `60 fps` demo `.mp4` (`exports/day-<XX>-<slug>-demo.mp4`) from real Apple Silicon Metal Chromium (`headless: false`, `deviceScaleFactor: 1`) including the `"Day XX - [THEME]"` DOM header:
+
+1. **Lockstep `rAF` + `performance.now()` Harness (`page.addInitScript`)**:
+   - Keep native `requestAnimationFrame` active during WebGPU boot until `window.__SPECIMEN_STAGE__.frameCount >= 12`, then engage lockstep (`__ENABLE_LOCKSTEP__`) and step exact `1000 / 60 ms` frames (`__STEP_FRAME__`), waiting one native `rAF` per step so Metal presents before capture.
+   - Step `>= 60` silent settle frames before Frame 0 (after pressing reset / centering pointer) and assert exact resting camera coordinates so Frame 0 has zero residual exponential damper drift.
+2. **OS-Cursor Isolation Gate (Prevent Real-Mouse Contamination)**:
+   - Because `headless: false` opens a visible desktop window on macOS, install a capture-phase `window.addEventListener('pointermove', e => { if (!window.__ALLOW_POINTER__) e.stopImmediatePropagation(); }, true)` in `addInitScript` and toggle `window.__ALLOW_POINTER__ = true` strictly around script-driven `page.mouse.move(...)` calls.
+3. **Fast Q98 MJPEG Pipe → Standard TV-Range BT.709 H.264**:
+   - Pipe `page.screenshot({ type: 'jpeg', quality: 98 })` into `ffmpeg -f image2pipe -vcodec mjpeg -r 60 -i -` (`~8×` faster than PNG, `~40 s` for `960` frames, zero dropped frames) and normalize MJPEG's full-range `yuvj420p` to standard TV-range `yuv420p` BT.709 for QuickTime/Safari/X parity:
+     ```bash
+     -c:v libx264 -preset slow -crf 16 \
+     -vf "scale=in_range=full:out_range=tv,format=yuv420p" \
+     -color_range tv -colorspace bt709 -color_primaries bt709 -color_trc bt709 \
+     -x264-params colorprim=bt709:transfer=bt709:colormatrix=bt709 \
+     -movflags +faststart
+     ```
+4. **Exact Frame-Indexed Visual Audit (Never `read_file` Multi-MB MP4s)**:
+   - Verify stream tags via `ffprobe` (`pix_fmt=yuv420p`, `color_range=tv`, `bt709`, `60/1`, exact `nb_frames`), and inspect a `<= 200 KB` 4×3 timeline JPEG built with exact frame indices (`-vf "select='eq(n,0)+eq(n,90)+...',setpts=N/TB,scale=480:270,tile=4x3"`) rather than `fps=` rounding so Frame 0 and loop seams are audited cleanly.
