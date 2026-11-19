@@ -8,27 +8,27 @@
     "drawerCount": 30
   },
   "telemetry": {
-    "frameCount": 372,
-    "avgFrameMs": 9.58,
-    "p95FrameMs": 8.8,
+    "frameCount": 348,
+    "avgFrameMs": 8.84,
+    "p95FrameMs": 14.2,
     "sceneState": {
       "day": 15,
       "slug": "15-mirage",
       "headerLabel": "Day 15 - Mirage",
-      "frameCount": 372,
+      "frameCount": 348,
       "cameraPos": [
-        -0.21622532094303082,
-        -0.05478956285525073,
-        2.359600588903055
+        -0.2162287938358106,
+        -0.05479093191407411,
+        2.3595839989981604
       ],
       "pointerWorld": [
-        0.18448004175472515,
-        -0.14596915627673443,
-        0.013515678339232728
+        0.18447926451928223,
+        -0.1459685540299861,
+        0.01351591462929802
       ],
       "pointerSpeed": 0,
-      "pointerDwellSec": 1.9279,
-      "pointerImpulse": 0.0009,
+      "pointerDwellSec": 2.0775,
+      "pointerImpulse": 0.0005,
       "uReveal": 0.3369,
       "uAwake": 0,
       "effectiveAwake": 0.393,
@@ -40,8 +40,8 @@
     }
   },
   "metrics": {
-    "specimenCoverageRatio": 0.3479,
-    "interactionMad": 41.424
+    "specimenCoverageRatio": 0.3478,
+    "interactionMad": 39.635
   },
   "gpuErrors": [],
   "gateFailures": [],

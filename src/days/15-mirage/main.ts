@@ -155,20 +155,40 @@ export async function bootDay15Mirage(): Promise<SpecimenStage> {
     return [nx, ny];
   };
 
+  // Guard initial dead-center 2D trompe-l'oeil against stationary/activation OS cursor events on load.
+  // Parallax engages smoothly on the first intentional pointer motion (>= 8 px after boot settle), click, or scroll.
+  const bootTimeMs = performance.now();
+  let hasActivePointer = false;
+  let initialMoveX: number | null = null;
+  let initialMoveY: number | null = null;
+
   const onWheel = (ev: WheelEvent) => {
     ev.preventDefault();
+    hasActivePointer = true;
     audio.unlock();
     controller.onWheel(ev.deltaY);
     audio.playPaperShift(Math.min(1, Math.abs(ev.deltaY) * 0.012));
   };
 
   const onPointerDown = (ev: PointerEvent) => {
+    hasActivePointer = true;
     audio.unlock();
     const [nx, ny] = toNdc(ev);
     controller.onPointerDown(nx, ny, ev.clientX, ev.clientY);
   };
 
   const onPointerMove = (ev: PointerEvent) => {
+    if (!hasActivePointer) {
+      if (performance.now() - bootTimeMs < 350) {
+        initialMoveX = ev.clientX;
+        initialMoveY = ev.clientY;
+      } else if (initialMoveX === null || initialMoveY === null) {
+        initialMoveX = ev.clientX;
+        initialMoveY = ev.clientY;
+      } else if (Math.hypot(ev.clientX - initialMoveX, ev.clientY - initialMoveY) >= 8) {
+        hasActivePointer = true;
+      }
+    }
     const [nx, ny] = toNdc(ev);
     controller.onPointerMove(nx, ny, ev.clientX, ev.clientY);
   };
@@ -181,16 +201,24 @@ export async function bootDay15Mirage(): Promise<SpecimenStage> {
   };
 
   const onDblClick = () => {
+    hasActivePointer = false;
+    initialMoveX = null;
+    initialMoveY = null;
     controller.resetToRest();
     audio.playPaperShift(0.6);
   };
 
   const onKeyDown = (ev: KeyboardEvent) => {
     if (ev.key === 'ArrowUp' || ev.key === 'w') {
+      hasActivePointer = true;
       controller.onWheel(-120);
     } else if (ev.key === 'ArrowDown' || ev.key === 's') {
+      hasActivePointer = true;
       controller.onWheel(120);
     } else if (ev.key === 'r' || ev.key === 'R') {
+      hasActivePointer = false;
+      initialMoveX = null;
+      initialMoveY = null;
       controller.resetToRest();
     }
   };
@@ -239,13 +267,15 @@ export async function bootDay15Mirage(): Promise<SpecimenStage> {
 
   // 5. Unpaused Zero-GC Animation Loop
   stage.onTick(({ dtSec, elapsedSec, pointer }) => {
+    const activePtrX = hasActivePointer ? pointer.ndc.x : 0;
+    const activePtrY = hasActivePointer ? pointer.ndc.y : 0;
     controller.step(
       dtSec,
       elapsedSec,
-      pointer.ndc.x,
-      pointer.ndc.y,
-      pointer.speed,
-      pointer.dwellTimeSec
+      activePtrX,
+      activePtrY,
+      hasActivePointer ? pointer.speed : 0,
+      hasActivePointer ? pointer.dwellTimeSec : 0
     );
 
     const camState = controller.cameraState;

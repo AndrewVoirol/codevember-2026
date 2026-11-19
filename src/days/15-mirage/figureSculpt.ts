@@ -688,33 +688,37 @@ function buildSketchStrokesGeometry(): THREE.BufferGeometry {
 
 function buildOrigamiWingGeometry(side: -1 | 1): THREE.BufferGeometry {
   const s = side;
+  // Crisp 7-vertex faceted origami moth wing (swept forewing apex + mid valley fold + delicate hindwing tail)
   const verts = new Float32Array([
-    0.0, 0.0, 0.36,
-    0.0, 0.03, 0.02,
-    0.0, -0.02, -0.44,
-    s * 1.18, 0.24, 0.62,
-    s * 0.84, -0.08, 0.16,
-    s * 0.92, 0.10, -0.22,
-    s * 0.44, -0.06, -0.66,
+    0.0, 0.0, 0.40,
+    0.0, 0.045, 0.02,
+    0.0, -0.02, -0.46,
+    s * 1.24, 0.28, 0.68,
+    s * 0.80, -0.11, 0.14,
+    s * 0.94, 0.13, -0.24,
+    s * 0.38, -0.08, -0.74,
   ]);
   const uvs = new Float32Array([
-    0.0, 0.8,
-    0.0, 0.5,
-    0.0, 0.1,
-    1.0, 0.95,
+    0.0, 0.82,
+    0.0, 0.50,
+    0.0, 0.12,
+    1.0, 0.96,
     0.72, 0.52,
-    0.82, 0.25,
-    0.45, 0.02,
+    0.84, 0.24,
+    0.42, 0.02,
   ]);
   const indices =
     side === 1
       ? [0, 3, 4, 0, 4, 1, 1, 4, 5, 1, 5, 2, 2, 5, 6]
       : [0, 4, 3, 0, 1, 4, 1, 5, 4, 1, 2, 5, 2, 6, 5];
 
-  const geom = new THREE.BufferGeometry();
-  geom.setAttribute('position', new THREE.BufferAttribute(verts, 3));
-  geom.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
-  geom.setIndex(indices);
+  const indexed = new THREE.BufferGeometry();
+  indexed.setAttribute('position', new THREE.BufferAttribute(verts, 3));
+  indexed.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+  indexed.setIndex(indices);
+  // Flat-shaded non-indexed facets so origami mountain/valley folds catch sharp studio & lantern light
+  const geom = indexed.toNonIndexed();
+  indexed.dispose();
   geom.computeVertexNormals();
   return geom;
 }
@@ -722,10 +726,10 @@ function buildOrigamiWingGeometry(side: -1 | 1): THREE.BufferGeometry {
 function buildSwirlRibbonsGeometry(): THREE.BufferGeometry {
   const acc = createAccum();
   const ribbonSeeds = [
-    { r0: 0.020, r1: 0.068, h: 0.165, turns: 1.55, phase: 0.2 },
-    { r0: 0.016, r1: 0.058, h: 0.140, turns: 1.35, phase: 2.1 },
-    { r0: 0.022, r1: 0.078, h: 0.185, turns: 1.75, phase: 3.9 },
-    { r0: 0.014, r1: 0.046, h: 0.108, turns: 1.15, phase: 5.1 },
+    { r0: 0.018, r1: 0.062, h: 0.165, turns: 1.55, phase: 0.2 },
+    { r0: 0.014, r1: 0.054, h: 0.140, turns: 1.35, phase: 2.1 },
+    { r0: 0.020, r1: 0.072, h: 0.185, turns: 1.75, phase: 3.9 },
+    { r0: 0.012, r1: 0.044, h: 0.108, turns: 1.15, phase: 5.1 },
   ];
 
   const steps = 28;
@@ -736,10 +740,10 @@ function buildSwirlRibbonsGeometry(): THREE.BufferGeometry {
       const f = i / steps;
       const ang = seed.phase + f * Math.PI * 2 * seed.turns;
       const rad = seed.r0 + (seed.r1 - seed.r0) * f;
-      const x = Math.sin(ang) * rad * 0.9 - 0.015 * f;
+      const x = Math.sin(ang) * rad * 0.85 + 0.012 * f;
       const y = 0.215 + f * seed.h + Math.sin(f * Math.PI * 3 + seed.phase) * 0.008;
-      const z = 0.185 + Math.cos(ang) * rad * 0.85;
-      const w = 0.0014 * Math.sin(f * Math.PI) + 0.0004;
+      const z = 0.215 + Math.cos(ang) * rad * 0.78;
+      const w = 0.00085 * Math.sin(f * Math.PI) + 0.00022;
       stations.push({ center: [x, y, z], rx: w, ry: w });
     }
     addLoftedTube(acc, stations, 6, 7, true);

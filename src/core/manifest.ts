@@ -214,7 +214,7 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
     'tsl',
     'realgarAmber',
     'lapisUltramarine',
-    'Suspended open cotton-rag sketchbook carved through seven torn-paper mineral arches where a contra-jour charcoal silhouette of a curled young woman re-signifies in parallax and ember light into cupped hands cradling glowing Realgar-Amber origami moths',
+    'Suspended open cotton-rag sketchbook whose flat charcoal drawing breaks open in parallax through seven torn-paper mineral arches, re-signifying a contra-jour curled silhouette into cupped hands cradling glowing faceted Realgar-Amber origami moths',
     'Hover to shear the seven carved paper arches in parallax; click to stoke the crease ember and wake dormant charcoal facets into fluttering amber origami moths; scroll or drag to dolly and arc 42° inside the lantern'
   ),
   createDay(

@@ -152,9 +152,21 @@ export function createArchSheetMaterial(
     const wp = positionWorld;
     const nw = normalWorld;
 
+    // 2D-to-3D trompe-l'oeil break factor: 0.0 at dead-center rest (flat sketchbook drawing),
+    // smoothly opening to 1.0 as soon as the user shears off-axis or dollys into the tunnel.
+    const camOffAxis = length(cameraPosition.xy.sub(vec2(0.0, -0.01)));
+    const depthBreak = clamp(u.uReveal.mul(2.8).add(camOffAxis.mul(3.6)), 0.0, 1.0);
+
+    // Perspective-ray projection onto the front sheet (z = 0.16) from CAM0_POS (0, -0.01, 3.12).
+    // Sampling the flat 2D charcoal wash & paper tooth in projXY makes all 7 Z-layers seamlessly
+    // coplanar with zero concentric ring seams at dead-center rest!
+    const projScale = float(2.96).div(max(float(0.25), float(3.12).sub(wp.z)));
+    const projXY = wp.xy.sub(vec2(0.0, -0.01)).mul(projScale).add(vec2(0.0, -0.01));
+    const samplePos = mix(vec3(projXY, float(0.16)), wp, depthBreak);
+
     // Fine cold-press cotton-rag paper tooth
-    const paperTooth = mineralToothFbm(wp.mul(22.0), float(1.0));
-    const coarseTooth = mineralToothFbm(wp.mul(6.5), float(1.0));
+    const paperTooth = mineralToothFbm(samplePos.mul(22.0), float(1.0));
+    const coarseTooth = mineralToothFbm(samplePos.mul(6.5), float(1.0));
     const ragMod = float(0.95).add(paperTooth.mul(0.085));
 
     // Select base mineral tone smoothly per layer index (0..9)
@@ -198,35 +210,56 @@ export function createArchSheetMaterial(
     baseCol = baseCol.add(charcoalWash.mul(is4));
     baseCol = baseCol.add(darkCover.mul(is9));
 
+    // At depthBreak = 0 (flat 2D drawing), replace discrete per-layer rings with a single
+    // continuous perspective-projected XY radial charcoal-wash vignette across layers 1..7
+    // so zero concentric paper seams are visible until the user moves or dollys in.
+    const isInterior = clamp(is1.add(is2).add(is3).add(is4).add(is5).add(is6).add(is7), 0.0, 1.0);
+    const vignetteCenter = vec2(0.02, -0.06);
+    const vigDelta = projXY.sub(vignetteCenter);
+    const vigRadius = length(vec2(vigDelta.x.mul(1.05), vigDelta.y.mul(1.22)));
+    const vigNoise = coarseTooth.sub(0.5).mul(0.075);
+    const vigT = smoothstep(0.16, 0.49, vigRadius.add(vigNoise));
+    const flatPaperCenter = boneBase.mul(0.95);
+    const flatCharcoalEdge = vec3(0.085, 0.087, 0.092).mul(float(0.84).add(coarseTooth.mul(0.28)));
+    const flatWashTone = mix(flatPaperCenter, flatCharcoalEdge, vigT);
+    baseCol = mix(baseCol, flatWashTone, isInterior.mul(float(1.0).sub(depthBreak)));
+
     const camDist = max(float(0.12), length(cameraPosition.sub(wp)));
 
-    // Directional 6B graphite hatching on Arches 1, 2, 4 (and subtle page shading)
+    // Directional 6B graphite hatching: continuous radial vignette hatching at depthBreak = 0,
+    // splitting into per-layer angled hatching as 3D depth breaks open.
+    const flatHatchDensity = vigT.mul(0.72).mul(isInterior).add(aHatchDensity.mul(float(1.0).sub(isInterior)));
+    const activeHatchDensity = mix(flatHatchDensity, aHatchDensity, depthBreak);
+    const activeHatchAngle = mix(float(0.52), aHatchAngle, depthBreak);
     const hatchAmt = graphiteHatchField(
-      wp.xy,
+      samplePos.xy,
       camDist,
-      float(0.35).sub(aHatchDensity.mul(0.22)),
-      aHatchDensity.mul(1.18),
-      aHatchAngle
+      float(0.35).sub(activeHatchDensity.mul(0.22)),
+      activeHatchDensity.mul(1.18),
+      activeHatchAngle
     );
     const graphiteInk = vec3(0.022, 0.023, 0.026);
     baseCol = mix(baseCol, graphiteInk, hatchAmt);
 
-    // Subtle tunnel depth AO per arch step, lifted dynamically as lantern light rises
+    // Subtle tunnel depth AO per arch step, suppressed at depthBreak = 0 so layers read coplanar
     const depthStep = clamp(aLayerIdx, 0.0, 6.0);
-    const tunnelShadow = mix(
+    const tunnelShadow3D = mix(
       float(1.0).sub(depthStep.mul(0.068)),
       float(1.0).sub(depthStep.mul(0.028)),
       u.uLightLift
     );
-    // Slight inward darkening along beveled lip
-    const bevelAO = mix(float(0.92), float(1.0), smoothstep(0.0, 0.2, aRadial));
+    const tunnelShadow = mix(float(1.0), tunnelShadow3D, depthBreak);
+    // Slight inward darkening along beveled lip (emerges with 3D break)
+    const bevelAO = mix(float(1.0), mix(float(0.92), float(1.0), smoothstep(0.0, 0.2, aRadial)), depthBreak);
     baseCol = baseCol.mul(tunnelShadow).mul(bevelAO).mul(ragMod);
 
-    // Front page center gutter crease (Layer 0)
-    const gutter = exp(wp.x.mul(wp.x).div(0.0014).negate()).mul(is0);
+    // Continuous center gutter crease across the whole drawing at depthBreak = 0,
+    // retracting to Layer 0 only as the 3D tunnel opens
+    const gutterLayerMask = mix(float(1.0), is0, depthBreak);
+    const gutter = exp(wp.x.mul(wp.x).div(0.0014).negate()).mul(gutterLayerMask);
     baseCol = mix(baseCol, vec3(0.28, 0.25, 0.21), gutter.mul(0.55));
 
-    // Continuous 3D ray-cast crease shadow sweeping forward-left across bottom sills (Layers 6..1 -> Layer 0)
+    // Continuous 3D ray-cast crease shadow sweeping forward-left across inner sills (Layers 6..1 only)
     const dzFromEmber = max(float(0.0), wp.z.sub(u.uEmberPos.z));
     const shCenterX = u.uEmberPos.x.sub(dzFromEmber.mul(0.34));
     const shHalfW = float(0.055).add(dzFromEmber.mul(0.24));
@@ -237,9 +270,12 @@ export function createArchSheetMaterial(
       vec2(wp.x.sub(shCenterX).div(shHalfW), wp.y.sub(shCenterY).div(shHalfH))
     );
     const raggedEdge = mineralToothFbm(wp.mul(26.0), float(1.0)).sub(0.5).mul(0.32);
-    const isShadowLayer = smoothstep(6.6, 6.4, aLayerIdx).mul(smoothstep(-0.20, -0.225, wp.y));
+    const isShadowLayer = smoothstep(0.4, 0.6, aLayerIdx)
+      .mul(smoothstep(6.6, 6.4, aLayerIdx))
+      .mul(smoothstep(-0.20, -0.225, wp.y));
     const shadowMask = smoothstep(1.05, 0.36, shNormDist.add(raggedEdge))
       .mul(isShadowLayer)
+      .mul(depthBreak)
       .mul(clamp(float(1.0).sub(u.uLightLift.mul(1.12)), 0.0, 1.0));
     const shadowHatch = graphiteHatchField(wp.xy, camDist, float(0.16), float(1.12), float(0.25));
     baseCol = mix(baseCol, vec3(0.022, 0.023, 0.026), shadowMask.mul(float(0.76).add(shadowHatch.mul(0.22))));
@@ -265,7 +301,10 @@ export function createArchSheetMaterial(
     const warmBounceCol = mix(amber.rInf, ochre.rInf, 0.52);
 
     const innerAccept = clamp(is4.add(is5).add(is6).add(is7).add(is3.mul(0.35)), 0.0, 1.0);
-    baseCol = baseCol.add(warmBounceCol.mul(lanternBounce.mul(0.44).add(emberBounce.mul(0.48))).mul(innerAccept));
+    const bounceGate = mix(float(0.22), float(1.0), depthBreak);
+    baseCol = baseCol.add(
+      warmBounceCol.mul(lanternBounce.mul(0.44).add(emberBounce.mul(0.48))).mul(innerAccept).mul(bounceGate)
+    );
 
     // Soft studio softbox vignette across back sanctum wall at 100%
     const wallHaloDist = length(wp.xy.sub(vec2(-0.08, -0.02)));
@@ -274,19 +313,21 @@ export function createArchSheetMaterial(
       .mul(float(0.08).add(u.uLightLift.mul(0.28)));
     baseCol = baseCol.add(mix(amber.rInf, vec3(0.96, 0.85, 0.62), 0.45).mul(wallHalo));
 
-    // Crisp uncolored white cotton-rag torn deckle rim (thin fibrous bevel + warm sill ember scorch)
+    // Crisp uncolored white cotton-rag torn deckle rim: hidden at depthBreak = 0 so the 7 arches
+    // do not betray 3D paper thickness, then emerging cleanly as soon as parallax/dolly begins.
     const bevelLight = clamp(dot(nw, vec3(-0.22, 0.55, 0.80)).mul(0.32).add(0.78), 0.58, 1.08);
     const fiberCol = vec3(0.89, 0.86, 0.79).mul(bevelLight).mul(float(0.92).add(paperTooth.mul(0.14)));
     const deckleWarm = warmBounceCol.mul(lanternBounce.mul(0.32).add(emberBounce.mul(0.65)));
-    const deckleMask = smoothstep(0.18, 0.92, aDeckle);
+    const deckleMask = smoothstep(0.18, 0.92, aDeckle).mul(smoothstep(0.06, 0.65, depthBreak));
     baseCol = mix(baseCol, fiberCol.add(deckleWarm), deckleMask);
 
     // Subtle riffled page gaps along stacked side strips (Layer 8)
     const riffleLines = smoothstep(0.3, 0.85, sin(wp.z.mul(180.0)).mul(0.5).add(0.5)).mul(is8);
     baseCol = mix(baseCol, vec3(0.32, 0.29, 0.24), riffleLines.mul(0.45));
 
-    // Gentle overhead studio softbox gradient so paper reads physically suspended in #212529
-    const studioKey = clamp(dot(nw, vec3(0.22, 0.42, 0.88)).mul(0.14).add(0.92), 0.74, 1.06);
+    // Gentle overhead studio softbox gradient (flat at depthBreak = 0, sculptural as 3D opens)
+    const studioKey3D = clamp(dot(nw, vec3(0.22, 0.42, 0.88)).mul(0.14).add(0.92), 0.74, 1.06);
+    const studioKey = mix(float(0.98), studioKey3D, depthBreak);
     const outCol = clamp(baseCol.mul(studioKey), 0.0, 0.98);
     return outCol;
   })();
@@ -350,11 +391,16 @@ export function createFigureMaterial(
       .mul(float(0.65).add(u.uSparkPulse.mul(0.45)))
       .mul(u.uFlicker);
 
-    // Subtle grazing back-rim against the bright sanctum wall at 0% so spine contour stays crisp
-    const rim = pow(clamp(float(1.0).sub(abs(dot(nw, vd))), 0.0, 1.0), 2.5);
-    const backRim = rim.mul(float(0.10).add(u.uLightLift.mul(0.12)));
+    const camOffAxis = length(cameraPosition.xy.sub(vec2(0.0, -0.01)));
+    const depthBreak = clamp(u.uReveal.mul(2.8).add(camOffAxis.mul(3.6)), 0.0, 1.0);
 
-    const totalLum = clamp(float(0.028).add(keyIrr.mul(0.76)).add(emberIrr.mul(0.52)).add(backRim.mul(0.32)), 0.02, 0.78);
+    // Subtle grazing back-rim against the bright sanctum wall (emerges as 3D depth breaks)
+    const rim = pow(clamp(float(1.0).sub(abs(dot(nw, vd))), 0.0, 1.0), 2.5);
+    const backRim = rim.mul(float(0.10).add(u.uLightLift.mul(0.12))).mul(depthBreak);
+
+    const totalLum3D = clamp(float(0.028).add(keyIrr.mul(0.76)).add(emberIrr.mul(0.52)).add(backRim.mul(0.32)), 0.02, 0.78);
+    // At depthBreak = 0, flatten figure into a dry-media 6B charcoal silhouette drawn on the page
+    const totalLum = mix(float(0.032), totalLum3D, depthBreak);
 
     // Base paper & graphite color per body part
     const isCloth = smoothstep(0.5, 1.0, aFeature);
@@ -384,9 +430,10 @@ export function createFigureMaterial(
     const fresnelInk = smoothstep(0.36, 0.14, abs(dot(nw, vd))).mul(0.82);
 
     const warmLanternColor = mix(amber.rInf, mix(ochre.rInf, sulfur.rInf, 0.35), clamp(keyIrr, 0.0, 1.0));
+    const emberBounceGate = mix(float(0.08), float(1.0), depthBreak);
     const litSkinAndCloth = bodyBase
       .mul(float(0.05).add(totalLum.mul(0.88)))
-      .add(warmLanternColor.mul(keyIrr.mul(0.28).add(emberIrr.mul(0.36))));
+      .add(warmLanternColor.mul(keyIrr.mul(0.28).add(emberIrr.mul(0.36).mul(emberBounceGate))));
 
     const charcoalBlack = vec3(0.020, 0.020, 0.022);
     const bodyFinal = mix(litSkinAndCloth, charcoalBlack, clamp(hatchAmt.add(fresnelInk.mul(0.65)), 0.0, 0.94));
@@ -433,12 +480,12 @@ export function createFaceFeaturesMaterial(u: MirageShaderUniforms): THREE.MeshB
     const isCatch = smoothstep(0.5, 0.0, abs(aFeature.sub(6.0)));
     const isInk = smoothstep(0.5, 0.0, abs(aFeature.sub(7.0)));
 
-    const scleraCol = mix(darkSilhouette, bone.rInf.mul(0.92), faceLit);
+    const scleraCol = mix(darkSilhouette, bone.rInf.mul(0.76), faceLit);
     const irisGlow = mix(amber.rInf, sulfur.rInf, 0.35).mul(float(0.85).add(u.uFlicker.mul(0.2)));
     const irisCol = mix(darkSilhouette, irisGlow, faceLit);
-    const pupilCol = vec3(0.012, 0.012, 0.014);
+    const pupilCol = vec3(0.018, 0.016, 0.016);
     const catchCol = mix(darkSilhouette, vec3(0.98, 0.92, 0.72), smoothstep(0.38, 0.85, u.uLightLift));
-    const inkCol = vec3(0.018, 0.018, 0.020);
+    const inkCol = mix(darkSilhouette, vec3(0.065, 0.058, 0.052), faceLit.mul(0.65));
 
     const outCol = scleraCol
       .mul(isSclera)
@@ -507,9 +554,12 @@ export function createMothWingMaterial(
     const spineFold = exp(uvCoord.x.mul(uvCoord.x).mul(42.0).negate());
     const spineCol = mix(litBase, vec3(0.98, 0.92, 0.74), spineFold.mul(0.75));
 
-    // Folded wing facet shading
-    const facetShade = clamp(abs(dot(nw, normalize(vec3(0.3, 0.8, 0.5)))).mul(0.35).add(0.72), 0.55, 1.08);
-    const glowingWing = mix(umber.rInf.mul(0.45), spineCol, facetShade).mul(u.uFlicker);
+    // Folded wing facet shading (flat-shaded origami creases catch crisp directional & warm lantern highlights)
+    const facetKey = clamp(dot(nw, normalize(vec3(0.35, 0.75, 0.55))).mul(0.45).add(0.68), 0.38, 1.18);
+    const facetRim = pow(clamp(float(1.0).sub(abs(dot(nw, vd))), 0.0, 1.0), 2.2).mul(0.32);
+    const glowingWing = mix(umber.rInf.mul(0.38), spineCol, facetKey)
+      .add(vec3(0.98, 0.86, 0.58).mul(facetRim))
+      .mul(u.uFlicker);
 
     return clamp(mix(charcoalDormant.add(hoverHint), glowingWing, uMothAwake), 0.0, 0.99);
   })();
@@ -527,14 +577,14 @@ export function createSwirlMaterial(u: MirageShaderUniforms): THREE.MeshBasicNod
     depthWrite: false,
   });
 
-  mat.colorNode = Fn(() => vec3(0.14, 0.12, 0.10))();
+  mat.colorNode = Fn(() => vec3(0.22, 0.18, 0.14))();
 
   mat.opacityNode = Fn(() => {
     const vCoord = uv().y;
     const progress = smoothstep(0.22, 0.88, u.uAwake);
     const revealMask = smoothstep(progress.add(0.05), progress.sub(0.15), vCoord);
     const taperFade = sin(clamp(vCoord, 0.0, 1.0).mul(Math.PI));
-    return revealMask.mul(taperFade).mul(smoothstep(0.18, 0.65, u.uAwake)).mul(0.62);
+    return revealMask.mul(taperFade).mul(smoothstep(0.18, 0.65, u.uAwake)).mul(0.36);
   })();
 
   return mat;
@@ -584,10 +634,12 @@ export function createLanternGlowMaterial(
   mat.colorNode = Fn(() => {
     const c = uv().sub(0.5).mul(2.0);
     const r = length(c);
-    const core = exp(r.mul(r).mul(kind === 'creaseEmber' ? 14.0 : 6.2).negate());
-    const halo = exp(r.mul(r).mul(2.6).negate());
-    const hotCenter = vec3(1.0, 0.94, 0.76);
-    const col = mix(amber.rInf, sulfur.rInf, 0.45).mul(halo).add(hotCenter.mul(core));
+    const core = exp(r.mul(r).mul(kind === 'creaseEmber' ? 14.0 : 8.5).negate());
+    const halo = exp(r.mul(r).mul(kind === 'creaseEmber' ? 2.6 : 3.4).negate());
+    const hotCenter = kind === 'creaseEmber' ? vec3(1.0, 0.94, 0.76) : vec3(0.92, 0.72, 0.36);
+    const coreWeight = kind === 'creaseEmber' ? float(1.0) : float(0.48);
+    const haloWeight = kind === 'creaseEmber' ? float(1.0) : float(0.62);
+    const col = mix(amber.rInf, sulfur.rInf, 0.38).mul(halo).mul(haloWeight).add(hotCenter.mul(core).mul(coreWeight));
     return col.mul(u.uFlicker);
   })();
 

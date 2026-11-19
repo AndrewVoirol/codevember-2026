@@ -255,12 +255,13 @@ export function evaluateMothRuntime(
   out.id = spec.id;
   out.awake = t;
 
-  // Flight anchor spirals in the space in front of and above her cupped hands (left of her face)
+  // Flight anchor spirals cleanly in the luminous arch space forward & above her cupped hands
+  // (clear of her eyes and forehead)
   const swirlAngle = spec.phase + elapsedSec * (0.95 + (spec.id % 3) * 0.22);
   const swirlCenter: Vec3Tuple = figToWorld(
-    0.225 + Math.cos(swirlAngle) * spec.orbitRadius * 0.72,
-    0.245 + spec.orbitHeight + Math.sin(elapsedSec * 1.85 + spec.phase) * 0.016,
-    -0.015 + Math.sin(swirlAngle) * spec.orbitRadius * 1.15
+    0.268 + Math.cos(swirlAngle) * spec.orbitRadius * 0.68,
+    0.255 + spec.orbitHeight + Math.sin(elapsedSec * 1.85 + spec.phase) * 0.016,
+    0.022 + Math.sin(swirlAngle) * spec.orbitRadius * 1.08
   );
 
   // Midpoint Bezier lift peels through the warm updraft channel in front of her knees
