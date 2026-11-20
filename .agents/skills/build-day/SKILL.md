@@ -77,11 +77,12 @@ npm run build
 npm run bench:optical -- --day <XX>
 ```
 
-Inspect the generated contact sheet at `screenshots/day-<XX>-<slug>-contact-sheet.png` using `read_file` to visually verify the specimen framing, mineral palette contrast against `#212529`, and unpaused pointer interaction response.
+Inspect `screenshots/day-<XX>-<slug>-initial.png` and `screenshots/day-<XX>-<slug>-contact-sheet.png` using `read_file` side-by-side against the locked concept render to verify: (a) relative object scale ratios and framing on `#212529`, (b) surface material/texture fidelity (no dark-void metal collapse or cloudy low-freq noise), (c) flush surface seating and mechanical joint alignment, and (d) unpaused pointer interaction response.
 - **Additional Gates for Multi-Face / Puzzle / `/swarm` Builds**:
   1. **`1:1` Native-Pixel Material & Seam Crop**: Alongside `2×2` full-specimen contact sheets (which hide smooth/bitmap stone and octant DC seams), capture at least one `1:1` Retina micro-crop across carved ridges, vertical walls, and chamfers.
   2. **Bounded-Rate Playability vs. BFS Teleport**: Verify interactive puzzles under bounded angular-rate tilting (`<= 2.5 rad/s`), never solely via instantaneous per-substep gravity-teleport helpers (`stepTowardSolution`).
   3. **Multi-Orientation Corner/Junction Rest Settle**: Run `>= 90` unpaused frames with gravity parked into L-corners, T-junctions, and catch-basins asserting `edgeFlips === 0`, `maxPosDelta === 0`, and `speed === 0` after settling (`C^0` continuous position across all junction handoffs).
+  4. **4-Angle Macro, Interior & Rear-Orbit Audit (3D Hollow / Rotatable Specimens)**: Alongside the default front `bench:optical` pass, inspect a stitched 4-view sheet covering top joinery macro, primary seam/texture macro, underside/interior cavity, and a live rear-orbit DOM drag so inside-out lathes, rear-panel UV seams, inverted orbit drags, and back-face shading defects are caught before promotion.
 
 ---
 
