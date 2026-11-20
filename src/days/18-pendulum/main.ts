@@ -1,12 +1,14 @@
 import * as THREE from 'three/webgpu';
 import { SpecimenStage } from '../../core/stage/SpecimenStage';
 import {
+  BOB_SHELL_RADIUS,
   DOME_CENTER,
   DOME_RADIUS,
   MAX_STONES,
   STONE_RADIUS,
   STONE_SEAT_OFFSET,
   DomePendulumSimulation,
+  getStoneVisualPolarity,
   type MagneticStone,
   type PulleyKinematicsFrame,
 } from './physics';
@@ -45,10 +47,14 @@ interface StoneVisualSlot {
 const _raycaster = new THREE.Raycaster();
 const _ndc = new THREE.Vector2();
 const _grabPlane = new THREE.Plane();
+const _grabSphere = new THREE.Sphere(DOME_CENTER, BOB_SHELL_RADIUS + 0.06);
+const _stoneSphere = new THREE.Sphere(DOME_CENTER, DOME_RADIUS + STONE_SEAT_OFFSET);
 const _grabHit = new THREE.Vector3();
 const _camDir = new THREE.Vector3();
 const _launchOrigin = new THREE.Vector3();
 const _stoneNormal = new THREE.Vector3();
+const _domeLocalPt = new THREE.Vector3();
+const _tmpWorldPos = new THREE.Vector3();
 const _pulleyFrame: PulleyKinematicsFrame = {
   azimuth: 0,
   wheelAngle: 0,
@@ -140,12 +146,13 @@ async function mountDay18Pendulum(): Promise<void> {
   stage.specimenGroup.add(wake.mesh);
 
   // 6. Pre-allocated Pool of MAX_STONES Watertight Cleaved Magnetite Crystal Meshes
+  // Parented inside dome.group so seated stones ride 100% flush during dome recoil & tilt
   const stoneGeos = createStoneGeometryVariants();
   const stonePool: StoneVisualSlot[] = [];
   const stoneHitMeshes: THREE.Mesh[] = [];
   const stonesGroup = new THREE.Group();
   stonesGroup.name = 'MagneticStonesGroup';
-  stage.specimenGroup.add(stonesGroup);
+  dome.group.add(stonesGroup);
 
   for (let i = 0; i < MAX_STONES; i++) {
     const variant = i % stoneGeos.variants.length;
@@ -178,6 +185,8 @@ async function mountDay18Pendulum(): Promise<void> {
   const canvas = stage.shell.canvas;
   let hoveredStoneId = -1;
   let isHoveringBob = false;
+  let pendingStoneDrag = false;
+  let isDraggingStone = false;
   let pointerDownX = 0;
   let pointerDownY = 0;
   let pointerDownTime = 0;
@@ -233,11 +242,39 @@ async function mountDay18Pendulum(): Promise<void> {
   function updateGrabTarget(clientX: number, clientY: number): void {
     updateNdc(clientX, clientY);
     _raycaster.setFromCamera(_ndc, stage.camera);
+    if (_raycaster.ray.intersectSphere(_grabSphere, _grabHit)) {
+      sim.pendulum.grabTarget.copy(_grabHit);
+      return;
+    }
     stage.camera.getWorldDirection(_camDir);
     _grabPlane.setFromNormalAndCoplanarPoint(_camDir, sim.pendulum.pos);
     if (_raycaster.ray.intersectPlane(_grabPlane, _grabHit)) {
+      _grabHit.sub(DOME_CENTER);
+      if (_grabHit.length() > 2.2) _grabHit.setLength(2.2);
+      _grabHit.add(DOME_CENTER);
       sim.pendulum.grabTarget.copy(_grabHit);
     }
+  }
+
+  function projectStoneTargetOnDome(
+    clientX: number,
+    clientY: number,
+    outVec: THREE.Vector3
+  ): void {
+    updateNdc(clientX, clientY);
+    _raycaster.setFromCamera(_ndc, stage.camera);
+    const domeHits = _raycaster.intersectObject(dome.domeHitMesh, false);
+    if (domeHits.length > 0) {
+      _grabHit.copy(domeHits[0].point);
+    } else if (!_raycaster.ray.intersectSphere(_stoneSphere, _grabHit)) {
+      _raycaster.ray.closestPointToPoint(DOME_CENTER, _grabHit);
+      _grabHit.sub(DOME_CENTER);
+      if (_grabHit.lengthSq() < 1e-5) _grabHit.set(0, 1, 0);
+      _grabHit.normalize().multiplyScalar(DOME_RADIUS + STONE_SEAT_OFFSET).add(DOME_CENTER);
+    }
+    dome.group.updateMatrixWorld();
+    outVec.copy(_grabHit);
+    dome.group.worldToLocal(outVec).add(DOME_CENTER);
   }
 
   const onPointerDown = (ev: PointerEvent) => {
@@ -257,6 +294,11 @@ async function mountDay18Pendulum(): Promise<void> {
       updateGrabTarget(ev.clientX, ev.clientY);
       canvas.style.cursor = 'grabbing';
       canvas.setPointerCapture(ev.pointerId);
+    } else if (hit.type === 'stone' && hit.stoneId !== -1) {
+      pendingStoneDrag = true;
+      isDraggingStone = false;
+      stage.controls.enabled = false;
+      canvas.setPointerCapture(ev.pointerId);
     }
   };
 
@@ -266,20 +308,41 @@ async function mountDay18Pendulum(): Promise<void> {
       return;
     }
 
+    if (pendingStoneDrag && downStoneId !== -1) {
+      const moveDist = Math.hypot(ev.clientX - pointerDownX, ev.clientY - pointerDownY);
+      if (!isDraggingStone && moveDist >= 7) {
+        isDraggingStone = true;
+        canvas.style.cursor = 'grabbing';
+      }
+      if (isDraggingStone) {
+        projectStoneTargetOnDome(ev.clientX, ev.clientY, _domeLocalPt);
+        sim.setDraggedStone(downStoneId, _domeLocalPt);
+      }
+      return;
+    }
+
     if (ev.buttons !== 0) return;
 
     const hit = raycastScene(ev.clientX, ev.clientY);
     isHoveringBob = hit.type === 'bob';
     hoveredStoneId = hit.type === 'stone' ? hit.stoneId : -1;
 
-    if (hit.type === 'bob') {
+    if (hit.type === 'bob' || hit.type === 'stone') {
       canvas.style.cursor = 'grab';
-    } else if (hit.type === 'stone' || hit.type === 'rim') {
+    } else if (hit.type === 'rim') {
       canvas.style.cursor = 'pointer';
     } else if (hit.type === 'dome') {
       canvas.style.cursor = 'crosshair';
     } else {
       canvas.style.cursor = 'default';
+    }
+  };
+
+  const finishInteractionCapture = (ev: PointerEvent) => {
+    try {
+      canvas.releasePointerCapture(ev.pointerId);
+    } catch {
+      // Ignore if capture was already released
     }
   };
 
@@ -289,17 +352,30 @@ async function mountDay18Pendulum(): Promise<void> {
       sim.pendulum.wirePluckAmp = Math.min(1.0, sim.pendulum.wirePluckAmp + 0.45);
       stage.controls.enabled = true;
       canvas.style.cursor = 'grab';
-      try {
-        canvas.releasePointerCapture(ev.pointerId);
-      } catch {
-        // Ignore if capture was already released
-      }
+      finishInteractionCapture(ev);
       downHitType = 'none';
       return;
     }
 
     const moveDist = Math.hypot(ev.clientX - pointerDownX, ev.clientY - pointerDownY);
     const heldMs = performance.now() - pointerDownTime;
+
+    if (pendingStoneDrag) {
+      finishInteractionCapture(ev);
+      stage.controls.enabled = true;
+      if (isDraggingStone) {
+        sim.releaseDraggedStone();
+        canvas.style.cursor = 'grab';
+        pendingStoneDrag = false;
+        isDraggingStone = false;
+        downStoneId = -1;
+        downHitType = 'none';
+        return;
+      }
+      pendingStoneDrag = false;
+      isDraggingStone = false;
+    }
+
     const isCleanClick = moveDist < 7 && heldMs < 420;
 
     if (isCleanClick) {
@@ -315,17 +391,37 @@ async function mountDay18Pendulum(): Promise<void> {
       } else if (downHitType === 'stone' && downStoneId !== -1) {
         sim.flipStone(downStoneId);
       } else if (downHitType === 'dome') {
+        dome.group.updateMatrixWorld();
+        _domeLocalPt.copy(downDomePoint);
+        dome.group.worldToLocal(_domeLocalPt).add(DOME_CENTER);
         _launchOrigin
           .copy(stage.camera.position)
           .normalize()
           .multiplyScalar(1.65)
           .add(DOME_CENTER);
         _launchOrigin.y = Math.max(1.05, _launchOrigin.y + 0.85);
-        sim.tossStoneToward(downDomePoint, _launchOrigin);
+        sim.tossStoneToward(_domeLocalPt, _launchOrigin);
       }
     }
 
+    downStoneId = -1;
     downHitType = 'none';
+  };
+
+  const onPointerCancel = (ev: PointerEvent) => {
+    if (sim.pendulum.isGrabbed) {
+      sim.pendulum.isGrabbed = false;
+    }
+    if (pendingStoneDrag || isDraggingStone) {
+      sim.releaseDraggedStone();
+    }
+    pendingStoneDrag = false;
+    isDraggingStone = false;
+    downStoneId = -1;
+    downHitType = 'none';
+    stage.controls.enabled = true;
+    finishInteractionCapture(ev);
+    canvas.style.cursor = 'default';
   };
 
   const onKeyDown = (ev: KeyboardEvent) => {
@@ -338,12 +434,14 @@ async function mountDay18Pendulum(): Promise<void> {
   canvas.addEventListener('pointerdown', onPointerDown);
   canvas.addEventListener('pointermove', onPointerMove);
   canvas.addEventListener('pointerup', onPointerUp);
+  canvas.addEventListener('pointercancel', onPointerCancel);
   window.addEventListener('keydown', onKeyDown);
 
   stage.shell.registerDispose(() => {
     canvas.removeEventListener('pointerdown', onPointerDown);
     canvas.removeEventListener('pointermove', onPointerMove);
     canvas.removeEventListener('pointerup', onPointerUp);
+    canvas.removeEventListener('pointercancel', onPointerCancel);
     window.removeEventListener('keydown', onKeyDown);
     stage.scene.environment = null;
     studioEnv.dispose();
@@ -374,8 +472,14 @@ async function mountDay18Pendulum(): Promise<void> {
       ),
       wireLength: Number(sim.pendulum.wireLength.toFixed(4)),
       pulleyWheelAngle: Number(sim.pendulum.pulleyWheelAngle.toFixed(3)),
+      swivelAzimuth: Number(sim.pendulum.pulleyAzimuth.toFixed(4)),
       counterweightY: Number(sim.pendulum.counterweightY.toFixed(4)),
       magneticForceMag: Number(sim.pendulum.magneticForceMag.toFixed(4)),
+      domeTilt: [
+        Number(sim.pendulum.domeTiltX.toFixed(4)),
+        Number(sim.pendulum.domeTiltZ.toFixed(4)),
+      ],
+      draggedStoneId: sim.pendulum.draggedStoneId,
       activeScuffEnergy: surfaceMaps.getActiveScuffEnergy(),
       isGrabbed: sim.pendulum.isGrabbed,
       stones: sim.stones.map((s: MagneticStone) => ({
@@ -425,12 +529,14 @@ async function mountDay18Pendulum(): Promise<void> {
     surfaceMaps.stampBobWake(sim.pendulum.dir, wakeProx, sim.pendulum.vel.length(), dtSec);
     surfaceMaps.decayAndUpload(dtSec);
 
-    // 2. Subtle dome vertical recoil from stone impacts
+    // 2. Weighty dome vertical recoil + 2-axis gyroscopic impact tilt & overhead arch sway
     dome.group.position.set(
       DOME_CENTER.x,
       DOME_CENTER.y + sim.pendulum.domeRecoilY,
       DOME_CENTER.z
     );
+    dome.group.rotation.set(sim.pendulum.domeTiltX, 0, sim.pendulum.domeTiltZ);
+    gimbalPulley.archFrameGroup.rotation.set(sim.pendulum.archSwayX, 0, sim.pendulum.archSwayZ);
 
     // 3. Update bob transform & shared shader uniforms
     bob.group.position.copy(sim.pendulum.pos);
@@ -461,16 +567,21 @@ async function mountDay18Pendulum(): Promise<void> {
       camera.position
     );
 
-    // 6. Sync cleaved lodestone pool visuals & real-time 18-stone dome contact AO uniforms
+    // 6. Sync cleaved lodestone pool visuals (parented in dome.group) & 18-stone contact AO uniforms
     const stoneCount = sim.stones.length;
     const seatR = DOME_RADIUS + STONE_SEAT_OFFSET;
+    const activeHighlightId =
+      sim.pendulum.draggedStoneId !== -1 ? sim.pendulum.draggedStoneId : hoveredStoneId;
+    let foundHovered = false;
+    dome.group.updateMatrixWorld();
+
     for (let i = 0; i < MAX_STONES; i++) {
       const slot = stonePool[i];
       const aoVec = materials.stoneAOData[i];
 
       if (i < stoneCount) {
         const st = sim.stones[i];
-        const hoverGoal = st.id === hoveredStoneId ? 1 : 0;
+        const hoverGoal = st.id === activeHighlightId ? 1 : 0;
         st.hoverPoise += (hoverGoal - st.hoverPoise) * Math.min(1, dtSec * 16);
 
         if (slot.variant !== st.variant) {
@@ -481,14 +592,25 @@ async function mountDay18Pendulum(): Promise<void> {
         slot.mesh.visible = true;
         slot.stoneId = st.id;
         slot.mesh.position.set(
-          st.pos.x,
-          st.pos.y + sim.pendulum.domeRecoilY,
-          st.pos.z
+          st.pos.x - DOME_CENTER.x,
+          st.pos.y - DOME_CENTER.y,
+          st.pos.z - DOME_CENTER.z
         );
         slot.mesh.quaternion.copy(st.quat);
         slot.mesh.scale.setScalar(st.scale);
         slot.mesh.material =
-          st.polarity === 1 ? materials.cinnabarStone : materials.verdigrisStone;
+          getStoneVisualPolarity(st) === 1 ? materials.cinnabarStone : materials.verdigrisStone;
+
+        if (st.id === activeHighlightId) {
+          slot.mesh.getWorldPosition(_tmpWorldPos);
+          materials.uHoveredStonePos.value.set(
+            _tmpWorldPos.x,
+            _tmpWorldPos.y,
+            _tmpWorldPos.z,
+            Math.max(0.25, st.hoverPoise)
+          );
+          foundHovered = true;
+        }
 
         _stoneNormal.copy(st.pos).sub(DOME_CENTER);
         const distFromCenter = _stoneNormal.length();
@@ -511,6 +633,9 @@ async function mountDay18Pendulum(): Promise<void> {
         slot.stoneId = -1;
         aoVec.set(0, 1, 0, 0);
       }
+    }
+    if (!foundHovered) {
+      materials.uHoveredStonePos.value.w = 0;
     }
   });
 }

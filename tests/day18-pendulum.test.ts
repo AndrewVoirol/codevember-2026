@@ -11,9 +11,16 @@ import {
   STONE_RADIUS,
   STONE_SEAT_OFFSET,
   DomePendulumSimulation,
+  getStoneVisualPolarity,
   type PulleyKinematicsFrame,
 } from '../src/days/18-pendulum/physics';
-import { createStoneGeometryVariants } from '../src/days/18-pendulum/geometry';
+import {
+  buildDomeAssembly,
+  buildGimbalPulleyAssembly,
+  buildPendulumBob,
+  createStoneGeometryVariants,
+} from '../src/days/18-pendulum/geometry';
+import { createHammeredIronSurfaceMaps } from '../src/days/18-pendulum/domeSurface';
 
 describe('Day 18 - Hammered-Iron Dome, Differential Pulley & Grazing Orbital Pendulum physics', () => {
   it('tossed stones fly, bounce, emit surface impact/scuff events, cling cleanly, and have zero downhill creep', () => {
@@ -256,5 +263,242 @@ describe('Day 18 - Hammered-Iron Dome, Differential Pulley & Grazing Orbital Pen
       expect(maxCap).toBeCloseTo(1.0, 4);
     }
     dispose();
+  });
+
+  it('maintains 60s chaotic non-trapping swings across the dome with real radial height breathing', () => {
+    const sim = new DomePendulumSimulation();
+    const visitedStones = new Set<number>();
+    let zeroCrossingsX = 0;
+    let prevX = sim.pendulum.pos.x;
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minZ = Infinity;
+    let maxZ = -Infinity;
+    let minRadOff = Infinity;
+    let maxRadOff = -Infinity;
+
+    for (let f = 0; f < 3600; f++) {
+      sim.step(1 / 60);
+      const p = sim.pendulum;
+      if ((prevX < 0 && p.pos.x >= 0) || (prevX > 0 && p.pos.x <= 0)) {
+        zeroCrossingsX++;
+      }
+      prevX = p.pos.x;
+
+      if (p.pos.x < minX) minX = p.pos.x;
+      if (p.pos.x > maxX) maxX = p.pos.x;
+      if (p.pos.z < minZ) minZ = p.pos.z;
+      if (p.pos.z > maxZ) maxZ = p.pos.z;
+      if (p.radialOffset < minRadOff) minRadOff = p.radialOffset;
+      if (p.radialOffset > maxRadOff) maxRadOff = p.radialOffset;
+
+      for (const s of sim.stones) {
+        if (p.pos.distanceTo(s.pos) < 0.48) {
+          visitedStones.add(s.id);
+        }
+      }
+      sim.clearSurfaceEvents();
+    }
+
+    expect(zeroCrossingsX).toBeGreaterThanOrEqual(10);
+    expect(maxX - minX).toBeGreaterThan(0.75);
+    expect(maxZ - minZ).toBeGreaterThan(0.75);
+    expect(visitedStones.size).toBeGreaterThanOrEqual(4);
+    expect(maxRadOff - minRadOff).toBeGreaterThan(0.04);
+  });
+
+  it('enforces outward triangle winding (outwardDot > 0 and signedVol > 0) across all procedural meshes', () => {
+    const dummyMat = new THREE.MeshBasicMaterial();
+    const mats: any = {
+      domeIron: dummyMat,
+      domeUnderside: dummyMat,
+      boneCalciteBob: dummyMat,
+      boneCalciteRim: dummyMat,
+      agedBronze: dummyMat,
+      satinBrass: dummyMat,
+      plumbWire: dummyMat,
+      cinnabarStone: dummyMat,
+      verdigrisStone: dummyMat,
+      trailRibbon: dummyMat,
+    };
+
+    const assertOutward = (label: string, geo: THREE.BufferGeometry, checkPositiveVol = true) => {
+      const pos = geo.attributes.position as THREE.BufferAttribute;
+      const idx = geo.index;
+      const triCount = idx ? idx.count / 3 : pos.count / 3;
+      let signedVol = 0;
+      let outwardDot = 0;
+      const a = new THREE.Vector3();
+      const b = new THREE.Vector3();
+      const c = new THREE.Vector3();
+      const ab = new THREE.Vector3();
+      const ac = new THREE.Vector3();
+      const n = new THREE.Vector3();
+      const cen = new THREE.Vector3();
+      geo.computeBoundingBox();
+      const boxCenter = new THREE.Vector3();
+      geo.boundingBox!.getCenter(boxCenter);
+
+      for (let t = 0; t < triCount; t++) {
+        const i0 = idx ? idx.getX(t * 3) : t * 3;
+        const i1 = idx ? idx.getX(t * 3 + 1) : t * 3 + 1;
+        const i2 = idx ? idx.getX(t * 3 + 2) : t * 3 + 2;
+        a.fromBufferAttribute(pos, i0);
+        b.fromBufferAttribute(pos, i1);
+        c.fromBufferAttribute(pos, i2);
+        signedVol += a.dot(b.clone().cross(c)) / 6;
+        ab.subVectors(b, a);
+        ac.subVectors(c, a);
+        n.crossVectors(ab, ac);
+        cen.copy(a).add(b).add(c).multiplyScalar(1 / 3).sub(boxCenter);
+        outwardDot += n.dot(cen);
+      }
+
+      expect(outwardDot, `${label} outwardDot`).toBeGreaterThan(0);
+      if (checkPositiveVol) {
+        expect(signedVol, `${label} signedVol`).toBeGreaterThan(0);
+      }
+    };
+
+    const dome = buildDomeAssembly(mats);
+    dome.group.traverse((obj: any) => {
+      if (!obj.isMesh) return;
+      if (obj.name === 'DomeUndersidePlate') {
+        const pos = obj.geometry.attributes.position as THREE.BufferAttribute;
+        const idx = obj.geometry.index;
+        const triCount = idx ? idx.count / 3 : pos.count / 3;
+        const a = new THREE.Vector3();
+        const b = new THREE.Vector3();
+        const c = new THREE.Vector3();
+        const ab = new THREE.Vector3();
+        const ac = new THREE.Vector3();
+        const n = new THREE.Vector3();
+        let sumY = 0;
+        for (let t = 0; t < triCount; t++) {
+          const i0 = idx ? idx.getX(t * 3) : t * 3;
+          const i1 = idx ? idx.getX(t * 3 + 1) : t * 3 + 1;
+          const i2 = idx ? idx.getX(t * 3 + 2) : t * 3 + 2;
+          a.fromBufferAttribute(pos, i0);
+          b.fromBufferAttribute(pos, i1);
+          c.fromBufferAttribute(pos, i2);
+          ab.subVectors(b, a);
+          ac.subVectors(c, a);
+          n.crossVectors(ab, ac).normalize();
+          sumY += n.y;
+        }
+        expect(sumY / triCount, 'DomeUndersidePlate avgNormalY').toBeLessThan(-0.95);
+      } else {
+        assertOutward(`dome/${obj.name || obj.geometry.type}`, obj.geometry);
+      }
+    });
+    dome.dispose();
+
+    const gimbal = buildGimbalPulleyAssembly(mats);
+    gimbal.group.traverse((obj: any) => {
+      if (obj.isMesh) assertOutward(`gimbal/${obj.name || obj.geometry.type}`, obj.geometry);
+    });
+    gimbal.counterweightGroup.traverse((obj: any) => {
+      if (obj.isMesh) assertOutward(`cw/${obj.name || obj.geometry.type}`, obj.geometry);
+    });
+    gimbal.dispose();
+
+    const bob = buildPendulumBob(mats);
+    bob.group.traverse((obj: any) => {
+      if (obj.isMesh && obj.name !== 'PendulumBobHit') {
+        assertOutward(`bob/${obj.name || obj.geometry.type}`, obj.geometry);
+      }
+    });
+    bob.dispose();
+
+    const stones = createStoneGeometryVariants();
+    stones.variants.forEach((g, idx) => assertOutward(`stone/v${idx}`, g));
+    stones.dispose();
+    dummyMat.dispose();
+  });
+
+  it('supports direct stone dragging, wakes opposite-polarity neighbors, and settles with zero buzz', () => {
+    const sim = new DomePendulumSimulation();
+    sim.stones.length = 0;
+    sim.pendulum.isGrabbed = true;
+    sim.pendulum.grabTarget.set(0, DOME_CENTER.y + 0.6, -1.2);
+
+    const mover = sim.tossStoneToward(
+      new THREE.Vector3(-0.35, DOME_CENTER.y + DOME_RADIUS, 0),
+      new THREE.Vector3(-0.35, 0.45, 0),
+      1
+    );
+    const neighbor = sim.tossStoneToward(
+      new THREE.Vector3(0.20, DOME_CENTER.y + DOME_RADIUS, 0),
+      new THREE.Vector3(0.20, 0.45, 0),
+      -1
+    );
+
+    for (let i = 0; i < 150; i++) {
+      sim.step(1 / 60);
+      sim.clearSurfaceEvents();
+    }
+
+    const startNeighborPos = neighbor.pos.clone();
+    let dragScuffs = 0;
+    for (let i = 0; i < 40; i++) {
+      const targetX = -0.35 + (i / 39) * 0.40;
+      expect(sim.setDraggedStone(mover.id, new THREE.Vector3(targetX, DOME_CENTER.y + DOME_RADIUS, 0))).toBe(true);
+      sim.step(1 / 60);
+      dragScuffs += sim.scuffEvents.length;
+      sim.clearSurfaceEvents();
+    }
+    sim.releaseDraggedStone();
+    expect(dragScuffs).toBeGreaterThan(0);
+
+    for (let i = 0; i < 180; i++) {
+      sim.step(1 / 60);
+      sim.clearSurfaceEvents();
+    }
+
+    expect(mover.phase).toBe('clung');
+    expect(neighbor.phase).toBe('clung');
+    expect(neighbor.pos.distanceTo(startNeighborPos)).toBeGreaterThan(0.02);
+
+    // Zero buzz after settling
+    const prevMover = mover.pos.clone();
+    let maxJitter = 0;
+    for (let i = 0; i < 60; i++) {
+      sim.step(1 / 60);
+      maxJitter = Math.max(maxJitter, mover.pos.distanceTo(prevMover));
+      prevMover.copy(mover.pos);
+      sim.clearSurfaceEvents();
+    }
+    expect(maxJitter).toBe(0);
+  });
+
+  it('swaps stone visual polarity at mid-flip apex and decays bobWakeSheen cleanly to zero', () => {
+    const sim = new DomePendulumSimulation();
+    const st = sim.stones[0];
+    const origPol = st.polarity;
+    expect(getStoneVisualPolarity(st)).toBe(origPol);
+
+    expect(sim.flipStone(st.id)).toBe(true);
+    expect(st.polarity).toBe(-origPol);
+    // Immediately after flip starts (before upside-down apex u = 0.5), visual polarity still shows origPol
+    expect(getStoneVisualPolarity(st)).toBe(origPol);
+
+    for (let i = 0; i < 12; i++) {
+      sim.step(1 / 60);
+      sim.clearSurfaceEvents();
+    }
+    // Past u = 0.5 (~0.17s), visual polarity swaps cleanly to new polarity
+    expect(getStoneVisualPolarity(st)).toBe(-origPol);
+
+    // Verify bobWakeSheen decays cleanly to 0 when scuffs are quiet
+    const maps = createHammeredIronSurfaceMaps();
+    maps.stampBobWake(new THREE.Vector3(0, 1, 0), 1.0, 2.0, 0.1);
+    maps.decayAndUpload(1 / 60);
+    expect(maps.getActiveScuffEnergy()).toBeGreaterThan(0);
+
+    for (let i = 0; i < 240; i++) {
+      maps.decayAndUpload(0.1);
+    }
+    expect(maps.getActiveScuffEnergy()).toBe(0);
+    maps.dispose();
   });
 });

@@ -32,9 +32,13 @@ export interface StudioEnvironmentHandle {
   dispose: () => void;
 }
 
+const _cellOffsets = new Float32Array(27 * 3);
+
 function hash3(ix: number, iy: number, iz: number): number {
-  const n = Math.sin(ix * 127.1 + iy * 311.7 + iz * 74.7) * 43758.5453123;
-  return n - Math.floor(n);
+  let h = (Math.imul(ix | 0, 374761393) + Math.imul(iy | 0, 668265263) + Math.imul(iz | 0, 2147483647)) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  h = h ^ (h >>> 16);
+  return (h >>> 0) / 4294967296;
 }
 
 interface PeenSample {
@@ -71,6 +75,7 @@ function evalPeenLayer(
   let c1y = 0;
   let c1z = 0;
   let id1 = 0.5;
+  let cIdx = 0;
 
   for (let dx = -1; dx <= 1; dx++) {
     for (let dy = -1; dy <= 1; dy++) {
@@ -84,6 +89,10 @@ function evalPeenLayer(
         const rx = cx + jx - px;
         const ry = cy + jy - py;
         const rz = cz + jz - pz;
+        _cellOffsets[cIdx] = rx;
+        _cellOffsets[cIdx + 1] = ry;
+        _cellOffsets[cIdx + 2] = rz;
+        cIdx += 3;
         const dSq = rx * rx + ry * ry + rz * rz;
         if (dSq < d1Sq) {
           d1Sq = dSq;
@@ -101,36 +110,26 @@ function evalPeenLayer(
   let ey = 0;
   let ez = 0;
 
-  for (let dx = -1; dx <= 1; dx++) {
-    for (let dy = -1; dy <= 1; dy++) {
-      for (let dz = -1; dz <= 1; dz++) {
-        const cx = ix + dx;
-        const cy = iy + dy;
-        const cz = iz + dz;
-        const jx = 0.14 + 0.72 * hash3(cx, cy, cz);
-        const jy = 0.14 + 0.72 * hash3(cx + 19, cy + 7, cz + 3);
-        const jz = 0.14 + 0.72 * hash3(cx + 5, cy + 23, cz + 11);
-        const rx = cx + jx - px;
-        const ry = cy + jy - py;
-        const rz = cz + jz - pz;
+  for (let i = 0; i < 81; i += 3) {
+    const rx = _cellOffsets[i];
+    const ry = _cellOffsets[i + 1];
+    const rz = _cellOffsets[i + 2];
 
-        const vx = rx - c1x;
-        const vy = ry - c1y;
-        const vz = rz - c1z;
-        const vLenSq = vx * vx + vy * vy + vz * vz;
-        if (vLenSq > 1e-5) {
-          const invLen = 1 / Math.sqrt(vLenSq);
-          const mx = 0.5 * (c1x + rx);
-          const my = 0.5 * (c1y + ry);
-          const mz = 0.5 * (c1z + rz);
-          const edgeDist = (mx * vx + my * vy + mz * vz) * invLen;
-          if (edgeDist < minEdgeDist) {
-            minEdgeDist = edgeDist;
-            ex = vx * invLen;
-            ey = vy * invLen;
-            ez = vz * invLen;
-          }
-        }
+    const vx = rx - c1x;
+    const vy = ry - c1y;
+    const vz = rz - c1z;
+    const vLenSq = vx * vx + vy * vy + vz * vz;
+    if (vLenSq > 1e-5) {
+      const invLen = 1 / Math.sqrt(vLenSq);
+      const mx = 0.5 * (c1x + rx);
+      const my = 0.5 * (c1y + ry);
+      const mz = 0.5 * (c1z + rz);
+      const edgeDist = (mx * vx + my * vy + mz * vz) * invLen;
+      if (edgeDist < minEdgeDist) {
+        minEdgeDist = edgeDist;
+        ex = vx * invLen;
+        ey = vy * invLen;
+        ez = vz * invLen;
       }
     }
   }
@@ -157,11 +156,11 @@ function evalPeenLayer(
 }
 
 /**
- * Bakes the static 768x768 Lambert Azimuthal Equal-Area hammered-iron surface map
+ * Bakes the static 1024x1024 Lambert Azimuthal Equal-Area hammered-iron surface map
  * and initializes the paired 512x512 dynamic surface-reaction patina map.
  */
 export function createHammeredIronSurfaceMaps(): HammeredIronSurfaceMaps {
-  const staticSize = 768;
+  const staticSize = 1024;
   const staticData = new Uint8Array(staticSize * staticSize * 4);
   const p1: PeenSample = { gx: 0, gy: 0, gz: 0, ridge: 0, cavity: 0 };
   const p2: PeenSample = { gx: 0, gy: 0, gz: 0, ridge: 0, cavity: 0 };
@@ -329,9 +328,9 @@ export function createHammeredIronSurfaceMaps(): HammeredIronSurfaceMaps {
     isImpact: boolean
   ): void => {
     const [cx, cy] = normalToDynTexel(normal);
-    const radiusPx = isImpact ? 19.0 : 12.5;
-    const burnish = isImpact ? intensity * 0.62 : intensity * 0.30;
-    const chalk = isImpact ? intensity * 0.34 : intensity * 0.16;
+    const radiusPx = isImpact ? 22.0 : 14.0;
+    const burnish = isImpact ? intensity * 0.78 : intensity * 0.42;
+    const chalk = isImpact ? intensity * 0.46 : intensity * 0.24;
     stampGaussian(
       cx,
       cy,
@@ -351,9 +350,9 @@ export function createHammeredIronSurfaceMaps(): HammeredIronSurfaceMaps {
   ): void => {
     if (proximity01 <= 0.02 || speed < 0.08) return;
     const [cx, cy] = normalToDynTexel(normal);
-    const gain = Math.min(0.38, proximity01 * Math.min(1.0, speed * 0.65) * dtSec * 3.4);
+    const gain = Math.min(0.46, proximity01 * Math.min(1.0, speed * 0.65) * dtSec * 4.2);
     if (gain <= 0.002) return;
-    stampGaussian(cx, cy, 24.0, 0, gain, 0, 0);
+    stampGaussian(cx, cy, 26.0, 0, gain, 0, 0);
   };
 
   const decayAndUpload = (dtSec: number): void => {
@@ -381,7 +380,7 @@ export function createHammeredIronSurfaceMaps(): HammeredIronSurfaceMaps {
       dynData[i + 2] = Math.round(dynFloat[i + 2] * 255);
       dynData[i + 3] = Math.round(dynFloat[i + 3] * 255);
 
-      sumEnergy += dynFloat[i] + dynFloat[i + 2] + dynFloat[i + 3];
+      sumEnergy += dynFloat[i] + dynFloat[i + 1] + dynFloat[i + 2] + dynFloat[i + 3];
     }
 
     activeEnergy = sumEnergy;
@@ -478,8 +477,8 @@ export function createStudioEnvironment(
   // 1. Broad overhead-left warm calcite scrim softbox (wraps broad silky reflection across upper-left iron dome)
   addFeatheredSoftbox(11.5, 9.0, [-5.2, 5.6, 3.8], [0, 0, 0], 1.0, 0.96, 0.90, 1.82);
 
-  // 2. Broad right-side tall studio scrim (illuminates sweeping brass S-rod, calcite bob, and right iron shoulder)
-  addFeatheredSoftbox(8.5, 10.5, [6.2, 3.2, 2.8], [0, 0, 0], 0.98, 0.95, 0.89, 1.48);
+  // 2. Broad right-side tall studio scrim (illuminates sweeping plumb wire, calcite bob, and right iron shoulder)
+  addFeatheredSoftbox(8.5, 10.5, [6.2, 3.2, 2.8], [0, 0, 0], 0.98, 0.95, 0.89, 1.68);
 
   // 3. Broad rear-top cool slate grazing rim scrim (carves continuous metallic rim along dome top & bronze arch)
   addFeatheredSoftbox(12.0, 5.2, [-0.8, 5.4, -5.8], [0, 0, 0], 0.90, 0.95, 1.0, 1.45);
@@ -487,8 +486,8 @@ export function createStudioEnvironment(
   // 4. Overhead zenith soft fill dome card (continuous specular wrap over gimbal horseshoe top)
   addFeatheredSoftbox(9.0, 9.0, [0.0, 7.2, 0.4], [0, 0, 0], 0.96, 0.94, 0.90, 0.92);
 
-  // 5. Rear-right subtle cool fill scrim (keeps rear magnetite crystal facets legible when orbiting)
-  addFeatheredSoftbox(8.0, 6.5, [4.6, 1.6, -5.6], [0, 0, 0], 0.88, 0.93, 1.0, 0.72);
+  // 5. Rear-right subtle cool fill scrim (separates right dome flank cleanly from #212529 & lifts crystal facets)
+  addFeatheredSoftbox(8.0, 6.5, [4.6, 1.6, -5.6], [0, 0, 0], 0.88, 0.93, 1.0, 1.05);
 
   // 6. Subtle warm studio table bounce floor (lifts underside of brass plumb tip & dome base naturally)
   addFeatheredSoftbox(12.0, 12.0, [0, -6.2, 0], [0, 0, 0], 0.95, 0.92, 0.88, 0.28);

@@ -240,12 +240,12 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
   createDay(
     18,
     'Pendulum',
-    'upcoming',
+    'complete',
     'tsl',
     'boneCalcite',
-    'burntSienna',
-    'Coupled Blackburn double-pendulum harmonograph tracing decaying phase-space ribbons into a sand tray',
-    'Drag and release the suspended brass bob to launch a new Lissajous orbital trajectory'
+    'cinnabarVermilion',
+    'Suspended hand-planished hammered-iron magnetic dome ringed in honed Bone Calcite beneath a dark-bronze horseshoe gimbal, 5-spoke brass differential pulley, and rising counterweight plumb, with cleaved Cinnabar and Verdigris magnetite lodestones steering a sweeping 8-facet Bone-Calcite magnetic pendulum bob',
+    'Grab and fling the Bone-Calcite bob to launch chaotic magnetic slingshots, drag any lodestone across the iron dome to sculpt the field, click a stone to flip its polarity mid-air, click bare iron to toss a new stone, or click the calcite rim (or press Space) to cast a fresh handful'
   ),
   createDay(
     19,

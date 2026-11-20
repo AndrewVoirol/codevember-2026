@@ -62,6 +62,7 @@ export interface PendulumMaterials {
   uBobWorldPos: { value: THREE.Vector3 };
   uBobTipPos: { value: THREE.Vector3 };
   uBobHover: { value: number };
+  uHoveredStonePos: { value: THREE.Vector4 };
   stoneAOData: THREE.Vector4[];
   impactOriginsAge: THREE.Vector4[]; // xyz = dome unit normal, w = ageSec (-1 inactive)
   uImpactAmps: { value: THREE.Vector4 };
@@ -70,14 +71,14 @@ export interface PendulumMaterials {
 
 /**
  * Analytical 4-tap tetrahedral 3D FBM micro-normal perturbation in object space.
- * Zero screen-space dpdx/dpdy foil spikes and strictly uniform control flow.
+ * Scale-adaptive eps keeps finite differences cleanly below Nyquist across every FBM frequency.
  */
 const perturbNormal3DFbm = Fn(
   ([baseNorm_in, pos_in, scale_in, strength_in]: [TslNode, TslNode, TslNode, TslNode]) => {
     const n = normalize(vec3(baseNorm_in));
     const p = vec3(pos_in);
     const sc = float(scale_in);
-    const eps = float(0.012);
+    const eps = float(0.16).div(max(float(1.0), sc));
 
     const k1 = vec3(1.0, -1.0, -1.0);
     const k2 = vec3(-1.0, -1.0, 1.0);
@@ -99,6 +100,7 @@ export function createPendulumMaterials(surfaceMaps: HammeredIronSurfaceMaps): P
   const uBobWorldPos = uniform(new THREE.Vector3(0, 0.35, 0));
   const uBobTipPos = uniform(new THREE.Vector3(0, 0.18, 0));
   const uBobHover = uniform(0);
+  const uHoveredStonePos = uniform(new THREE.Vector4(0, 0, 0, 0));
 
   // 18-stone real-time contact AO uniform array: xyz = dome unit normal, w = angularRadius * seatFactor
   const stoneAOData: THREE.Vector4[] = [];
@@ -148,7 +150,7 @@ export function createPendulumMaterials(surfaceMaps: HammeredIronSurfaceMaps): P
         .mul(exp(age.mul(-3.8)))
         .mul(amp)
         .mul(activeGate);
-      const waveSlope = sin(distFromFront.mul(34.0)).mul(env).mul(0.14);
+      const waveSlope = sin(distFromFront.mul(34.0)).mul(env).mul(0.26);
 
       const rawOut = nBase.sub(origin.mul(cosAng));
       const outDir = rawOut.div(max(float(0.015), length(rawOut)));
@@ -181,7 +183,7 @@ export function createPendulumMaterials(surfaceMaps: HammeredIronSurfaceMaps): P
   const domeIron = new THREE.MeshStandardNodeMaterial({
     metalness: 0.78,
     roughness: 0.48,
-    envMapIntensity: 1.05,
+    envMapIntensity: 1.18,
   });
   {
     const nBase = normalize(positionLocal);
@@ -226,8 +228,8 @@ export function createPendulumMaterials(surfaceMaps: HammeredIronSurfaceMaps): P
     const rippleNormalDelta = ripplePack.xyz;
     const rippleHighlight = ripplePack.w;
 
-    // Gentle, authentic hand-planished hammer facets (reads softly under studio scrims, zero disco glare)
-    const peenStrength = float(0.118);
+    // Tactile hand-planished hammer facets catching studio softbox gradients cleanly
+    const peenStrength = float(0.145);
     const rawPerturbed = normalize(
       nBase
         .sub(T.mul(gT.mul(peenStrength)))
@@ -251,40 +253,41 @@ export function createPendulumMaterials(surfaceMaps: HammeredIronSurfaceMaps): P
     const phi = acos(clamp(nBase.y, -1.0, 1.0));
     const rimSeamAO = smoothstep(float(DOME_MAX_PHI - 0.038), float(DOME_MAX_PHI + 0.005), phi);
 
-    // Tight oil-blackened forged iron palette: concave normal-map bowls carry 90%+ of the highlight
-    // breakup without painting bright Voronoi ridge outlines at 1:1 macro zoom!
-    const ironCavity = vec3(0.016, 0.018, 0.021);
-    const ironBody = vec3(0.023, 0.026, 0.030);
-    const ironRidge = vec3(0.029, 0.032, 0.037);
-    const ironBurnished = vec3(0.062, 0.066, 0.074);
+    // Rich oil-blackened forged iron palette with clear contrast vs #212529 Chalky Slate
+    const ironCavity = vec3(0.019, 0.021, 0.025);
+    const ironBody = vec3(0.029, 0.032, 0.038);
+    const ironRidge = vec3(0.038, 0.042, 0.048);
+    const ironBurnished = vec3(0.115, 0.122, 0.136);
 
     const forgedBase = mix(ironCavity, ironBody, smoothstep(float(0.18), float(0.84), cavityMask));
-    const withRidges = mix(forgedBase, ironRidge, ridgeMask.mul(0.14).add(microScale.mul(0.10)));
+    const withRidges = mix(forgedBase, ironRidge, ridgeMask.mul(0.16).add(microScale.mul(0.10)));
 
-    // Subtle burnished steel skitter tracks along stone sliding paths
+    // Burnished metallic skitter tracks along stone sliding paths
     const scuffMask = clamp(burnishScuff.mul(float(0.55).add(ridgeMask.mul(0.45))), 0.0, 1.0);
-    const withScuffs = mix(withRidges, ironBurnished, scuffMask.mul(0.46));
+    const withScuffs = mix(withRidges, ironBurnished, scuffMask.mul(0.68));
 
-    // Ultra-restrained earthy mineral chalk dust trapped subtly in dimple troughs (never blotchy paint!)
+    // Earthy mineral chalk dust trapped inside hammered dimple troughs
     const pocketTrap = float(1.0).sub(cavityMask.mul(0.70));
-    const cinnabarRgb = vec3(...MINERAL_PALETTE.cinnabarVermilion.rInfLinear).mul(0.65);
-    const verdigrisRgb = vec3(...MINERAL_PALETTE.verdigrisMalachite.rInfLinear).mul(0.68);
+    const cinnabarRgb = vec3(...MINERAL_PALETTE.cinnabarVermilion.rInfLinear).mul(0.76);
+    const verdigrisRgb = vec3(...MINERAL_PALETTE.verdigrisMalachite.rInfLinear).mul(0.78);
     const withCinnabarDust = mix(
       withScuffs,
       cinnabarRgb,
-      clamp(cinnabarDust.mul(pocketTrap).mul(0.11), 0.0, 0.10)
+      clamp(cinnabarDust.mul(pocketTrap).mul(0.24), 0.0, 0.22)
     );
     const withMineralDust = mix(
       withCinnabarDust,
       verdigrisRgb,
-      clamp(verdigrisDust.mul(pocketTrap).mul(0.11), 0.0, 0.10)
+      clamp(verdigrisDust.mul(pocketTrap).mul(0.24), 0.0, 0.22)
     );
 
     const calciteTint = vec3(...MINERAL_PALETTE.boneCalcite.rInfLinear);
+    const bobTipReflect = float(1.0).sub(smoothstep(float(0.04), float(0.24), dBobTip));
     const withBobReact = withMineralDust
-      .add(calciteTint.mul(bobCalciteBounce.mul(0.026).mul(float(0.65).add(ridgeMask.mul(0.35)))))
-      .add(vec3(0.018, 0.020, 0.024).mul(bobWakeSheen.mul(0.32)))
-      .add(vec3(0.032, 0.034, 0.038).mul(clamp(rippleHighlight, 0.0, 1.0).mul(0.42)));
+      .add(calciteTint.mul(bobCalciteBounce.mul(0.048).mul(float(0.65).add(ridgeMask.mul(0.35)))))
+      .add(vec3(0.11, 0.088, 0.048).mul(bobTipReflect.mul(0.32).mul(float(0.55).add(ridgeMask.mul(0.45)))))
+      .add(vec3(0.034, 0.038, 0.046).mul(bobWakeSheen.mul(0.55)))
+      .add(vec3(0.068, 0.072, 0.080).mul(clamp(rippleHighlight, 0.0, 1.0).mul(0.58)));
 
     const totalAO = float(1.0)
       .sub(stoneOcc)
@@ -293,26 +296,27 @@ export function createPendulumMaterials(surfaceMaps: HammeredIronSurfaceMaps): P
 
     domeIron.colorNode = withBobReact.mul(max(float(0.08), totalAO));
 
-    // Oil-blackened satin forged-iron roughness (broad velvety softbox roll; zero Voronoi web glare)
+    // Oil-blackened satin forged-iron roughness (broad velvety softbox roll; crisp burnished & tip-bounce contrast)
     const dustMatteLift = clamp(cinnabarDust.add(verdigrisDust), 0.0, 1.0).mul(0.10);
     domeIron.roughnessNode = clamp(
-      float(0.52)
+      float(0.50)
         .sub(cavityMask.mul(0.06))
-        .sub(ridgeMask.mul(0.035))
-        .sub(scuffMask.mul(0.13))
-        .sub(bobWakeSheen.mul(0.04))
+        .sub(ridgeMask.mul(0.04))
+        .sub(scuffMask.mul(0.22))
+        .sub(bobWakeSheen.mul(0.10))
+        .sub(bobTipReflect.mul(0.08))
         .add(fineGrain.sub(0.5).mul(0.05))
         .add(dustMatteLift),
-      0.28,
+      0.20,
       0.66
     );
     domeIron.metalnessNode = clamp(
       float(0.78)
         .add(ridgeMask.mul(0.04))
-        .add(scuffMask.mul(0.08))
+        .add(scuffMask.mul(0.10))
         .sub(dustMatteLift.mul(1.2)),
       0.54,
-      0.90
+      0.92
     );
   }
 
@@ -365,7 +369,7 @@ export function createPendulumMaterials(surfaceMaps: HammeredIronSurfaceMaps): P
       fineBand
     );
     const veinMask = smoothstep(float(0.54), float(0.90), bandWave.mul(0.72).add(fineBand.mul(0.28)));
-    const veined = mix(glazed, amberVein, veinMask.mul(0.34));
+    const veined = mix(glazed, amberVein, veinMask.mul(0.42));
 
     const colletSeam = smoothstep(float(0.088), float(0.118), positionLocal.y)
       .add(smoothstep(float(-0.082), float(-0.112), positionLocal.y));
@@ -382,9 +386,9 @@ export function createPendulumMaterials(surfaceMaps: HammeredIronSurfaceMaps): P
       .add(sssWarmth);
     boneCalciteBob.normalNode = perturbNormal3DFbm(normalLocal, positionLocal, float(36.0), float(0.016));
     boneCalciteBob.roughnessNode = clamp(
-      float(0.32).add(fineGrain.mul(0.18)).add(veinMask.mul(0.06)),
-      0.24,
-      0.56
+      float(0.26).add(fineGrain.mul(0.16)).add(veinMask.mul(0.05)),
+      0.20,
+      0.48
     );
   }
 
@@ -511,11 +515,11 @@ export function createPendulumMaterials(surfaceMaps: HammeredIronSurfaceMaps): P
     const aCapMask = attribute('aCapMask', 'float');
     const aBottomAO = attribute('aBottomAO', 'float');
 
-    // Crisp high-frequency crystalline ore fracture (replaces cloudy low-freq grey patches!)
-    const oreMedium = mineralToothFbm(positionLocal, float(46.0));
-    const oreFine = mineralToothFbm(positionLocal.add(vec3(7.3, 2.9, 4.1)), float(108.0));
-    const oreSpark = mineralToothFbm(positionLocal.add(vec3(2.1, 11.7, 6.4)), float(185.0));
-    const crystalGlint = smoothstep(float(0.74), float(0.93), oreSpark);
+    // Crisp high-frequency crystalline magnetite fracture scaled to 0.068m stone size
+    const oreMedium = mineralToothFbm(positionLocal, float(125.0));
+    const oreFine = mineralToothFbm(positionLocal.add(vec3(7.3, 2.9, 4.1)), float(285.0));
+    const oreSpark = mineralToothFbm(positionLocal.add(vec3(2.1, 11.7, 6.4)), float(460.0));
+    const crystalGlint = smoothstep(float(0.72), float(0.92), oreSpark);
 
     // Organic jagged mineral encrustation border right across the beveled crown rim
     const borderNoise = oreMedium.sub(0.5).mul(0.46).add(oreFine.sub(0.5).mul(0.26));
@@ -524,11 +528,11 @@ export function createPendulumMaterials(surfaceMaps: HammeredIronSurfaceMaps): P
     // Tight dark charcoal-obsidian magnetite ore with razor micro-crystal glints
     const lodeDeep = vec3(0.012, 0.014, 0.018);
     const lodeMid = vec3(0.025, 0.028, 0.033);
-    const lodeSpark = vec3(0.115, 0.120, 0.132);
+    const lodeSpark = vec3(0.125, 0.130, 0.145);
     const bodyRgb = mix(
       mix(lodeDeep, lodeMid, smoothstep(float(0.26), float(0.76), oreMedium.mul(0.55).add(oreFine.mul(0.45)))),
       lodeSpark,
-      crystalGlint.mul(0.58)
+      crystalGlint.mul(0.64)
     );
 
     let mineralRgb: TslNode;
@@ -563,14 +567,23 @@ export function createPendulumMaterials(surfaceMaps: HammeredIronSurfaceMaps): P
       float(1.0).sub(edgeWeather.mul(0.28))
     );
 
+    // Live polarity-authentic specular bounce from grazing bob tip + subtle hover poise lift
+    const dTip = distance(positionWorld, uBobTipPos);
+    const tipProx = float(1.0).sub(smoothstep(float(0.08), float(0.42), dTip));
+    const bounceTint = isCinnabar ? vec3(0.14, 0.10, 0.048) : vec3(0.075, 0.125, 0.105);
+    const crownMask = float(0.45).add(capBlend.mul(0.55));
+    const bobBounce = bounceTint.mul(tipProx.mul(0.44).mul(crownMask));
+    const dHover = distance(positionWorld, uHoveredStonePos.xyz);
+    const hoverProx = float(1.0).sub(smoothstep(float(0.02), float(0.13), dHover)).mul(uHoveredStonePos.w);
+
     const seatAO = mix(float(0.40), float(1.0), clamp(aBottomAO, 0.0, 1.0));
-    mat.colorNode = combinedRgb.mul(seatAO);
+    mat.colorNode = combinedRgb.mul(seatAO).add(bobBounce).add(combinedRgb.mul(hoverProx.mul(0.28)));
 
     // Finer high-frequency crystalline cleavage micro-normal
     mat.normalNode = perturbNormal3DFbm(
       normalLocal,
       positionLocal,
-      float(64.0),
+      float(140.0),
       mix(float(0.048), float(0.030), capBlend)
     );
 
@@ -580,7 +593,7 @@ export function createPendulumMaterials(surfaceMaps: HammeredIronSurfaceMaps): P
       0.84
     );
     const mineralRough = clamp(float(0.68).add(oreFine.mul(0.20)), 0.56, 0.90);
-    mat.roughnessNode = mix(oreRough, mineralRough, capBlend);
+    mat.roughnessNode = clamp(mix(oreRough, mineralRough, capBlend).sub(tipProx.mul(0.14)), 0.18, 0.90);
 
     const oreMetal = clamp(float(0.48).add(crystalGlint.mul(0.30)), 0.36, 0.78);
     mat.metalnessNode = mix(oreMetal, float(0.03), capBlend);
@@ -602,7 +615,7 @@ export function createPendulumMaterials(surfaceMaps: HammeredIronSurfaceMaps): P
   });
   {
     const aAlpha = attribute('aAlpha', 'float');
-    trailRibbon.opacityNode = clamp(aAlpha, 0.0, 0.14);
+    trailRibbon.opacityNode = clamp(aAlpha, 0.0, 0.30);
   }
 
   return {
@@ -619,6 +632,7 @@ export function createPendulumMaterials(surfaceMaps: HammeredIronSurfaceMaps): P
     uBobWorldPos,
     uBobTipPos,
     uBobHover,
+    uHoveredStonePos,
     stoneAOData,
     impactOriginsAge,
     uImpactAmps,

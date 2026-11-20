@@ -100,7 +100,7 @@ export function buildDomeAssembly(materials: PendulumMaterials): {
   rimMesh.receiveShadow = true;
   group.add(rimMesh);
 
-  // Recessed forged-iron underside plate
+  // Recessed forged-iron underside plate (inner-to-outer lathe order makes FrontSide normals face -Y outward!)
   const underProfile: THREE.Vector2[] = [
     new THREE.Vector2(0.001, rimLocalY - 0.016),
     new THREE.Vector2(rimRadius * 0.45, rimLocalY - 0.020),
@@ -111,8 +111,27 @@ export function buildDomeAssembly(materials: PendulumMaterials): {
   geometries.push(underGeo);
 
   const underMesh = new THREE.Mesh(underGeo, materials.domeUnderside);
+  underMesh.name = 'DomeUndersidePlate';
   underMesh.receiveShadow = true;
   group.add(underMesh);
+
+  // Turned satin-brass central underside maker's boss (bottom-to-top outward winding)
+  const bossUnderProfile: THREE.Vector2[] = [
+    new THREE.Vector2(0.001, rimLocalY - 0.036),
+    new THREE.Vector2(0.034, rimLocalY - 0.034),
+    new THREE.Vector2(0.068, rimLocalY - 0.027),
+    new THREE.Vector2(0.086, rimLocalY - 0.021),
+    new THREE.Vector2(0.086, rimLocalY - 0.015),
+    new THREE.Vector2(0.001, rimLocalY - 0.015),
+  ];
+  const bossUnderGeo = new THREE.LatheGeometry(bossUnderProfile, 36);
+  bossUnderGeo.computeVertexNormals();
+  geometries.push(bossUnderGeo);
+
+  const bossUnderMesh = new THREE.Mesh(bossUnderGeo, materials.satinBrass);
+  bossUnderMesh.name = 'DomeUndersideMakerBoss';
+  bossUnderMesh.receiveShadow = true;
+  group.add(bossUnderMesh);
 
   return {
     group,
@@ -133,6 +152,7 @@ export function buildDomeAssembly(materials: PendulumMaterials): {
  */
 export function buildGimbalPulleyAssembly(materials: PendulumMaterials): {
   group: THREE.Group;
+  archFrameGroup: THREE.Group;
   swivelGroup: THREE.Group;
   wheelGroup: THREE.Group;
   counterweightGroup: THREE.Group;
@@ -141,6 +161,10 @@ export function buildGimbalPulleyAssembly(materials: PendulumMaterials): {
   const group = new THREE.Group();
   group.name = 'OverheadGimbalPulleyGroup';
   group.position.copy(PIVOT_POS);
+
+  const archFrameGroup = new THREE.Group();
+  archFrameGroup.name = 'GimbalArchFrame';
+  group.add(archFrameGroup);
 
   const geometries: THREE.BufferGeometry[] = [];
 
@@ -163,15 +187,18 @@ export function buildGimbalPulleyAssembly(materials: PendulumMaterials): {
   geometries.push(archGeo);
   const archMesh = new THREE.Mesh(archGeo, materials.agedBronze);
   archMesh.castShadow = true;
-  group.add(archMesh);
+  archFrameGroup.add(archMesh);
 
   // Delicate turned brass tip collars & spherical finials aligned coaxially with arch leg tips
+  // Ordered strictly bottom-to-top for verified outward FrontSide winding
   const collarProfile: THREE.Vector2[] = [
-    new THREE.Vector2(0.014, 0.020),
-    new THREE.Vector2(0.020, 0.014),
-    new THREE.Vector2(0.020, 0.004),
-    new THREE.Vector2(0.015, 0.0),
+    new THREE.Vector2(0.001, -0.009),
     new THREE.Vector2(0.012, -0.008),
+    new THREE.Vector2(0.015, 0.0),
+    new THREE.Vector2(0.020, 0.004),
+    new THREE.Vector2(0.020, 0.014),
+    new THREE.Vector2(0.014, 0.020),
+    new THREE.Vector2(0.001, 0.020),
   ];
   const collarGeo = new THREE.LatheGeometry(collarProfile, 22);
   collarGeo.computeVertexNormals();
@@ -189,12 +216,12 @@ export function buildGimbalPulleyAssembly(materials: PendulumMaterials): {
     // Collar local -Y points outward along tipDir (so local +Y points back along -tipDir)
     collar.quaternion.setFromUnitVectors(upVec, tipDir.clone().negate());
     collar.castShadow = true;
-    group.add(collar);
+    archFrameGroup.add(collar);
 
     const finial = new THREE.Mesh(finialGeo, materials.satinBrass);
     finial.position.copy(endPt).addScaledVector(tipDir, 0.021);
     finial.castShadow = true;
-    group.add(finial);
+    archFrameGroup.add(finial);
   }
 
   // 2. Top Suspension Starting Point: bronze saddle boss + stepped brass crown + hanging bow ring
@@ -211,7 +238,7 @@ export function buildGimbalPulleyAssembly(materials: PendulumMaterials): {
   geometries.push(bossGeo);
   const boss = new THREE.Mesh(bossGeo, materials.agedBronze);
   boss.castShadow = true;
-  group.add(boss);
+  archFrameGroup.add(boss);
 
   const crownPostProfile: THREE.Vector2[] = [
     new THREE.Vector2(0.017, 0.024),
@@ -226,7 +253,7 @@ export function buildGimbalPulleyAssembly(materials: PendulumMaterials): {
   geometries.push(crownPostGeo);
   const crownPost = new THREE.Mesh(crownPostGeo, materials.satinBrass);
   crownPost.castShadow = true;
-  group.add(crownPost);
+  archFrameGroup.add(crownPost);
 
   // Turned horological hanging bow ring crowning the instrument (clear visual starting point)
   const bowRingGeo = new THREE.TorusGeometry(0.032, 0.0068, 14, 32);
@@ -234,7 +261,7 @@ export function buildGimbalPulleyAssembly(materials: PendulumMaterials): {
   const bowRing = new THREE.Mesh(bowRingGeo, materials.satinBrass);
   bowRing.position.set(0, 0.084, 0);
   bowRing.castShadow = true;
-  group.add(bowRing);
+  archFrameGroup.add(bowRing);
 
   // 3. Rotating 360° Swivel Pulley Carriage mounted directly below the arch crown
   const pulleyLocalY = PULLEY_AXLE_Y - PIVOT_POS.y; // -0.08
@@ -256,26 +283,62 @@ export function buildGimbalPulleyAssembly(materials: PendulumMaterials): {
   swivelCollar.position.set(0, 0.066, 0);
   swivelGroup.add(swivelCollar);
 
-  // Machined dark-bronze clevis yoke bridging across the differential pulley axle
-  const bridgeGeo = new THREE.BoxGeometry(0.072, 0.011, 0.022);
-  const cheekGeo = new THREE.BoxGeometry(0.007, 0.064, 0.020);
-  const axleCapGeo = new THREE.CylinderGeometry(0.010, 0.010, 0.007, 16);
+  // Machined dark-bronze sculpted clevis yoke bridging across the differential pulley axle
+  const yokeShape = new THREE.Shape();
+  yokeShape.moveTo(-0.048, 0.040);
+  yokeShape.lineTo(0.048, 0.040);
+  yokeShape.lineTo(0.048, 0.051);
+  yokeShape.lineTo(0.022, 0.055);
+  yokeShape.lineTo(-0.022, 0.055);
+  yokeShape.lineTo(-0.048, 0.051);
+  yokeShape.closePath();
+  const bridgeGeo = new THREE.ExtrudeGeometry(yokeShape, {
+    depth: 0.020,
+    bevelEnabled: true,
+    bevelThickness: 0.002,
+    bevelSize: 0.002,
+    bevelSegments: 2,
+  });
+  bridgeGeo.translate(0, 0, -0.010);
+
+  const cheekShape = new THREE.Shape();
+  cheekShape.moveTo(-0.011, -0.007);
+  cheekShape.lineTo(0.011, -0.007);
+  cheekShape.lineTo(0.013, 0.044);
+  cheekShape.lineTo(-0.013, 0.044);
+  cheekShape.closePath();
+  const cheekGeo = new THREE.ExtrudeGeometry(cheekShape, {
+    depth: 0.006,
+    bevelEnabled: true,
+    bevelThickness: 0.0015,
+    bevelSize: 0.0015,
+    bevelSegments: 2,
+  });
+  cheekGeo.rotateY(Math.PI * 0.5);
+  cheekGeo.translate(-0.003, 0, 0);
+
+  const bearingBossGeo = new THREE.CylinderGeometry(0.0135, 0.0135, 0.011, 20);
+  bearingBossGeo.rotateZ(Math.PI * 0.5);
+  const axleCapGeo = new THREE.CylinderGeometry(0.0095, 0.0095, 0.007, 18);
   axleCapGeo.rotateZ(Math.PI * 0.5);
-  geometries.push(bridgeGeo, cheekGeo, axleCapGeo);
+  geometries.push(bridgeGeo, cheekGeo, bearingBossGeo, axleCapGeo);
 
   const yokeBridge = new THREE.Mesh(bridgeGeo, materials.agedBronze);
-  yokeBridge.position.set(0, 0.046, 0);
   yokeBridge.castShadow = true;
   swivelGroup.add(yokeBridge);
 
   for (const side of [-1, 1]) {
     const cheek = new THREE.Mesh(cheekGeo, materials.agedBronze);
-    cheek.position.set(side * 0.033, 0.016, 0);
+    cheek.position.set(side * 0.043, 0, 0);
     cheek.castShadow = true;
     swivelGroup.add(cheek);
 
+    const bossRing = new THREE.Mesh(bearingBossGeo, materials.agedBronze);
+    bossRing.position.set(side * 0.043, 0, 0);
+    swivelGroup.add(bossRing);
+
     const cap = new THREE.Mesh(axleCapGeo, materials.satinBrass);
-    cap.position.set(side * 0.039, 0, 0);
+    cap.position.set(side * 0.050, 0, 0);
     swivelGroup.add(cap);
   }
 
@@ -285,25 +348,26 @@ export function buildGimbalPulleyAssembly(materials: PendulumMaterials): {
   swivelGroup.add(wheelGroup);
 
   // Shared central dark-bronze axle shaft
-  const axleGeo = new THREE.CylinderGeometry(0.0085, 0.0085, 0.070, 18);
+  const axleGeo = new THREE.CylinderGeometry(0.009, 0.009, 0.092, 20);
   axleGeo.rotateZ(Math.PI * 0.5);
   geometries.push(axleGeo);
   const axleMesh = new THREE.Mesh(axleGeo, materials.agedBronze);
   wheelGroup.add(axleMesh);
 
   // 4a. Outer Machined V-Groove Satin-Brass Sheave (radius = PULLEY_OUTER_RADIUS at x = PULLEY_OUTER_OFFSET_X)
+  const outerRimInner = PULLEY_OUTER_RADIUS - 0.015;
   const outerRimProfile: THREE.Vector2[] = [
-    new THREE.Vector2(0.036, -0.0095),
+    new THREE.Vector2(outerRimInner, -0.0095),
     new THREE.Vector2(PULLEY_OUTER_RADIUS + 0.0085, -0.0095),
     new THREE.Vector2(PULLEY_OUTER_RADIUS + 0.0085, -0.0055),
     new THREE.Vector2(PULLEY_OUTER_RADIUS - 0.002, -0.0012),
     new THREE.Vector2(PULLEY_OUTER_RADIUS - 0.002, 0.0012),
     new THREE.Vector2(PULLEY_OUTER_RADIUS + 0.0085, 0.0055),
     new THREE.Vector2(PULLEY_OUTER_RADIUS + 0.0085, 0.0095),
-    new THREE.Vector2(0.036, 0.0095),
-    new THREE.Vector2(0.036, -0.0095),
+    new THREE.Vector2(outerRimInner, 0.0095),
+    new THREE.Vector2(outerRimInner, -0.0095),
   ];
-  const outerRimGeo = new THREE.LatheGeometry(outerRimProfile, 40);
+  const outerRimGeo = new THREE.LatheGeometry(outerRimProfile, 44);
   outerRimGeo.rotateZ(Math.PI * 0.5);
   outerRimGeo.computeVertexNormals();
   geometries.push(outerRimGeo);
@@ -312,36 +376,38 @@ export function buildGimbalPulleyAssembly(materials: PendulumMaterials): {
   outerRimMesh.castShadow = true;
   wheelGroup.add(outerRimMesh);
 
-  // Central hub collar + 4 machined radial wheel spokes so wheel spin reads clearly!
-  const hubCollarGeo = new THREE.CylinderGeometry(0.017, 0.017, 0.017, 20);
+  // Central hub collar + 5 slim radial horological wheel spokes so wheel spin reads cleanly
+  const hubCollarGeo = new THREE.CylinderGeometry(0.018, 0.018, 0.017, 22);
   hubCollarGeo.rotateZ(Math.PI * 0.5);
-  const spokeGeo = new THREE.BoxGeometry(0.006, 0.074, 0.0065);
+  const spokeLen = outerRimInner - 0.013;
+  const spokeGeo = new THREE.BoxGeometry(0.0055, spokeLen, 0.0052);
+  spokeGeo.translate(0, 0.014 + spokeLen * 0.5, 0);
   geometries.push(hubCollarGeo, spokeGeo);
 
   const hubCollar = new THREE.Mesh(hubCollarGeo, materials.agedBronze);
   hubCollar.position.set(PULLEY_OUTER_OFFSET_X, 0, 0);
   wheelGroup.add(hubCollar);
 
-  for (let s = 0; s < 2; s++) {
+  for (let s = 0; s < 5; s++) {
     const spoke = new THREE.Mesh(spokeGeo, materials.satinBrass);
     spoke.position.set(PULLEY_OUTER_OFFSET_X, 0, 0);
-    spoke.rotation.x = (s * Math.PI) / 2 + Math.PI / 4;
+    spoke.rotation.x = (s * Math.PI * 2) / 5;
     spoke.castShadow = true;
     wheelGroup.add(spoke);
   }
 
   // 4b. Coaxial Inner Counterweight Take-Up Drum (radius = PULLEY_INNER_RADIUS at x = PULLEY_INNER_OFFSET_X)
   const innerDrumProfile: THREE.Vector2[] = [
-    new THREE.Vector2(0.009, -0.011),
-    new THREE.Vector2(PULLEY_INNER_RADIUS + 0.0065, -0.011),
-    new THREE.Vector2(PULLEY_INNER_RADIUS + 0.0065, -0.0075),
-    new THREE.Vector2(PULLEY_INNER_RADIUS - 0.001, -0.0055),
-    new THREE.Vector2(PULLEY_INNER_RADIUS - 0.001, 0.0055),
-    new THREE.Vector2(PULLEY_INNER_RADIUS + 0.0065, 0.0075),
-    new THREE.Vector2(PULLEY_INNER_RADIUS + 0.0065, 0.011),
-    new THREE.Vector2(0.009, 0.011),
+    new THREE.Vector2(0.009, -0.012),
+    new THREE.Vector2(PULLEY_INNER_RADIUS + 0.0075, -0.012),
+    new THREE.Vector2(PULLEY_INNER_RADIUS + 0.0075, -0.0085),
+    new THREE.Vector2(PULLEY_INNER_RADIUS - 0.001, -0.0065),
+    new THREE.Vector2(PULLEY_INNER_RADIUS - 0.001, 0.0065),
+    new THREE.Vector2(PULLEY_INNER_RADIUS + 0.0075, 0.0085),
+    new THREE.Vector2(PULLEY_INNER_RADIUS + 0.0075, 0.012),
+    new THREE.Vector2(0.009, 0.012),
   ];
-  const innerDrumGeo = new THREE.LatheGeometry(innerDrumProfile, 28);
+  const innerDrumGeo = new THREE.LatheGeometry(innerDrumProfile, 30);
   innerDrumGeo.rotateZ(Math.PI * 0.5);
   innerDrumGeo.computeVertexNormals();
   geometries.push(innerDrumGeo);
@@ -350,30 +416,41 @@ export function buildGimbalPulleyAssembly(materials: PendulumMaterials): {
   innerDrumMesh.castShadow = true;
   wheelGroup.add(innerDrumMesh);
 
+  // 5 delicate wound brass wire coils seated snugly inside the inner counterweight take-up drum
+  const coilGeo = new THREE.TorusGeometry(PULLEY_INNER_RADIUS + 0.0014, 0.0022, 8, 28);
+  coilGeo.rotateY(Math.PI * 0.5);
+  geometries.push(coilGeo);
+  for (let c = -2; c <= 2; c++) {
+    const coil = new THREE.Mesh(coilGeo, materials.plumbWire);
+    coil.position.set(PULLEY_INNER_OFFSET_X + c * 0.0026, 0, 0);
+    wheelGroup.add(coil);
+  }
+
   // 5. Rising & Falling Turned Satin-Brass Horological Counterweight Plumb
   // (Rooted in world space outside gimbal group; positioned each frame at cwEyeletWorld)
   const counterweightGroup = new THREE.Group();
   counterweightGroup.name = 'PulleyCounterweight';
 
   // Top suspension eyelet ring at local (0, 0, 0)
-  const cwEyeGeo = new THREE.TorusGeometry(0.0075, 0.0024, 10, 20);
+  const cwEyeGeo = new THREE.TorusGeometry(0.008, 0.0026, 10, 22);
   geometries.push(cwEyeGeo);
   const cwEye = new THREE.Mesh(cwEyeGeo, materials.satinBrass);
   cwEye.position.set(0, -0.005, 0);
   counterweightGroup.add(cwEye);
 
-  // Turned brass cylindrical horological plumb weight (0 -> -COUNTERWEIGHT_LENGTH)
+  // Turned brass cylindrical horological plumb weight (strictly bottom-to-top outward winding)
   const cwProfile: THREE.Vector2[] = [
     new THREE.Vector2(0.001, -COUNTERWEIGHT_LENGTH),
-    new THREE.Vector2(0.012, -COUNTERWEIGHT_LENGTH + 0.014),
-    new THREE.Vector2(0.022, -COUNTERWEIGHT_LENGTH + 0.026),
-    new THREE.Vector2(0.022, -0.028),
-    new THREE.Vector2(0.0185, -0.022),
-    new THREE.Vector2(0.010, -0.015),
-    new THREE.Vector2(0.0055, -0.010),
+    new THREE.Vector2(0.011, -COUNTERWEIGHT_LENGTH + 0.016),
+    new THREE.Vector2(0.025, -COUNTERWEIGHT_LENGTH + 0.032),
+    new THREE.Vector2(0.027, -COUNTERWEIGHT_LENGTH + 0.038),
+    new THREE.Vector2(0.027, -0.032),
+    new THREE.Vector2(0.022, -0.024),
+    new THREE.Vector2(0.012, -0.016),
+    new THREE.Vector2(0.0065, -0.010),
     new THREE.Vector2(0.001, -0.009),
   ];
-  const cwGeo = new THREE.LatheGeometry(cwProfile, 28);
+  const cwGeo = new THREE.LatheGeometry(cwProfile, 30);
   cwGeo.computeVertexNormals();
   geometries.push(cwGeo);
   const cwBody = new THREE.Mesh(cwGeo, materials.satinBrass);
@@ -382,15 +459,16 @@ export function buildGimbalPulleyAssembly(materials: PendulumMaterials): {
   counterweightGroup.add(cwBody);
 
   // Dark oxidized-bronze weighted waist band around the counterweight barrel
-  const cwBandGeo = new THREE.CylinderGeometry(0.0226, 0.0226, 0.016, 28);
+  const cwBandGeo = new THREE.CylinderGeometry(0.0278, 0.0278, 0.018, 30);
   geometries.push(cwBandGeo);
   const cwBand = new THREE.Mesh(cwBandGeo, materials.agedBronze);
-  cwBand.position.set(0, -COUNTERWEIGHT_LENGTH * 0.52, 0);
+  cwBand.position.set(0, -COUNTERWEIGHT_LENGTH * 0.50, 0);
   cwBand.castShadow = true;
   counterweightGroup.add(cwBand);
 
   return {
     group,
+    archFrameGroup,
     swivelGroup,
     wheelGroup,
     counterweightGroup,
@@ -414,17 +492,79 @@ export function buildPendulumBob(materials: PendulumMaterials): {
 
   const geometries: THREE.BufferGeometry[] = [];
 
-  const calciteProfile: THREE.Vector2[] = [
+  // Smooth-curved 8-panel honed Bone-Calcite teardrop (smooth spline normals longitudinally,
+  // crisp vertical ridge bevels between the 8 facets — zero ring creases or diagonal seams!)
+  const bodySpline = new THREE.SplineCurve([
     new THREE.Vector2(0.056, -0.095),
-    new THREE.Vector2(0.084, -0.056),
-    new THREE.Vector2(0.088, -0.012),
-    new THREE.Vector2(0.072, 0.052),
+    new THREE.Vector2(0.082, -0.056),
+    new THREE.Vector2(0.087, -0.012),
+    new THREE.Vector2(0.073, 0.050),
     new THREE.Vector2(0.048, 0.102),
-  ];
-  const rawBody = new THREE.LatheGeometry(calciteProfile, 8);
-  const bodyGeo = rawBody.toNonIndexed();
-  rawBody.dispose();
-  bodyGeo.computeVertexNormals();
+  ]);
+  const vSteps = 16;
+  const facets = 8;
+  const stationPts = bodySpline.getPoints(vSteps);
+  const bPos: number[] = [];
+  const bNorm: number[] = [];
+
+  for (let f = 0; f < facets; f++) {
+    const th0 = (f / facets) * Math.PI * 2;
+    const th1 = ((f + 1) / facets) * Math.PI * 2;
+    const thMid = 0.5 * (th0 + th1);
+    const nxMid = Math.sin(thMid);
+    const nzMid = Math.cos(thMid);
+    const sin0 = Math.sin(th0);
+    const cos0 = Math.cos(th0);
+    const sin1 = Math.sin(th1);
+    const cos1 = Math.cos(th1);
+
+    const facetNorms: THREE.Vector3[] = [];
+    for (let i = 0; i <= vSteps; i++) {
+      const pPrev = stationPts[Math.max(0, i - 1)];
+      const pNext = stationPts[Math.min(vSteps, i + 1)];
+      const dr = pNext.x - pPrev.x;
+      const dy = pNext.y - pPrev.y;
+      const fn = new THREE.Vector3(dy * nxMid, -dr, dy * nzMid).normalize();
+      facetNorms.push(fn);
+    }
+
+    for (let i = 0; i < vSteps; i++) {
+      const r0 = stationPts[i].x;
+      const y0 = stationPts[i].y;
+      const r1 = stationPts[i + 1].x;
+      const y1 = stationPts[i + 1].y;
+      const n0 = facetNorms[i];
+      const n1 = facetNorms[i + 1];
+
+      const l0x = r0 * sin0, l0z = r0 * cos0;
+      const r0x = r0 * sin1, r0z = r0 * cos1;
+      const r1x = r1 * sin1, r1z = r1 * cos1;
+      const l1x = r1 * sin0, l1z = r1 * cos0;
+
+      // Tri 1: L0 -> R0 -> L1 (outward CCW)
+      bPos.push(l0x, y0, l0z, r0x, y0, r0z, l1x, y1, l1z);
+      bNorm.push(n0.x, n0.y, n0.z, n0.x, n0.y, n0.z, n1.x, n1.y, n1.z);
+
+      // Tri 2: R0 -> R1 -> L1 (outward CCW)
+      bPos.push(r0x, y0, r0z, r1x, y1, r1z, l1x, y1, l1z);
+      bNorm.push(n0.x, n0.y, n0.z, n1.x, n1.y, n1.z, n1.x, n1.y, n1.z);
+    }
+
+    // Close bottom and top 8-gon caps inside brass ferrule/tip for watertight signedVol > 0
+    const rBot = stationPts[0].x;
+    const yBot = stationPts[0].y;
+    bPos.push(0, yBot, 0, rBot * sin1, yBot, rBot * cos1, rBot * sin0, yBot, rBot * cos0);
+    bNorm.push(0, -1, 0, 0, -1, 0, 0, -1, 0);
+
+    const rTop = stationPts[vSteps].x;
+    const yTop = stationPts[vSteps].y;
+    bPos.push(0, yTop, 0, rTop * sin0, yTop, rTop * cos0, rTop * sin1, yTop, rTop * cos1);
+    bNorm.push(0, 1, 0, 0, 1, 0, 0, 1, 0);
+  }
+
+  const bodyGeo = new THREE.BufferGeometry();
+  bodyGeo.setAttribute('position', new THREE.Float32BufferAttribute(bPos, 3));
+  bodyGeo.setAttribute('normal', new THREE.Float32BufferAttribute(bNorm, 3));
   geometries.push(bodyGeo);
 
   const bodyMesh = new THREE.Mesh(bodyGeo, materials.boneCalciteBob);
@@ -434,6 +574,7 @@ export function buildPendulumBob(materials: PendulumMaterials): {
 
   // Refined turned satin-brass upper wire ferrule tapering cleanly down to wire diameter (0.0062)
   const capProfile: THREE.Vector2[] = [
+    new THREE.Vector2(0.001, 0.096),
     new THREE.Vector2(0.047, 0.096),
     new THREE.Vector2(0.052, 0.104),
     new THREE.Vector2(0.049, 0.112),
@@ -459,6 +600,7 @@ export function buildPendulumBob(materials: PendulumMaterials): {
     new THREE.Vector2(0.044, -0.114),
     new THREE.Vector2(0.059, -0.095),
     new THREE.Vector2(0.057, -0.090),
+    new THREE.Vector2(0.001, -0.090),
   ];
   const tipGeo = new THREE.LatheGeometry(tipProfile, 32);
   tipGeo.computeVertexNormals();
@@ -984,21 +1126,21 @@ export class OrbitalWakeRibbon {
       const speedNorm = Math.min(1, Math.max(0, (trailSpeeds[ringIdx] - 0.35) / 2.4));
       const charge = trailCharge[ringIdx];
 
-      const headFade = Math.min(1, Math.max(0, (1.0 - frac) / 0.10));
-      const tailFade = Math.pow(frac, 2.8);
-      const alpha = tailFade * headFade * speedNorm * 0.13;
-      const halfWidth = 0.0004 + Math.pow(frac, 2.0) * 0.0024 * (0.35 + 0.65 * speedNorm);
+      const headFade = Math.min(1, Math.max(0, (1.0 - frac) / 0.08));
+      const tailFade = Math.pow(frac, 2.2);
+      const alpha = tailFade * headFade * (0.35 + 0.65 * speedNorm) * 0.28;
+      const halfWidth = 0.0005 + Math.pow(frac, 1.8) * 0.0033 * (0.40 + 0.60 * speedNorm);
 
       let r = this.ochreLin[0] * (1 - frac) + this.calciteLin[0] * frac;
       let g = this.ochreLin[1] * (1 - frac) + this.calciteLin[1] * frac;
       let b = this.ochreLin[2] * (1 - frac) + this.calciteLin[2] * frac;
       if (charge > 0.05) {
-        const w = Math.min(0.62, charge * 0.62);
+        const w = Math.min(0.78, charge * 0.78);
         r = r * (1 - w) + this.cinnabarLin[0] * w;
         g = g * (1 - w) + this.cinnabarLin[1] * w;
         b = b * (1 - w) + this.cinnabarLin[2] * w;
       } else if (charge < -0.05) {
-        const w = Math.min(0.62, -charge * 0.62);
+        const w = Math.min(0.78, -charge * 0.78);
         r = r * (1 - w) + this.verdigrisLin[0] * w;
         g = g * (1 - w) + this.verdigrisLin[1] * w;
         b = b * (1 - w) + this.verdigrisLin[2] * w;
