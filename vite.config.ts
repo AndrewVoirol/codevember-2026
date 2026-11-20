@@ -25,6 +25,21 @@ function discoverMpaInputs(rootDir: string): Record<string, string> {
     }
   }
 
+  // Standalone side-quest MPA routes under side/<slug>/index.html
+  const sideRoot = path.resolve(rootDir, 'side');
+  if (fs.existsSync(sideRoot)) {
+    const sideEntries = fs.readdirSync(sideRoot, { withFileTypes: true });
+    for (const entry of sideEntries) {
+      if (!entry.isDirectory()) continue;
+      if (/^[a-z0-9-]+$/.test(entry.name)) {
+        const htmlPath = path.resolve(sideRoot, entry.name, 'index.html');
+        if (fs.existsSync(htmlPath)) {
+          inputs[`side/${entry.name}`] = htmlPath;
+        }
+      }
+    }
+  }
+
   return inputs;
 }
 

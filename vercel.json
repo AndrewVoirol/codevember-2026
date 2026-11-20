@@ -6,6 +6,7 @@
   "cleanUrls": true,
   "trailingSlash": true,
   "rewrites": [
+    { "source": "/", "has": [{ "type": "host", "value": "sea-of-c\\.andrewvoirol\\.com" }], "destination": "/side/sea-of-c/index.html" },
     { "source": "/", "has": [{ "type": "host", "value": "(?:codevember|codevemeber)-(?:2026|26)-day-01\\.andrewvoirol\\.com" }], "destination": "/01-fold/index.html" },
     { "source": "/", "has": [{ "type": "host", "value": "(?:codevember|codevemeber)-(?:2026|26)-day-02\\.andrewvoirol\\.com" }], "destination": "/02-shatter/index.html" },
     { "source": "/", "has": [{ "type": "host", "value": "(?:codevember|codevemeber)-(?:2026|26)-day-03\\.andrewvoirol\\.com" }], "destination": "/03-melt/index.html" },

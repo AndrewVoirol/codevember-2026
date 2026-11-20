@@ -1,0 +1,299 @@
+:root {
+  --ocean-void: #081326;
+  --ink-ivory: #f5f0e3;
+  --ink-muted: rgba(235, 229, 214, 0.64);
+  --ink-subtle: rgba(232, 226, 212, 0.48);
+  --accent-primary: #f4cc74;
+  --accent-secondary: #6be2d4;
+  --accent-glow: rgba(244, 204, 116, 0.48);
+  --accent-rim: rgba(107, 226, 212, 0.34);
+  --c-color: #ffe4a3;
+  --pill-active-bg: rgba(244, 204, 116, 0.2);
+  --pill-active-border: rgba(244, 204, 116, 0.48);
+  --pill-active-text: #fff3d1;
+  --glass-bg: rgba(8, 19, 36, 0.56);
+  --glass-border: rgba(244, 214, 152, 0.22);
+  --glass-inner: rgba(255, 250, 240, 0.08);
+}
+
+body[data-sea-state='storm'] {
+  --accent-primary: #82d6d0;
+  --accent-secondary: #48b8b8;
+  --accent-glow: rgba(114, 216, 210, 0.44);
+  --accent-rim: rgba(168, 228, 232, 0.32);
+  --c-color: #b8f2ed;
+  --pill-active-bg: rgba(114, 216, 210, 0.2);
+  --pill-active-border: rgba(130, 214, 208, 0.48);
+  --pill-active-text: #e3fbf9;
+  --glass-border: rgba(154, 214, 218, 0.24);
+}
+
+body[data-sea-state='biolum'] {
+  --accent-primary: #4deee0;
+  --accent-secondary: #22c7c0;
+  --accent-glow: rgba(77, 238, 224, 0.54);
+  --accent-rim: rgba(77, 238, 224, 0.4);
+  --c-color: #93fff6;
+  --pill-active-bg: rgba(77, 238, 224, 0.18);
+  --pill-active-border: rgba(77, 238, 224, 0.52);
+  --pill-active-text: #d6fffb;
+  --glass-border: rgba(96, 234, 224, 0.26);
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background-color: var(--ocean-void);
+  color: var(--ink-ivory);
+  font-family: 'SF Pro Display', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#ocean-canvas {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  display: block;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+body.tool-orbit #ocean-canvas {
+  cursor: grab;
+}
+
+body.is-orbiting #ocean-canvas,
+body.tool-orbit #ocean-canvas:active {
+  cursor: grabbing;
+}
+
+/* Minimal coastal-editorial pun caption at top-center (single-line, zero wrap jump) */
+.sea-caption {
+  position: fixed;
+  top: clamp(20px, 3.8vh, 42px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: 94vw;
+  text-align: center;
+  pointer-events: none;
+  z-index: 20;
+}
+
+.sea-headline {
+  font-family: 'SF Pro Display', 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-size: clamp(1.12rem, 2.05vw, 1.72rem);
+  font-weight: 600;
+  letter-spacing: 0.014em;
+  line-height: 1.32;
+  white-space: nowrap;
+  color: var(--ink-ivory);
+  text-shadow:
+    0 2px 18px rgba(5, 13, 28, 0.86),
+    0 1px 3px rgba(4, 10, 22, 0.92);
+}
+
+/* Frame-locked vertical slot-flip driven by --flip-p (0 = "sea", 1 = "C") */
+.pun-slot {
+  --flip-p: 0;
+  position: relative;
+  display: inline-block;
+  vertical-align: baseline;
+  height: 1em;
+  width: calc(1.86em - var(--flip-p) * 0.92em);
+  text-align: center;
+  overflow: visible;
+}
+
+.pun-word {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  line-height: 1;
+  text-align: center;
+  will-change: transform, opacity;
+}
+
+.pun-word-sea {
+  transform: translateY(calc(var(--flip-p) * -0.56em));
+  opacity: calc(1 - var(--flip-p));
+  color: var(--ink-ivory);
+  transition: color 0.35s ease, text-shadow 0.35s ease;
+}
+
+.pun-word-sea.is-warm {
+  color: var(--c-color);
+  text-shadow:
+    0 2px 16px rgba(5, 13, 28, 0.86),
+    0 0 20px var(--accent-glow);
+}
+
+.pun-word-c {
+  transform: translateY(calc((1 - var(--flip-p)) * 0.56em));
+  opacity: var(--flip-p);
+  color: var(--c-color);
+  font-weight: 800;
+  font-size: 1.07em;
+  letter-spacing: -0.01em;
+  text-shadow:
+    0 2px 16px rgba(5, 13, 28, 0.9),
+    0 0 20px var(--accent-glow),
+    0 0 36px var(--accent-rim);
+}
+
+/* Bottom-center translucent marine glass dock & subtle gesture whisper */
+.dock-wrap {
+  position: fixed;
+  bottom: clamp(16px, 2.8vh, 30px);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  z-index: 25;
+  pointer-events: none;
+}
+
+.gesture-hint {
+  font-size: 0.68rem;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+  color: var(--ink-subtle);
+  text-shadow: 0 1px 10px rgba(4, 10, 22, 0.9);
+  white-space: nowrap;
+  opacity: 0.72;
+  transition: opacity 0.65s ease, transform 0.65s ease;
+}
+
+.gesture-hint.is-dismissed {
+  opacity: 0;
+  transform: translateY(4px);
+}
+
+.control-dock {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 6px;
+  border-radius: 999px;
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  box-shadow:
+    0 12px 32px rgba(4, 10, 22, 0.48),
+    inset 0 1px 0 var(--glass-inner);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  opacity: 0.88;
+  transition: opacity 0.25s ease, border-color 0.4s ease;
+}
+
+.control-dock:hover {
+  opacity: 1;
+}
+
+.dock-btn {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ink-muted);
+  font-family: inherit;
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.035em;
+  padding: 6px 13px;
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    color 0.22s ease,
+    background-color 0.25s ease,
+    border-color 0.25s ease,
+    box-shadow 0.25s ease;
+}
+
+.dock-btn:hover {
+  color: var(--ink-ivory);
+  background: rgba(245, 240, 227, 0.07);
+}
+
+.dock-btn.is-active {
+  color: var(--pill-active-text);
+  background: var(--pill-active-bg);
+  border-color: var(--pill-active-border);
+  box-shadow: 0 0 16px rgba(0, 0, 0, 0.15);
+}
+
+.dock-divider {
+  width: 1px;
+  height: 18px;
+  margin: 0 3px;
+  background: rgba(245, 240, 227, 0.16);
+  flex-shrink: 0;
+}
+
+.dock-tool-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  color: var(--ink-ivory);
+  background: rgba(245, 240, 227, 0.05);
+  border-color: rgba(245, 240, 227, 0.12);
+}
+
+.dock-tool-btn.is-orbit {
+  color: var(--pill-active-text);
+  background: rgba(107, 226, 212, 0.16);
+  border-color: rgba(107, 226, 212, 0.44);
+}
+
+.tool-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-secondary);
+  box-shadow: 0 0 8px var(--accent-rim);
+  transition: background-color 0.25s ease, box-shadow 0.25s ease;
+}
+
+.dock-tool-btn.is-orbit .tool-dot {
+  background: var(--accent-primary);
+  box-shadow: 0 0 8px var(--accent-glow);
+}
+
+@media (max-width: 640px) {
+  .gesture-hint {
+    display: none;
+  }
+
+  .dock-btn {
+    font-size: 0.68rem;
+    padding: 5px 9px;
+  }
+}
+
+/* Capture & clean URL hygiene (?capture=1 / ?clean=1 hides caption, dock & hint) */
+body.is-capture .sea-caption,
+body.is-capture .dock-wrap,
+body.is-clean .sea-caption,
+body.is-clean .dock-wrap {
+  display: none;
+}
+
+body.is-capture #ocean-canvas {
+  cursor: none;
+}
