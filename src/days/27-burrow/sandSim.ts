@@ -7,49 +7,27 @@ import {
   CELL_LOOSE_SAND,
   CELL_PACKED_SAND,
   CELL_PEBBLE,
-  DIGGER_COUNT,
   GRID_CELLS,
   GRID_H,
   GRID_W,
+  MAX_3D_GRAINS,
   MAX_CANTILEVER_SPAN,
+  MAX_DUST_MOTES,
   MIN_FULL_ARCH_ROOF,
   PEBBLE_ABUTMENT_BONUS,
   SAND_PIGMENTS,
   SURFACE_FRAC,
   linearToSrgbByte,
 } from './constants';
+import {
+  AntColony,
+  type ColonyGridHost,
+  type ColonyStats,
+  type DiggerAgent,
+  type DiggerState,
+} from './antColony';
 
-export type DiggerState = 'patrol_down' | 'excavate' | 'haul_up' | 'deposit';
-
-export interface DiggerAgent {
-  id: number;
-  /** Continuous grid X coordinate in [0, GRID_W) */
-  x: number;
-  /** Continuous grid Y coordinate in [0, GRID_H) */
-  y: number;
-  /** Slight depth lane in [-1, 1] inside the glass cavity thickness */
-  zLane: number;
-  /** Facing angle in XY grid plane (radians, 0 = +X, PI/2 = +Y) */
-  heading: number;
-  /** Continuous tripod-gait animation phase */
-  walkPhase: number;
-  /** Mandible excavation cycle phase */
-  mandiblePhase: number;
-  state: DiggerState;
-  stateTimer: number;
-  /** Pigment ID of carried sand grain (-1 if empty-handed) */
-  carryingPigment: number;
-  carryingShade: number;
-  /** Current deep excavation destination */
-  targetX: number;
-  targetY: number;
-  /** Preferred surface entrance shaft X */
-  homeShaftX: number;
-  /** Preferred gallery expansion direction (-1 left, +1 right) */
-  branchDir: number;
-  /** Last depth at which this digger excavated a grain */
-  lastExcavatedY: number;
-}
+export type { DiggerAgent, DiggerState, ColonyStats };
 
 export interface SandSimMetrics {
   excavatedCells: number;
@@ -58,10 +36,13 @@ export interface SandSimMetrics {
   diggerCount: number;
   tailingsDeposited: number;
   stepCount: number;
+  active3DGrains: number;
+  activeDustMotes: number;
+  colony: ColonyStats;
 }
 
 export interface SandStepOptions {
-  /** Allow autonomous burrowers to move, excavate, and haul grains (default true) */
+  /** Allow autonomous worker ants to move, excavate, and haul grains (default true) */
   enableDiggers?: boolean;
   /** Run granular arch stability & shear-fault check (default true) */
   enableArchCheck?: boolean;
@@ -74,11 +55,49 @@ export interface PebbleSpec {
   ry: number;
   angle: number;
   pigmentId: number;
+  /** Smooth organic river-stone contour coefficients (shared 1:1 with TSL shader!) */
+  asym1: number;
+  asym2: number;
 }
 
-const GRAVITY_ACCEL = 0.28;
-const MAX_FALL_SPEED = 3.2;
-const RECOMPACT_TICKS = 110;
+/** Live 3D tumbling mineral grain synchronized to active pouring, carving & avalanche cascades */
+export interface Grain3D {
+  active: boolean;
+  x: number;
+  y: number;
+  z: number; // Normalized [-1..+1] inside glass cavity depth
+  vx: number;
+  vy: number;
+  vz: number;
+  rotX: number;
+  rotY: number;
+  rotZ: number;
+  vRot: number;
+  scale: number;
+  pigmentId: number;
+  shade: number;
+  age: number;
+  life: number;
+}
+
+/** Subtle warm mineral dust mote bloomed on heavy avalanche impacts & brisk carving */
+export interface DustMote3D {
+  active: boolean;
+  x: number;
+  y: number;
+  z: number;
+  vx: number;
+  vy: number;
+  size: number;
+  age: number;
+  life: number;
+  pigmentId: number;
+  alpha: number;
+}
+
+const GRAVITY_ACCEL = 0.29;
+const MAX_FALL_SPEED = 3.35;
+const RECOMPACT_TICKS = 115;
 const SKY_MIN_OPEN_SPAN = 22;
 
 /** Deterministic Mulberry32 PRNG (zero allocations) */
@@ -100,13 +119,15 @@ class SeededRng {
 
 /**
  * Pure CPU Granular Sand Terrarium Simulation (`300 x 220` cells):
- * - Stratified geological mineral bands + immovable embedded quartz/basalt river pebbles
- * - Terzaghi granular arching stability vs. Rankine conjugate diagonal shear-fault cave-ins
- * - Exact 1:1 grain mass conservation across gravity settling, avalanches, and digger hauling
- * - Autonomous subterranean burrowing beetles hauling deep colored grains onto surface tailings cones
- * - Zero per-frame heap allocations; packs live RGBA8 DataTextures for WebGPU/TSL parallax rendering
+ * - Stratified geological mineral bands with differential compaction draping around river pebbles
+ * - Terzaghi granular arching stability vs. arched Mohr-Coulomb conjugate shear-fault cave-ins
+ * - Momentum-coupled 2D granular physics (`velX`, `velY`) with impact-triggered slope avalanches,
+ *   pebble-crown ricochet fanning, and exact 1:1 grain mass conservation
+ * - Stigmergic 12-worker-ant colony (`AntColony`) with strict open-corridor BFS navigation,
+ *   rescue-digging after cave-ins, antennae-tap greetings, and crater-rim tailings mounds
+ * - Live zero-GC 3D tumbling mineral granules & soft avalanche dust mote pools
  */
-export class SandSimulation {
+export class SandSimulation implements ColonyGridHost {
   readonly width = GRID_W;
   readonly height = GRID_H;
   readonly cellCount = GRID_CELLS;
@@ -119,6 +140,7 @@ export class SandSimulation {
   readonly bgShade = new Uint8Array(GRID_CELLS);
   readonly bondHealth = new Uint8Array(GRID_CELLS);
   readonly faultDelay = new Uint8Array(GRID_CELLS);
+  readonly velX = new Float32Array(GRID_CELLS);
   readonly velY = new Float32Array(GRID_CELLS);
   readonly restTicks = new Uint16Array(GRID_CELLS);
   readonly movedStamp = new Uint32Array(GRID_CELLS);
@@ -153,11 +175,19 @@ export class SandSimulation {
   // Embedded river pebbles for current seed
   readonly pebbles: PebbleSpec[] = [];
 
-  // Autonomous subterranean digger agents
-  readonly diggers: DiggerAgent[] = [];
+  // Stigmergic worker ant colony (strictly open-corridor navigation + awareness)
+  readonly colony = new AntColony();
+
+  // Zero-GC 3D tumbling sand granules & subtle avalanche dust pools
+  readonly grains3D: Grain3D[] = [];
+  readonly dust3D: DustMote3D[] = [];
+  active3DGrains = 0;
+  activeDustMotes = 0;
+  private grain3DCursor = 0;
+  private dust3DCursor = 0;
 
   // Pre-baked linear RGB + sRGB byte LUT per (pigmentId, shadeByte) for zero-pow O(1) packing
-  private readonly pigmentRgbLinear: Float32Array;
+  readonly pigmentRgbLinear: Float32Array;
   private readonly pigmentContrast: Float32Array;
   private readonly srgbByteLut: Uint8Array;
 
@@ -196,28 +226,53 @@ export class SandSimulation {
       }
     }
 
-    for (let i = 0; i < DIGGER_COUNT; i++) {
-      this.diggers.push({
-        id: i,
-        x: 114,
-        y: 130,
-        zLane: ((i % 2 === 0 ? -1 : 1) * (0.28 + 0.22 * (i >> 1))),
-        heading: -Math.PI * 0.5,
-        walkPhase: i * 1.7,
-        mandiblePhase: i * 0.9,
-        state: 'patrol_down',
-        stateTimer: 0,
-        carryingPigment: -1,
-        carryingShade: 128,
-        targetX: 114,
-        targetY: 96,
-        homeShaftX: 114,
-        branchDir: i % 2 === 0 ? -1 : 1,
-        lastExcavatedY: 96,
+    for (let i = 0; i < MAX_3D_GRAINS; i++) {
+      this.grains3D.push({
+        active: false,
+        x: 0,
+        y: 0,
+        z: 0,
+        vx: 0,
+        vy: 0,
+        vz: 0,
+        rotX: 0,
+        rotY: 0,
+        rotZ: 0,
+        vRot: 0,
+        scale: 1,
+        pigmentId: 2,
+        shade: 128,
+        age: 0,
+        life: 30,
+      });
+    }
+
+    for (let i = 0; i < MAX_DUST_MOTES; i++) {
+      this.dust3D.push({
+        active: false,
+        x: 0,
+        y: 0,
+        z: 0,
+        vx: 0,
+        vy: 0,
+        size: 1,
+        age: 0,
+        life: 45,
+        pigmentId: 1,
+        alpha: 0,
       });
     }
 
     this.reset(initialSeed);
+  }
+
+  /** Backward-compatible getter returning the 12 autonomous worker ants */
+  get diggers(): DiggerAgent[] {
+    return this.colony.ants;
+  }
+
+  nextRandom(): number {
+    return this.rng.next();
   }
 
   /** Cell linear index (y = 0 bottom, y = height - 1 top) */
@@ -226,8 +281,9 @@ export class SandSimulation {
   }
 
   /**
-   * Resets to a freshly stratified geological sand bed with embedded quartz/basalt
-   * river pebbles, a realistic starter vaulted entrance burrow + tailings rim, and 4 diggers.
+   * Resets to a freshly stratified geological sand bed with compacted pebble-draping strata,
+   * embedded quartz/basalt river pebbles, an organic starter ant-farm burrow network
+   * with bulbous chambers & layered volcanic crater rim, and 12 worker ants.
    */
   reset(newSeed = this.seed + 1, seedStarterBurrow = true): void {
     this.seed = newSeed;
@@ -240,6 +296,10 @@ export class SandSimulation {
     this.moveTickId = 1;
     this.pourPigmentPhase = 0;
     this.activeFaultCells = 0;
+    this.active3DGrains = 0;
+    this.activeDustMotes = 0;
+    this.grain3DCursor = 0;
+    this.dust3DCursor = 0;
 
     this.cellType.fill(CELL_EMPTY);
     this.pigmentId.fill(0);
@@ -248,6 +308,7 @@ export class SandSimulation {
     this.bgShade.fill(128);
     this.bondHealth.fill(0);
     this.faultDelay.fill(0);
+    this.velX.fill(0);
     this.velY.fill(0);
     this.restTicks.fill(0);
     this.movedStamp.fill(0);
@@ -255,21 +316,28 @@ export class SandSimulation {
     this.collapseCooldown.fill(0);
     this.pebbles.length = 0;
 
+    for (let i = 0; i < MAX_3D_GRAINS; i++) this.grains3D[i].active = false;
+    for (let i = 0; i < MAX_DUST_MOTES; i++) this.dust3D[i].active = false;
+
+    const baseSurface = Math.round(GRID_H * SURFACE_FRAC); // ~176
+
+    // 1. Choose river pebble geometry specs FIRST so surrounding geological strata
+    //    realistically drape & compact over and underneath each stone!
+    this.generateRiverPebbleSpecs(baseSurface);
+
     // Geological wave phases for organic wavy bedding planes (irrational frequencies)
     const ph1 = this.rng.next() * Math.PI * 2;
     const ph2 = this.rng.next() * Math.PI * 2;
     const ph3 = this.rng.next() * Math.PI * 2;
     const ph4 = this.rng.next() * Math.PI * 2;
 
-    const baseSurface = Math.round(GRID_H * SURFACE_FRAC); // ~176
-
     for (let x = 0; x < GRID_W; x++) {
       const nx = x / GRID_W;
       // Gentle natural dune crest topography across the top horizon
       const crestWave =
-        Math.sin(nx * Math.PI * 2.15 + ph1) * 5.2 +
-        Math.sin(nx * Math.PI * 4.73 + ph2) * 2.4 +
-        Math.cos(nx * Math.PI * 8.31 + ph3) * 1.1;
+        Math.sin(nx * Math.PI * 2.15 + ph1) * 5.0 +
+        Math.sin(nx * Math.PI * 4.73 + ph2) * 2.3 +
+        Math.cos(nx * Math.PI * 8.31 + ph3) * 1.05;
       const colTop = Math.max(
         150,
         Math.min(GRID_H - 28, Math.round(baseSurface + crestWave))
@@ -277,18 +345,35 @@ export class SandSimulation {
 
       for (let y = 0; y < GRID_H; y++) {
         const i = y * GRID_W + x;
-        // Geological fold displacement varies gently with depth so lower strata dip realistically
         const ny = y / GRID_H;
-        const strataWarp =
-          Math.sin(nx * Math.PI * 2.35 + ph1 + ny * 1.4) * 9.5 +
-          Math.sin(nx * Math.PI * 5.17 + ph2 - ny * 2.2) * 4.2 +
-          Math.cos(nx * Math.PI * 11.4 + ph4 + ny * 3.1) * 1.6;
+        let strataWarp =
+          Math.sin(nx * Math.PI * 2.35 + ph1 + ny * 1.4) * 9.2 +
+          Math.sin(nx * Math.PI * 5.17 + ph2 - ny * 2.2) * 4.0 +
+          Math.cos(nx * Math.PI * 11.4 + ph4 + ny * 3.1) * 1.5;
+
+        // Subtle geological differential compaction draping around each embedded river stone
+        for (let k = 0; k < this.pebbles.length; k++) {
+          const p = this.pebbles[k];
+          const dx = x - p.cx;
+          const dy = y - p.cy;
+          const dist2 = dx * dx + dy * dy;
+          const inflR = Math.max(p.rx, p.ry) * 2.3;
+          if (dist2 < inflR * inflR) {
+            const w = Math.exp(-dist2 / (p.rx * p.rx * 1.65));
+            // Strata bow slightly up above pebble crown and tuck gently beneath its base
+            strataWarp -= Math.sign(dy + 0.5) * w * 3.4;
+          }
+        }
+
         const depthFromTop = colTop - y;
         const geoY = y + strataWarp;
 
         const stratum = this.classifyStratum(geoY, depthFromTop, x, y);
         const grainJitter = Math.floor(
-          128 + (this.rng.next() - 0.5) * 118 + Math.sin(geoY * 1.65) * 18
+          128 +
+            (this.rng.next() - 0.5) * 124 +
+            Math.sin(geoY * 1.75) * 18 +
+            Math.cos(x * 0.27 + geoY * 0.65) * 10
         );
         const clampedShade = Math.max(12, Math.min(244, grainJitter));
 
@@ -305,19 +390,23 @@ export class SandSimulation {
       }
     }
 
-    // Embed 8 natural rounded quartz & basalt river pebbles (immovable structural lintels!)
-    this.embedRiverPebbles(baseSurface);
+    // 2. Rasterize the 8 hard river pebbles into the cell grid (immovable structural lintels!)
+    this.rasterizeRiverPebbles();
 
-    // Carve starter arched entrance burrow + branching subterranean galleries + miniature tailings rim
-    this.starterMouthX = 104 + Math.floor(this.rng.next() * 24);
+    // 3. Carve organic ant-farm starter burrow network (curved galleries, pebble arches,
+    //    rounded oval chambers & a layered volcanic crater cone!)
+    this.starterMouthX = 112 + Math.floor(this.rng.next() * 20);
     if (seedStarterBurrow) {
       this.carveStarterBurrow(this.starterMouthX);
     }
 
-    // Place 4 autonomous burrowing beetles inside the starter network
-    this.initializeDiggers(seedStarterBurrow);
-
+    // 4. Compute surface horizons & AIR_SKY / AIR_CAVITY BEFORE placing worker ants
+    //    so every ant snaps cleanly to verified walkable open cells!
     this.recomputeSurfaceAndOpticalFields();
+
+    // 5. Place 12 worker ants strictly inside open walkable cavities / surface crest
+    this.colony.reset(this, this.starterMouthX, seedStarterBurrow);
+
     this.packTextures();
   }
 
@@ -362,54 +451,62 @@ export class SandSimulation {
     return 4;
   }
 
-  private embedRiverPebbles(baseSurface: number): void {
+  private generateRiverPebbleSpecs(baseSurface: number): void {
     // Carefully distributed hard quartz (8) and basalt (9) pebbles serving as natural tunnel lintels
     const specs: Array<[number, number, number, number, number]> = [
-      [54, 124, 11, 7, 8],   // upper-left quartz pebble
-      [148, 128, 12, 7.5, 9], // central-upper basalt lintel right above starter gallery!
-      [234, 132, 10.5, 6.5, 8], // upper-right quartz pebble
-      [82, 76, 13, 8, 9],    // mid-left basalt boulder
-      [196, 86, 11.5, 7, 8], // mid-right quartz pebble
-      [256, 62, 10, 6.5, 9], // lower-right basalt pebble
-      [134, 42, 12.5, 7.5, 8], // deep central quartz pebble
-      [42, 38, 10, 6.5, 9],  // deep left basalt pebble
+      [52, 128, 11.5, 6.8, 8],   // upper-left quartz pebble (left gallery arcs cleanly beneath!)
+      [164, 141, 12.2, 6.8, 9],  // central-upper basalt keystone lintel arching ABOVE the main chamber!
+      [236, 132, 10.5, 6.4, 8],  // upper-right quartz pebble
+      [82, 72, 12.8, 7.6, 9],    // mid-left basalt boulder
+      [216, 86, 11.2, 6.8, 8],   // mid-right quartz pebble
+      [258, 58, 10.0, 6.2, 9],   // lower-right basalt pebble
+      [136, 38, 12.2, 7.2, 8],   // deep central quartz pebble
+      [42, 38, 10.2, 6.3, 9],    // deep left basalt pebble
     ];
 
     for (let k = 0; k < specs.length; k++) {
       const [bx, by, brx, bry, pig] = specs[k];
-      const cx = Math.max(24, Math.min(GRID_W - 24, Math.round(bx + (this.rng.next() - 0.5) * 14)));
-      const cy = Math.max(20, Math.min(baseSurface - 30, Math.round(by + (this.rng.next() - 0.5) * 10)));
+      const cx = Math.max(24, Math.min(GRID_W - 24, Math.round(bx + (this.rng.next() - 0.5) * 12)));
+      const cy = Math.max(20, Math.min(baseSurface - 30, Math.round(by + (this.rng.next() - 0.5) * 9)));
       const rx = brx * (0.9 + this.rng.next() * 0.22);
-      const ry = bry * (0.9 + this.rng.next() * 0.22);
-      const angle = (this.rng.next() - 0.5) * 0.55;
-      const cosA = Math.cos(angle);
-      const sinA = Math.sin(angle);
+      const ry = bry * (0.88 + this.rng.next() * 0.22);
+      const angle = (this.rng.next() - 0.5) * 0.52;
+      // Smooth low-order asymmetric river-cobble taper (strictly organic, zero star harmonics)
+      const asym1 = (this.rng.next() - 0.5) * 0.26; // slight egg-taper along major axis
+      const asym2 = (this.rng.next() - 0.5) * 0.16; // gentle flat belly / water-worn facet
+      this.pebbles.push({ cx, cy, rx, ry, angle, pigmentId: pig, asym1, asym2 });
+    }
+  }
 
-      this.pebbles.push({ cx, cy, rx, ry, angle, pigmentId: pig });
-
-      const pad = Math.ceil(Math.max(rx, ry)) + 2;
-      const x0 = Math.max(1, cx - pad);
-      const x1 = Math.min(GRID_W - 2, cx + pad);
-      const y0 = Math.max(1, cy - pad);
-      const y1 = Math.min(GRID_H - 2, cy + pad);
+  private rasterizeRiverPebbles(): void {
+    for (let k = 0; k < this.pebbles.length; k++) {
+      const p = this.pebbles[k];
+      const cosA = Math.cos(p.angle);
+      const sinA = Math.sin(p.angle);
+      const pad = Math.ceil(Math.max(p.rx, p.ry)) + 3;
+      const x0 = Math.max(1, p.cx - pad);
+      const x1 = Math.min(GRID_W - 2, p.cx + pad);
+      const y0 = Math.max(1, p.cy - pad);
+      const y1 = Math.min(GRID_H - 2, p.cy + pad);
 
       for (let y = y0; y <= y1; y++) {
         for (let x = x0; x <= x1; x++) {
-          const dx = x - cx;
-          const dy = y - cy;
+          const dx = x - p.cx;
+          const dy = y - p.cy;
           const lx = dx * cosA + dy * sinA;
           const ly = -dx * sinA + dy * cosA;
-          // Smooth organically flattened river-stone contour (no polar star harmonics)
-          const warp = 1 + 0.06 * Math.sin(lx * 0.28 + k * 1.7) * Math.cos(ly * 0.34 - k);
-          const normR2 = (lx * lx) / (rx * rx) + (ly * ly) / (ry * ry);
-          if (normR2 <= warp) {
+          const ux = lx / p.rx;
+          const uy = ly / p.ry;
+          // Exact same organic cobble contour evaluated sub-pixel in `materials.ts`!
+          const taperedUy = uy / (1 + p.asym1 * ux);
+          const normR2 = ux * ux + taperedUy * taperedUy + p.asym2 * uy * (1 - ux * ux * 0.5);
+          if (normR2 <= 1.0) {
             const idx = y * GRID_W + x;
             this.cellType[idx] = CELL_PEBBLE;
-            this.pigmentId[idx] = pig;
-            this.bgPigmentId[idx] = pig;
+            this.pigmentId[idx] = p.pigmentId;
+            this.bgPigmentId[idx] = p.pigmentId;
             this.bondHealth[idx] = 255;
-            // Smooth concentric mineral shading inside pebble (brighter center, darker wet rim)
-            const edgeFade = Math.max(0, 1 - normR2);
+            const edgeFade = Math.max(0, 1 - Math.max(0, normR2));
             const speckle = (this.rng.next() - 0.5) * 34;
             const shade = Math.max(
               24,
@@ -423,54 +520,71 @@ export class SandSimulation {
     }
   }
 
+  /**
+   * Carves a naturalistic, lived-in starter ant farm network:
+   * - Gently sinuous arched main entrance shaft + sculpted upper junction vestibule
+   * - Left foraging gallery curving cleanly beneath the upper-left quartz pebble into a rounded chamber
+   * - Right arched main highway tucked under the central basalt lintel with a domed mid-chamber
+   * - Deep lower fork probing the golden Ochre / Kaolin / Burnt Sienna strata
+   * - Rich layered volcanic-cone tailings mound flanking the entrance mouth!
+   */
   private carveStarterBurrow(mouthX: number): void {
-    // Find exact surface row at mouthX
     let mouthY = GRID_H - 1;
     while (mouthY > 20 && this.cellType[mouthY * GRID_W + mouthX] === CELL_EMPTY) {
       mouthY--;
     }
 
-    // 1. Narrow arched main entrance shaft curving smoothly downward
-    const rMain = 5.4;
-    this.carvePolyline(
+    // 1. Sinuous main entrance shaft curving smoothly down into upper vestibule & right highway
+    //    passing cleanly BENEATH the central-upper basalt keystone lintel!
+    this.carveOrganicGallery(
       [
-        [mouthX, mouthY + 2],
-        [mouthX + 2, mouthY - 18],
-        [mouthX + 9, mouthY - 38],
-        [mouthX + 22, mouthY - 56],
-        [mouthX + 38, mouthY - 64], // passes cleanly under the central basalt lintel!
-        [mouthX + 58, mouthY - 78],
-        [mouthX + 74, mouthY - 94],
+        [mouthX, mouthY + 3],
+        [mouthX + 2, mouthY - 14],
+        [mouthX + 7, mouthY - 28],
+        [mouthX + 16, mouthY - 43],
+        [mouthX + 30, mouthY - 56],
+        [mouthX + 46, mouthY - 62], // arches right under the basalt lintel with full clearance!
+        [mouthX + 64, mouthY - 72],
+        [mouthX + 78, mouthY - 86],
+        [mouthX + 86, mouthY - 94],
       ],
-      rMain
+      5.1
     );
 
-    // 2. Left branching vaulted foraging gallery dipping into the Yellow Ochre & Sienna beds
-    this.carvePolyline(
+    // 2. Left branching vaulted gallery meandering beneath upper-left quartz pebble into a bulbous chamber
+    this.carveOrganicGallery(
       [
-        [mouthX + 8, mouthY - 36],
-        [mouthX - 12, mouthY - 48],
-        [mouthX - 30, mouthY - 64],
-        [mouthX - 44, mouthY - 76],
-      ],
-      4.9
-    );
-
-    // 3. Lower arched chamber fork curving beneath the central shaft
-    this.carvePolyline(
-      [
-        [mouthX + 22, mouthY - 56],
-        [mouthX + 12, mouthY - 78],
-        [mouthX + 24, mouthY - 98],
+        [mouthX + 14, mouthY - 41],
+        [mouthX - 2, mouthY - 47],
+        [mouthX - 18, mouthY - 55],
+        [mouthX - 36, mouthY - 64],
+        [mouthX - 50, mouthY - 71],
       ],
       4.8
     );
 
-    // 4. Deposit a natural starter crater rim of deep Burnt Sienna & Yellow Ochre tailings around mouthX
-    for (let k = 0; k < 110; k++) {
+    // 3. Lower central chamber fork dipping toward the deep ochre & terracotta beds
+    this.carveOrganicGallery(
+      [
+        [mouthX + 28, mouthY - 55],
+        [mouthX + 20, mouthY - 72],
+        [mouthX + 16, mouthY - 87],
+        [mouthX + 25, mouthY - 101],
+      ],
+      4.7
+    );
+
+    // 4. Sculpt three cozy rounded ant chambers (width ~13-14 cells -> safely arched under ARCH_SPAN_LIMIT=18!)
+    this.carveOvalChamber(mouthX + 16, mouthY - 43, 7.6, 5.6); // Upper junction vestibule
+    this.carveOvalChamber(mouthX + 46, mouthY - 62, 7.8, 5.8); // Basalt-lintel brood/gathering chamber
+    this.carveOvalChamber(mouthX - 48, mouthY - 70, 7.4, 5.5); // Left granary chamber
+
+    // 5. Deposit a sculpted layered volcanic-cone crater mound of excavated Sienna & Ochre tailings!
+    for (let k = 0; k < 210; k++) {
       const side = k % 2 === 0 ? -1 : 1;
-      const dist = 6 + Math.floor(this.rng.next() * 14);
-      const tx = Math.max(4, Math.min(GRID_W - 5, mouthX + side * dist));
+      // Triangular distribution peaks right beside the shaft rim (dist 6..18)
+      const dist = 6 + Math.floor((this.rng.next() + this.rng.next()) * 8.5);
+      const tx = Math.max(5, Math.min(GRID_W - 6, mouthX + side * dist));
       let ty = GRID_H - 3;
       while (ty > 4 && this.cellType[(ty - 1) * GRID_W + tx] === CELL_EMPTY) {
         ty--;
@@ -478,115 +592,74 @@ export class SandSimulation {
       if (ty < GRID_H - 4 && this.cellType[ty * GRID_W + tx] === CELL_EMPTY) {
         const idx = ty * GRID_W + tx;
         this.cellType[idx] = CELL_LOOSE_SAND;
-        this.pigmentId[idx] = k % 3 === 0 ? 2 : 3; // Yellow Ochre & Burnt Sienna tailings!
-        this.grainShade[idx] = Math.max(40, Math.min(230, Math.round(115 + (this.rng.next() - 0.5) * 70)));
+        // Layered alternating Sienna, Ochre, and occasional Hematite excavated from below!
+        const r = this.rng.next();
+        this.pigmentId[idx] = r < 0.52 ? 3 : r < 0.86 ? 2 : 5;
+        this.grainShade[idx] = Math.max(
+          36,
+          Math.min(232, Math.round(122 + (this.rng.next() - 0.5) * 76))
+        );
         this.bondHealth[idx] = 0;
+        this.velX[idx] = 0;
         this.velY[idx] = 0;
       }
     }
 
-    // Settle the starter tailings gently so the crater cone starts crisp at natural repose
-    for (let s = 0; s < 18; s++) {
+    // Settle starter crater mound gently to natural repose angle
+    for (let s = 0; s < 26; s++) {
       this.stepLooseSandGravity();
     }
   }
 
-  private carvePolyline(pts: Array<[number, number]>, radius: number): void {
+  private carveOrganicGallery(pts: Array<[number, number]>, baseRadius: number): void {
     for (let i = 0; i < pts.length - 1; i++) {
-      this.excavateCapsule(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1], radius, false);
+      const [x0, y0] = pts[i];
+      const [x1, y1] = pts[i + 1];
+      const segs = 3;
+      for (let s = 0; s < segs; s++) {
+        const t0 = s / segs;
+        const t1 = (s + 1) / segs;
+        const sx0 = x0 + (x1 - x0) * t0;
+        const sy0 = y0 + (y1 - y0) * t0;
+        const sx1 = x0 + (x1 - x0) * t1;
+        const sy1 = y0 + (y1 - y0) * t1;
+        // Subtle natural gallery pinch-and-swell (never rigid uniform tubes!)
+        const swell = baseRadius * (0.92 + 0.14 * Math.sin((i * segs + s) * 1.45));
+        this.excavateCapsule(sx0, sy0, sx1, sy1, swell, false);
+      }
     }
   }
 
-  private initializeDiggers(hasStarterBurrow: boolean): void {
-    const mx = this.starterMouthX;
-    let mouthY = Math.round(GRID_H * SURFACE_FRAC);
-    for (let y = GRID_H - 1; y >= 10; y--) {
-      if (this.cellType[y * GRID_W + Math.min(GRID_W - 2, mx + 8)] !== CELL_EMPTY) {
-        mouthY = y;
-        break;
+  private carveOvalChamber(cx: number, cy: number, rx: number, ry: number): void {
+    const x0 = Math.max(4, Math.floor(cx - rx - 1));
+    const x1 = Math.min(GRID_W - 5, Math.ceil(cx + rx + 1));
+    const y0 = Math.max(6, Math.floor(cy - ry - 1));
+    const y1 = Math.min(GRID_H - 12, Math.ceil(cy + ry + 1));
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        const ux = (x - cx) / rx;
+        // Slightly flatter chamber floor, gently vaulted ceiling arch!
+        const uy = (y - cy) / (y < cy ? ry * 0.82 : ry * 1.06);
+        if (ux * ux + uy * uy <= 1.0) {
+          const idx = y * GRID_W + x;
+          if (this.cellType[idx] === CELL_PACKED_SAND || this.cellType[idx] === CELL_LOOSE_SAND) {
+            this.cellType[idx] = CELL_EMPTY;
+            this.bondHealth[idx] = 0;
+            this.faultDelay[idx] = 0;
+            this.velX[idx] = 0;
+            this.velY[idx] = 0;
+            this.restTicks[idx] = 0;
+            this.excavatedCells++;
+          }
+        }
       }
-    }
-
-    const starts: Array<{
-      x: number;
-      y: number;
-      state: DiggerState;
-      carrying: number;
-      tx: number;
-      ty: number;
-      dir: number;
-    }> = hasStarterBurrow
-      ? [
-          // Digger 0: actively hauling a Burnt Sienna grain right up the entrance shaft!
-          {
-            x: mx + 4,
-            y: mouthY - 22,
-            state: 'haul_up',
-            carrying: 3,
-            tx: mx,
-            ty: mouthY + 1,
-            dir: -1,
-          },
-          // Digger 1: excavating the deep right Burnt Sienna / Yellow Ochre gallery tip
-          {
-            x: mx + 72,
-            y: mouthY - 94,
-            state: 'excavate',
-            carrying: -1,
-            tx: mx + 76,
-            ty: mouthY - 96,
-            dir: 1,
-          },
-          // Digger 2: excavating the left Yellow Ochre branch tip
-          {
-            x: mx - 42,
-            y: mouthY - 75,
-            state: 'patrol_down',
-            carrying: -1,
-            tx: mx - 47,
-            ty: mouthY - 78,
-            dir: -1,
-          },
-          // Digger 3: patrolling lower central chamber branch
-          {
-            x: mx + 22,
-            y: mouthY - 95,
-            state: 'haul_up',
-            carrying: 2,
-            tx: mx,
-            ty: mouthY + 1,
-            dir: 1,
-          },
-        ]
-      : [
-          { x: 100, y: mouthY - 30, state: 'patrol_down', carrying: -1, tx: 100, ty: mouthY - 60, dir: -1 },
-          { x: 140, y: mouthY - 40, state: 'patrol_down', carrying: -1, tx: 150, ty: mouthY - 80, dir: 1 },
-          { x: 180, y: mouthY - 35, state: 'patrol_down', carrying: -1, tx: 185, ty: mouthY - 70, dir: 1 },
-          { x: 210, y: mouthY - 25, state: 'patrol_down', carrying: -1, tx: 205, ty: mouthY - 65, dir: -1 },
-        ];
-
-    for (let i = 0; i < this.diggers.length; i++) {
-      const d = this.diggers[i];
-      const st = starts[i % starts.length];
-      d.x = Math.max(6, Math.min(GRID_W - 7, st.x));
-      d.y = Math.max(8, Math.min(GRID_H - 8, st.y));
-      d.state = st.state;
-      d.stateTimer = 0;
-      d.carryingPigment = st.carrying;
-      d.carryingShade = 135;
-      d.targetX = st.tx;
-      d.targetY = st.ty;
-      d.homeShaftX = mx;
-      d.branchDir = st.dir;
-      d.heading = st.state === 'haul_up' ? Math.PI * 0.5 : -Math.PI * 0.45;
-      d.lastExcavatedY = st.ty;
     }
   }
 
   /**
    * Excavates a smooth capsule (tunnel stroke) between grid coordinates `(x0, y0)` and `(x1, y1)`.
    * Never digs through immovable river pebbles (`CELL_PEBBLE`).
-   * Optionally dislodges a few stray roof grains along the carved ceiling lip for organic feel.
+   * Optionally dislodges rim grains & spawns tactile 3D sparkling granules + faint mineral dust.
    */
   excavateCapsule(
     x0: number,
@@ -605,9 +678,11 @@ export class SandSimulation {
     const dy = y1 - y0;
     const lenSq = dx * dx + dy * dy;
     const r2 = radius * radius;
-    const rimR2 = (radius + 1.45) * (radius + 1.45);
+    const rimR2 = (radius + 1.65) * (radius + 1.65);
 
     let removed = 0;
+    let dustPigment = 2;
+
     for (let y = minY; y <= maxY; y++) {
       for (let x = minX; x <= maxX; x++) {
         let t = 0;
@@ -627,18 +702,40 @@ export class SandSimulation {
         if (ct === CELL_PEBBLE || ct === CELL_EMPTY) continue;
 
         if (dist2 <= r2) {
+          const pig = this.pigmentId[idx];
+          const shd = this.grainShade[idx];
+          dustPigment = pig;
           this.cellType[idx] = CELL_EMPTY;
           this.bondHealth[idx] = 0;
           this.faultDelay[idx] = 0;
+          this.velX[idx] = 0;
           this.velY[idx] = 0;
           this.restTicks[idx] = 0;
           removed++;
-        } else if (scatterLooseRim && dist2 <= rimR2 && ct === CELL_PACKED_SAND && ddy > radius * 0.5) {
-          // Small chance to loosen a stray grain on the freshly dug ceiling for live trickle!
-          if (this.rng.next() < 0.085) {
+
+          // Emit a handful of tactile 3D sparkling dislodged sand chips when user actively carves
+          if (scatterLooseRim && this.rng.next() < 0.045) {
+            this.spawnExcavatedGrain3D(
+              x,
+              y,
+              (this.rng.next() - 0.5) * 0.9,
+              -0.1 - this.rng.next() * 0.5,
+              pig,
+              shd
+            );
+          }
+        } else if (
+          scatterLooseRim &&
+          dist2 <= rimR2 &&
+          ct === CELL_PACKED_SAND &&
+          ddy > radius * 0.35
+        ) {
+          // Organic rim raveling: loosen a subtle veil of ceiling & shoulder grains for delightful live trickle!
+          if (this.rng.next() < 0.13) {
             this.cellType[idx] = CELL_LOOSE_SAND;
             this.bondHealth[idx] = 0;
-            this.velY[idx] = 0.25;
+            this.velX[idx] = (this.rng.next() - 0.5) * 0.35;
+            this.velY[idx] = 0.25 + this.rng.next() * 0.2;
           }
         }
       }
@@ -647,6 +744,13 @@ export class SandSimulation {
     if (removed > 0) {
       this.excavatedCells += removed;
       this.texturesDirty = true;
+      this.colony.markTopologyDirty();
+      if (scatterLooseRim) {
+        this.colony.recordDisturbance((x0 + x1) * 0.5, (y0 + y1) * 0.5, radius + 8, 1.3);
+        if (removed >= 16) {
+          this.spawnDustMote((x0 + x1) * 0.5, (y0 + y1) * 0.5, dustPigment, 0.14);
+        }
+      }
     }
     return removed;
   }
@@ -669,6 +773,7 @@ export class SandSimulation {
           this.cellType[idx] = CELL_EMPTY;
           this.bondHealth[idx] = 0;
           this.faultDelay[idx] = 0;
+          this.velX[idx] = 0;
           this.velY[idx] = 0;
           this.restTicks[idx] = 0;
           removed++;
@@ -678,18 +783,19 @@ export class SandSimulation {
     if (removed > 0) {
       this.excavatedCells += removed;
       this.texturesDirty = true;
+      this.colony.markTopologyDirty();
+      this.colony.recordDisturbance((x0 + x1) * 0.5, (y0 + y1) * 0.5, (x1 - x0) * 0.5, 1.4);
     }
     return removed;
   }
 
   /**
-   * Pours a fresh trickling stream of colored mineral sand grains at grid coordinate `(gx, gy)`
-   * (typically in the open air chamber above the sand crest).
-   * Slowly cycles across natural mineral pigments so poured dunes form authentic cross-bedded bands!
+   * Pours a cohesive hourglass-funnel stream of layered mineral sand at grid coordinate `(gx, gy)`.
+   * Cycles gently across natural mineral strata so poured piles build cross-bedded talus dunes
+   * and trickle down open entrance shafts!
    */
   pourSandAt(gx: number, gy: number, grainBudget = 11): number {
-    this.pourPigmentPhase += 0.018;
-    // Cycle smoothly through natural mineral sands (Yellow Ochre, Burnt Sienna, Bone Calcite, Raw Umber, Warm Kaolin)
+    this.pourPigmentPhase += 0.016;
     const pourPalette = [2, 3, 0, 1, 4, 2, 5];
     const basePigment = pourPalette[Math.floor(this.pourPigmentPhase) % pourPalette.length];
 
@@ -698,31 +804,43 @@ export class SandSimulation {
 
     let spawned = 0;
     for (let k = 0; k < grainBudget; k++) {
-      const ox = Math.round((this.rng.next() - 0.5) * 6.0);
-      const oy = Math.round((this.rng.next() - 0.5) * 3.0);
+      // Focused triangular/hourglass nozzle dispersion (not a scattered rectangular rain box!)
+      const ox = Math.round(((this.rng.next() + this.rng.next()) - 1.0) * 3.1);
+      const oy = Math.round((this.rng.next() - 0.5) * 2.4);
       const x = Math.max(3, Math.min(GRID_W - 4, cx + ox));
       const y = Math.max(4, Math.min(GRID_H - 2, cy + oy));
       const idx = y * GRID_W + x;
       if (this.cellType[idx] === CELL_EMPTY) {
-        this.cellType[idx] = CELL_LOOSE_SAND;
-        // Subtle 15% inter-grain mineral mixture for natural granular richness
-        this.pigmentId[idx] =
+        const pig =
           this.rng.next() < 0.14
             ? pourPalette[(Math.floor(this.pourPigmentPhase) + 1) % pourPalette.length]
             : basePigment;
-        this.grainShade[idx] = Math.max(
+        const shd = Math.max(
           28,
           Math.min(238, Math.round(128 + (this.rng.next() - 0.5) * 96))
         );
+        this.cellType[idx] = CELL_LOOSE_SAND;
+        this.pigmentId[idx] = pig;
+        this.grainShade[idx] = shd;
         this.bondHealth[idx] = 0;
         this.faultDelay[idx] = 0;
-        this.velY[idx] = 0.45 + this.rng.next() * 0.45;
+        const vx = (this.rng.next() - 0.5) * 0.42;
+        const vy = 0.52 + this.rng.next() * 0.48;
+        this.velX[idx] = vx;
+        this.velY[idx] = vy;
         this.restTicks[idx] = 0;
         spawned++;
+
+        // Pair poured stream with glistening 3D tumbling granules inside the glass gap
+        if (this.rng.next() < 0.45) {
+          this.spawnExcavatedGrain3D(x, y, vx * 0.7, -vy * 0.75, pig, shd);
+        }
       }
     }
     if (spawned > 0) {
       this.texturesDirty = true;
+      this.colony.markTopologyDirty();
+      this.colony.recordDisturbance(cx, Math.max(20, this.topSolidY[cx] || cy), 10, 0.45);
     }
     return spawned;
   }
@@ -737,7 +855,7 @@ export class SandSimulation {
 
   /**
    * Advances granular physics, Terzaghi arching collapse, shear-fault release,
-   * and autonomous subterranean burrowers by one fixed simulation step (~1/60s).
+   * 3D tumbling granules/dust, and the 12-worker-ant colony by one fixed simulation step (~1/60s).
    */
   step(options?: SandStepOptions): void {
     const enableDiggers = options?.enableDiggers ?? true;
@@ -750,7 +868,7 @@ export class SandSimulation {
       if (this.collapseCooldown[x] > 0) this.collapseCooldown[x]--;
     }
 
-    // 1. Arch stability & Rankine shear-fault propagation (every 2 steps for crisp speed + immediate trigger on step 1)
+    // 1. Arch stability & Mohr-Coulomb shear-fault propagation (every 2 steps, immediate on step 1)
     if (enableArchCheck && (this.stepCount & 1) === 1) {
       this.evaluateArchStabilityAndFaults();
     }
@@ -758,18 +876,22 @@ export class SandSimulation {
     // 2. Release queued shear-fault cells layer-by-layer (progressive cracking cascade!)
     this.advanceFaultWave();
 
-    // 3. Exact mass-conserving loose sand gravity, free-fall acceleration & repose avalanching
+    // 3. Exact mass-conserving momentum-coupled loose sand gravity & kinetic avalanching
     const movedGrains = this.stepLooseSandGravity();
 
-    // 4. Autonomous subterranean burrowing beetles (patrol -> excavate -> haul up -> deposit tailings)
-    if (enableDiggers) {
-      this.stepDiggers();
-    }
+    // 4. Advance live 3D tumbling mineral granules & subtle avalanche dust motes
+    this.stepParticles3D();
 
-    // 5. Fast O(W) column surface update so diggers & pour queries stay accurate every tick
+    // 5. Fast O(W) column surface update before ant colony step
     if (movedGrains > 0 || this.texturesDirty) {
       this.updateTopSolidColumns();
+      if (movedGrains > 8) this.colony.markTopologyDirty();
       this.texturesDirty = true;
+    }
+
+    // 6. Stigmergic worker ant colony (strict open-corridor BFS, rescue digging, antennae greetings)
+    if (enableDiggers) {
+      this.colony.step(this);
     }
   }
 
@@ -782,7 +904,136 @@ export class SandSimulation {
     this.packTextures();
   }
 
-  /** Lightweight per-step top solid surface tracker for diggers & air-zone detection. */
+  /** Spawns a 3D tumbling mineral sand granule inside the glass slice cavity (zero GC). */
+  spawnExcavatedGrain3D(
+    gx: number,
+    gy: number,
+    vx: number,
+    vy: number,
+    pigmentId: number,
+    shade: number
+  ): void {
+    const g = this.grains3D[this.grain3DCursor];
+    this.grain3DCursor = (this.grain3DCursor + 1) % MAX_3D_GRAINS;
+    g.active = true;
+    g.x = gx + (this.rng.next() - 0.5) * 0.9;
+    g.y = gy + (this.rng.next() - 0.5) * 0.9;
+    g.z = (this.rng.next() - 0.5) * 1.48; // Distributed nicely across front-to-back glass thickness!
+    g.vx = vx;
+    g.vy = vy;
+    g.vz = (this.rng.next() - 0.5) * 0.035;
+    g.rotX = this.rng.next() * Math.PI * 2;
+    g.rotY = this.rng.next() * Math.PI * 2;
+    g.rotZ = this.rng.next() * Math.PI * 2;
+    g.vRot = (this.rng.next() < 0.5 ? -1 : 1) * (0.14 + this.rng.next() * 0.28);
+    g.scale = 0.72 + this.rng.next() * 0.65;
+    g.pigmentId = pigmentId;
+    g.shade = shade;
+    g.age = 0;
+    g.life = 28 + Math.floor(this.rng.next() * 34);
+  }
+
+  /** Spawns a delicate, subtle warm mineral dust wisp inside a collapsing cavity (zero GC). */
+  private spawnDustMote(gx: number, gy: number, pigmentId: number, alpha = 0.14): void {
+    const m = this.dust3D[this.dust3DCursor];
+    this.dust3DCursor = (this.dust3DCursor + 1) % MAX_DUST_MOTES;
+    m.active = true;
+    m.x = gx + (this.rng.next() - 0.5) * 6;
+    m.y = gy + (this.rng.next() - 0.5) * 4;
+    m.z = (this.rng.next() - 0.5) * 1.1;
+    m.vx = (this.rng.next() - 0.5) * 0.22;
+    m.vy = 0.04 + this.rng.next() * 0.1;
+    m.size = 0.42 + this.rng.next() * 0.48;
+    m.age = 0;
+    m.life = 32 + Math.floor(this.rng.next() * 24);
+    m.pigmentId = pigmentId;
+    m.alpha = Math.min(0.18, alpha);
+  }
+
+  private stepParticles3D(): void {
+    const ct = this.cellType;
+    let activeG = 0;
+
+    for (let i = 0; i < MAX_3D_GRAINS; i++) {
+      const g = this.grains3D[i];
+      if (!g.active) continue;
+      g.age++;
+      if (g.age >= g.life) {
+        g.active = false;
+        continue;
+      }
+
+      g.vy = Math.max(-3.2, g.vy - 0.16);
+      g.vx *= 0.97;
+      const nx = g.x + g.vx;
+      const ny = g.y + g.vy;
+      g.z += g.vz;
+      if (g.z > 0.82 || g.z < -0.82) {
+        g.z = Math.max(-0.82, Math.min(0.82, g.z));
+        g.vz *= -0.45;
+      }
+
+      const ix = Math.round(nx);
+      const iy = Math.round(ny);
+      if (ix < 2 || ix >= GRID_W - 2 || iy < 2 || iy >= GRID_H - 2) {
+        g.active = false;
+        continue;
+      }
+
+      const cell = ct[iy * GRID_W + ix];
+      // Collide only against static solid surfaces (packed sand, pebbles, or resting loose piles),
+      // NEVER killing airborne granules against adjacent falling grains traveling in the same stream!
+      const hitSolid =
+        cell === CELL_PACKED_SAND ||
+        cell === CELL_PEBBLE ||
+        (cell === CELL_LOOSE_SAND && this.velY[iy * GRID_W + ix] < 0.25);
+      if (hitSolid) {
+        // Real lively pebble or slope bounce!
+        if (cell === CELL_PEBBLE && Math.abs(g.vy) > 0.65 && g.age < g.life - 8) {
+          g.vy = Math.abs(g.vy) * 0.36;
+          g.vx += (g.vx >= 0 ? 1 : -1) * (0.35 + this.rng.next() * 0.45);
+          g.vRot *= -1.1;
+        } else if (Math.abs(g.vy) > 1.1 && g.age < g.life - 10) {
+          // Tiny energetic sand-splash rebound on fast impact
+          g.vy = Math.abs(g.vy) * 0.22;
+          g.vx += (this.rng.next() - 0.5) * 0.8;
+          g.age += 6;
+        } else {
+          g.active = false;
+          continue;
+        }
+      } else {
+        g.x = nx;
+        g.y = ny;
+      }
+
+      g.rotX += g.vRot;
+      g.rotY += g.vRot * 0.72;
+      g.rotZ += g.vRot * 0.45;
+      activeG++;
+    }
+    this.active3DGrains = activeG;
+
+    let activeD = 0;
+    for (let i = 0; i < MAX_DUST_MOTES; i++) {
+      const m = this.dust3D[i];
+      if (!m.active) continue;
+      m.age++;
+      if (m.age >= m.life) {
+        m.active = false;
+        continue;
+      }
+      m.vx *= 0.94;
+      m.vy = m.vy * 0.93 - 0.009; // Gently drifts upward on impact then settles
+      m.x = Math.max(3, Math.min(GRID_W - 4, m.x + m.vx));
+      m.y = Math.max(3, Math.min(GRID_H - 4, m.y + m.vy));
+      m.size += 0.018;
+      activeD++;
+    }
+    this.activeDustMotes = activeD;
+  }
+
+  /** Lightweight per-step top solid surface tracker for ants & air-zone detection. */
   private updateTopSolidColumns(): void {
     const ct = this.cellType;
     const vy = this.velY;
@@ -803,12 +1054,11 @@ export class SandSimulation {
   /**
    * Terzaghi Trapdoor Arching & Conjugate Shear-Fault Stability Evaluator:
    * - Narrow vaulted arches (span <= ARCH_SPAN_LIMIT, boosted near pebbles/walls) stay intact!
-   * - Over-wide flat chambers exceed local arch span -> nucleate a conjugate diagonal
-   *   Mohr-Coulomb slip wedge (`~65 deg`) propagating upward in cascading faulted strata bands!
+   * - Over-wide flat chambers exceed local arch span -> nucleate an arched Mohr-Coulomb
+   *   conjugate slip wedge (`~64 deg`) propagating upward in cascading faulted strata bands!
    * - Detached zero-abutment floating islands immediately convert to loose falling sand.
    */
   private evaluateArchStabilityAndFaults(): void {
-    // Gently decay residual stress visual field
     let stressChanged = false;
     for (let i = 0; i < GRID_CELLS; i++) {
       const st = this.stressField[i];
@@ -822,7 +1072,6 @@ export class SandSimulation {
     const ct = this.cellType;
     const fd = this.faultDelay;
 
-    // Scan horizontal soffit rows bottom-to-top (y = 2..GRID_H - 3)
     for (let y = 2; y < GRID_H - 2; y++) {
       const rowOff = y * GRID_W;
       const belowOff = (y - 1) * GRID_W;
@@ -830,7 +1079,6 @@ export class SandSimulation {
 
       while (x < GRID_W - 1) {
         const i = rowOff + x;
-        // Identify an unsupported PACKED_SAND ceiling cell (below is EMPTY or rapidly falling LOOSE_SAND)
         const belowType = ct[belowOff + x];
         const isUnsupported =
           ct[i] === CELL_PACKED_SAND &&
@@ -842,7 +1090,6 @@ export class SandSimulation {
           continue;
         }
 
-        // Measure contiguous horizontal unsupported ceiling run [spanL..spanR]
         const spanL = x;
         while (x < GRID_W - 1) {
           const xi = rowOff + x;
@@ -857,7 +1104,6 @@ export class SandSimulation {
         const spanR = x - 1;
         const span = spanR - spanL + 1;
 
-        // Inspect left & right end conditions (abutment vs. open cantilever)
         const leftIdx = rowOff + (spanL - 1);
         const rightIdx = rowOff + (spanR + 1);
         const leftType = spanL <= 1 ? CELL_PEBBLE : ct[leftIdx];
@@ -875,17 +1121,17 @@ export class SandSimulation {
         const leftIsHard = spanL <= 1 || leftType === CELL_PEBBLE;
         const rightIsHard = spanR >= GRID_W - 2 || rightType === CELL_PEBBLE;
 
-        // 1-cell hanging tooth stalactite (empty on both left and right) -> gently self-round!
+        // 1-3 cell hanging tooth stalactite (empty on both left and right) -> self-rounds naturally!
         if (!leftSupported && !rightSupported) {
           if (span <= 3) {
             for (let cx = spanL; cx <= spanR; cx++) {
               ct[rowOff + cx] = CELL_LOOSE_SAND;
               this.bondHealth[rowOff + cx] = 0;
-              this.velY[rowOff + cx] = 0.25;
+              this.velX[rowOff + cx] = (this.rng.next() - 0.5) * 0.25;
+              this.velY[rowOff + cx] = 0.28;
             }
             this.texturesDirty = true;
           } else {
-            // Detached floating sand island with zero lateral support -> drop whole island!
             this.triggerShearWedgeCollapse(spanL, spanR, y, true);
           }
           continue;
@@ -894,7 +1140,6 @@ export class SandSimulation {
         // Single-sided cantilever overhang ledge
         if (!leftSupported || !rightSupported) {
           if (span > MAX_CANTILEVER_SPAN) {
-            // Shed outer cantilevered lip beyond MAX_CANTILEVER_SPAN
             const dropStart = !leftSupported ? spanL : spanL + MAX_CANTILEVER_SPAN;
             const dropEnd = !leftSupported ? spanR - MAX_CANTILEVER_SPAN : spanR;
             const dropSpan = dropEnd - dropStart + 1;
@@ -902,7 +1147,6 @@ export class SandSimulation {
               this.triggerShearWedgeCollapse(dropStart, dropEnd, y, false);
             } else {
               for (let cx = dropStart; cx <= dropEnd; cx++) {
-                // Shed thin overhanging tip + up to 3 rows above
                 for (let dy = 0; dy < 4 && y + dy < GRID_H - 1; dy++) {
                   const ti = (y + dy) * GRID_W + cx;
                   if (ct[ti] === CELL_PACKED_SAND) {
@@ -927,12 +1171,10 @@ export class SandSimulation {
         const roofQ3 = this.measureRoofThickness((midX + spanR) >> 1, y);
         const minRoof = Math.min(roofMid, roofQ1, roofQ3);
 
-        // Compute effective Terzaghi arch span limit
         let maxSpan = ARCH_SPAN_LIMIT;
         if (leftIsHard) maxSpan += PEBBLE_ABUTMENT_BONUS;
         if (rightIsHard) maxSpan += PEBBLE_ABUTMENT_BONUS;
 
-        // Also check if a hard pebble sits right inside the roof arch within 4 cells above center (lintel reinforcement!)
         let hasOverheadPebbleLintel = false;
         for (let dy = 1; dy <= 5 && y + dy < GRID_H - 1; dy++) {
           if (ct[(y + dy) * GRID_W + midX] === CELL_PEBBLE) {
@@ -942,17 +1184,14 @@ export class SandSimulation {
         }
         if (hasOverheadPebbleLintel) maxSpan += PEBBLE_ABUTMENT_BONUS;
 
-        // Thin crust cannot sustain full compressive arch thrust
         if (minRoof < MIN_FULL_ARCH_ROOF) {
           const crustScale = Math.max(0.28, minRoof / MIN_FULL_ARCH_ROOF);
           maxSpan = Math.max(4, Math.floor(maxSpan * crustScale));
         }
 
         if (span > maxSpan) {
-          // Exceeded granular arching stability -> initiate Rankine diagonal shear-fault collapse!
           this.triggerShearWedgeCollapse(spanL, spanR, y, false);
         } else if (span >= maxSpan - 4) {
-          // Near arching limit: mark subtle compressive-shear stress lines along ceiling
           const stressNorm = Math.round(((span - (maxSpan - 5)) / 5) * 195);
           for (let cx = spanL; cx <= spanR; cx++) {
             const idx = rowOff + cx;
@@ -981,9 +1220,10 @@ export class SandSimulation {
   }
 
   /**
-   * Nucleates a realistic conjugate diagonal shear-fault slip wedge (`~64–68 deg` Mohr-Coulomb
-   * fracture planes) upward from an over-wide unsupported span `[spanL..spanR]` at row `baseY`.
-   * Staggers `faultDelay` upward by row so strata visibly crack and slump in cascading bands!
+   * Nucleates a conjugate curved Mohr-Coulomb shear-fault slip arch upward from an over-wide
+   * unsupported span `[spanL..spanR]` at row `baseY`.
+   * Staggers `faultDelay` progressively upward and outward from the keystone so strata crack,
+   * delaminate in intact bands, and cascade down with dust puffs & colony disturbance!
    */
   private triggerShearWedgeCollapse(
     spanL: number,
@@ -995,7 +1235,6 @@ export class SandSimulation {
     const fd = this.faultDelay;
     const midX = (spanL + spanR) >> 1;
 
-    // Count distinct collapse event (debounced across nearby columns for 24 ticks so one slump = 1 event)
     let inCooldown = false;
     const coolL = Math.max(0, midX - 10);
     const coolR = Math.min(GRID_W - 1, midX + 10);
@@ -1008,19 +1247,23 @@ export class SandSimulation {
 
     let queuedCells = 0;
     const span = spanR - spanL + 1;
-    // Shear plane slope: dx/dy ~ 0.40 (converges upward into natural gothic arch OR breaks surface!)
-    const slope = isFloatingIsland ? 0.14 : 0.38;
-    const maxWedgeH = isFloatingIsland ? 42 : Math.min(GRID_H - 2 - baseY, Math.ceil(span * 1.35) + 8);
+    const halfSpan = span * 0.5;
+    const baseSlope = isFloatingIsland ? 0.14 : 0.35;
+    const maxWedgeH = isFloatingIsland
+      ? 44
+      : Math.min(GRID_H - 2 - baseY, Math.ceil(span * 1.42) + 10);
 
-    // Track per-column pebble shelter (hard stones shield sand directly above them!)
     for (let dy = 0; dy <= maxWedgeH; dy++) {
       const y = baseY + dy;
       if (y >= GRID_H - 1) break;
 
-      const jitterL = Math.sin(y * 0.47 + spanL * 0.13) * 1.25;
-      const jitterR = Math.cos(y * 0.53 + spanR * 0.17) * 1.25;
-      const rowL = Math.max(1, Math.floor(spanL + dy * slope + jitterL));
-      const rowR = Math.min(GRID_W - 2, Math.ceil(spanR - dy * slope + jitterR));
+      // Gently curved parabolic gothic-arch convergence (looks vastly more geological than straight lines!)
+      const hNorm = dy / Math.max(1, maxWedgeH);
+      const archCurve = dy * baseSlope * (0.85 + 0.32 * hNorm);
+      const jitterL = Math.sin(y * 0.43 + spanL * 0.13) * 1.45;
+      const jitterR = Math.cos(y * 0.49 + spanR * 0.17) * 1.45;
+      const rowL = Math.max(1, Math.floor(spanL + archCurve + jitterL));
+      const rowR = Math.min(GRID_W - 2, Math.ceil(spanR - archCurve + jitterR));
       if (rowL > rowR) break;
 
       const rowOff = y * GRID_W;
@@ -1031,7 +1274,7 @@ export class SandSimulation {
         if (ct[idx] === CELL_PEBBLE) continue;
         if (ct[idx] !== CELL_PACKED_SAND) continue;
 
-        // Check if sheltered directly beneath by an embedded pebble within 4 cells
+        // Embedded river stones shelter sand resting directly on top of them
         let shieldedByPebble = false;
         for (let py = 1; py <= 4 && y - py >= baseY; py++) {
           if (ct[(y - py) * GRID_W + x] === CELL_PEBBLE) {
@@ -1042,11 +1285,15 @@ export class SandSimulation {
         if (shieldedByPebble) continue;
 
         anySandInRow = true;
-        // Progressive upward crack release: soffit breaks first (1..3 ticks), upper strata follow!
-        const edgeLag = Math.min(x - rowL, rowR - x) < 2 ? 1 : 0;
+        // Center keystone breaks FIRST, then shoulders unzip outward + upward in staggered strata waves!
+        const centerDistNorm = Math.abs(x - midX) / Math.max(1, halfSpan);
+        const shoulderLag = Math.floor(centerDistNorm * 3.2);
         const delay = Math.max(
           1,
-          Math.min(44, 1 + Math.floor(dy * 0.42) + edgeLag + (this.rng.next() < 0.35 ? 1 : 0))
+          Math.min(
+            48,
+            1 + Math.floor(dy * 0.44) + shoulderLag + (this.rng.next() < 0.35 ? 1 : 0)
+          )
         );
         if (fd[idx] === 0) {
           fd[idx] = delay;
@@ -1065,6 +1312,13 @@ export class SandSimulation {
       this.collapseEvents++;
       for (let cx = Math.max(0, spanL); cx <= Math.min(GRID_W - 1, spanR); cx++) {
         this.collapseCooldown[cx] = 24;
+      }
+      this.colony.recordDisturbance(midX, baseY, Math.min(28, span * 0.7), 2.0);
+      // Spawn subtle mineral dust wisps right along the cracking fault line!
+      const dustPig = this.pigmentId[baseY * GRID_W + midX] || 2;
+      for (let d = 0; d < 2; d++) {
+        const dx = spanL + this.rng.next() * span;
+        this.spawnDustMote(dx, baseY + 2, dustPig, 0.15);
       }
       this.texturesDirty = true;
     }
@@ -1088,9 +1342,19 @@ export class SandSimulation {
         if (ct[i] === CELL_PACKED_SAND) {
           ct[i] = CELL_LOOSE_SAND;
           this.bondHealth[i] = 0;
-          this.velY[i] = 0.42 + this.rng.next() * 0.35;
+          const vx = (this.rng.next() - 0.5) * 0.45;
+          const vy = 0.44 + this.rng.next() * 0.36;
+          this.velX[i] = vx;
+          this.velY[i] = vy;
           this.restTicks[i] = 0;
           this.texturesDirty = true;
+
+          // Sample a vibrant scatter of released fault grains into the 3D tumbling granule layer!
+          if (this.rng.next() < 0.085) {
+            const x = i % GRID_W;
+            const y = (i - x) / GRID_W;
+            this.spawnExcavatedGrain3D(x, y, vx * 0.9, -vy * 0.75, this.pigmentId[i], this.grainShade[i]);
+          }
         }
       }
     }
@@ -1098,13 +1362,16 @@ export class SandSimulation {
   }
 
   /**
-   * Moves `LOOSE_SAND` grains downward under gravity with acceleration & natural ~35 deg repose avalanching.
+   * Moves `LOOSE_SAND` grains downward under gravity with true 2D momentum (`velX`, `velY`),
+   * pebble-crown ricochet fanning, impact-coupled slope avalanches, and ~33-36 deg repose dunes.
    * Strictly 1-to-1 cell swaps (`src -> EMPTY`, `EMPTY -> dst`): ZERO grains vanish or duplicate!
    */
   private stepLooseSandGravity(): number {
     this.moveTickId++;
     const stamp = this.moveTickId;
     const ct = this.cellType;
+    const vxArr = this.velX;
+    const vyArr = this.velY;
     const leftToRight = (this.stepCount & 1) === 0;
     let fallingCount = 0;
     let movedCount = 0;
@@ -1116,29 +1383,89 @@ export class SandSimulation {
         const idx = rowOff + x;
         if (ct[idx] !== CELL_LOOSE_SAND || this.movedStamp[idx] === stamp) continue;
 
-        // 1. Direct vertical free-fall (accelerated under gravity!)
         const belowIdx = idx - GRID_W;
-        if (ct[belowIdx] === CELL_EMPTY) {
-          let vy = this.velY[idx] + GRAVITY_ACCEL;
+        const belowType = ct[belowIdx];
+
+        // 1. Direct free-fall with gravity acceleration & subtle lateral drift (`velX`)!
+        if (belowType === CELL_EMPTY) {
+          let vy = vyArr[idx] + GRAVITY_ACCEL;
           if (vy > MAX_FALL_SPEED) vy = MAX_FALL_SPEED;
+          const vx = vxArr[idx] * 0.94;
           const maxSteps = Math.max(1, Math.floor(vy));
 
+          let destX = x;
           let destY = y;
           for (let s = 1; s <= maxSteps; s++) {
             const ny = y - s;
-            if (ny < 0 || ct[ny * GRID_W + x] !== CELL_EMPTY) break;
+            if (ny < 0) break;
+            // Subtle lateral momentum drift during air fall (strictly checking open cells!)
+            let candX = destX;
+            if (Math.abs(vx) > 0.35 && s === 1) {
+              const tryX = destX + (vx > 0 ? 1 : -1);
+              if (
+                tryX >= 1 &&
+                tryX < GRID_W - 1 &&
+                ct[destY * GRID_W + tryX] === CELL_EMPTY &&
+                ct[ny * GRID_W + tryX] === CELL_EMPTY
+              ) {
+                candX = tryX;
+              }
+            }
+            if (ct[ny * GRID_W + candX] !== CELL_EMPTY) break;
+            destX = candX;
             destY = ny;
           }
 
-          const destIdx = destY * GRID_W + x;
-          this.moveGrain(idx, destIdx, vy, stamp);
+          const destIdx = destY * GRID_W + destX;
+          this.moveGrain(idx, destIdx, vx, vy, stamp);
+          // Sample brisk avalanche grains into the sparkling 3D tumbling granule layer!
+          if (vy > 1.35 && this.active3DGrains < MAX_3D_GRAINS - 20 && this.rng.next() < 0.032) {
+            this.spawnExcavatedGrain3D(
+              destX,
+              destY,
+              vx * 0.8 + (this.rng.next() - 0.5) * 0.35,
+              -vy * 0.55,
+              this.pigmentId[destIdx],
+              this.grainShade[destIdx]
+            );
+          }
           fallingCount++;
           movedCount++;
           continue;
         }
 
-        // 2. Diagonal repose slide (~45 deg primary + gentle ~35 deg 2:1 roll on loose crests)
-        const dirFirst = this.rng.next() < 0.5 ? -1 : 1;
+        // 2. Impact energy conversion & slope avalanching!
+        //    Fast-falling grains impacting solid ground or river pebbles convert downward kinetic
+        //    energy into lively lateral tumbling velocity (`velX`) and wake adjacent steep loose slopes!
+        let curVx = vxArr[idx];
+        const curVy = vyArr[idx];
+
+        if (curVy > 0.85) {
+          // Convert portion of downward impact momentum into lateral roll velocity
+          const scatterSign =
+            Math.abs(curVx) > 0.1 ? Math.sign(curVx) : this.rng.next() < 0.5 ? -1 : 1;
+          const boost = belowType === CELL_PEBBLE ? 0.85 : 0.52;
+          curVx = curVx * 0.5 + scatterSign * Math.min(1.6, curVy * boost);
+
+          // Spawn a crisp splash of dust on heavy multi-cell avalanche impact
+          if (curVy > 2.1 && this.rng.next() < 0.014) {
+            this.spawnDustMote(x, y + 1, this.pigmentId[idx], 0.22);
+          }
+
+          // Kinetic impact wake-up: jostle adjacent resting loose grains on steep shoulders
+          if (x > 2 && ct[idx - 1] === CELL_LOOSE_SAND && vyArr[idx - 1] < 0.2) {
+            vxArr[idx - 1] -= 0.45;
+            vyArr[idx - 1] = Math.max(vyArr[idx - 1], 0.32);
+          }
+          if (x < GRID_W - 3 && ct[idx + 1] === CELL_LOOSE_SAND && vyArr[idx + 1] < 0.2) {
+            vxArr[idx + 1] += 0.45;
+            vyArr[idx + 1] = Math.max(vyArr[idx + 1], 0.32);
+          }
+        }
+
+        // Preferred slide direction honors existing lateral momentum `velX`!
+        const dirFirst =
+          Math.abs(curVx) > 0.14 ? (curVx > 0 ? 1 : -1) : this.rng.next() < 0.5 ? -1 : 1;
         let slid = false;
 
         for (let attempt = 0; attempt < 2; attempt++) {
@@ -1148,32 +1475,49 @@ export class SandSimulation {
 
           const sideIdx = rowOff + nx;
           const diagIdx = (y - 1) * GRID_W + nx;
-          // Require side cell empty so sand never clips diagonally through solid rock/pebble barriers!
+
+          // A. Primary 45-deg diagonal roll (never clips diagonally through solid corners!)
           if (ct[sideIdx] === CELL_EMPTY && ct[diagIdx] === CELL_EMPTY) {
-            const nextVy = Math.max(0.35, this.velY[idx] * 0.55);
-            this.moveGrain(idx, diagIdx, nextVy, stamp);
+            const nextVy = Math.max(0.38, curVy * 0.62);
+            const nextVx = dir * Math.min(1.8, Math.max(0.35, Math.abs(curVx) * 0.78 + 0.24));
+            this.moveGrain(idx, diagIdx, nextVx, nextVy, stamp);
             fallingCount++;
             movedCount++;
             slid = true;
             break;
           }
 
-          // Gentle 2-horizontal-to-1-vertical roll for authentic ~34-37 deg dry sand repose dunes!
+          // B. Kinetic 2:1 repose avalanche (~32-35 deg natural sand-dune slope!)
           const nx2 = x + dir * 2;
-          if (
-            nx2 >= 1 &&
-            nx2 < GRID_W - 1 &&
-            this.velY[idx] > 0.15 &&
-            this.rng.next() < 0.42
-          ) {
-            const side2Idx = rowOff + nx2;
-            const diag2Idx = (y - 1) * GRID_W + nx2;
-            if (
-              ct[sideIdx] === CELL_EMPTY &&
-              ct[side2Idx] === CELL_EMPTY &&
-              ct[diag2Idx] === CELL_EMPTY
-            ) {
-              this.moveGrain(idx, diag2Idx, this.velY[idx] * 0.45, stamp);
+          if (nx2 >= 1 && nx2 < GRID_W - 1) {
+            const kineticEnergy = curVy + Math.abs(curVx);
+            const rollChance =
+              belowType === CELL_PEBBLE ? 0.78 : kineticEnergy > 0.35 ? 0.64 : 0.22;
+            if (this.rng.next() < rollChance) {
+              const side2Idx = rowOff + nx2;
+              const diag2Idx = (y - 1) * GRID_W + nx2;
+              if (
+                ct[sideIdx] === CELL_EMPTY &&
+                ct[side2Idx] === CELL_EMPTY &&
+                ct[diag2Idx] === CELL_EMPTY
+              ) {
+                const nextVy = Math.max(0.28, curVy * 0.48);
+                const nextVx = dir * Math.min(1.6, Math.max(0.28, Math.abs(curVx) * 0.72 + 0.16));
+                this.moveGrain(idx, diag2Idx, nextVx, nextVy, stamp);
+                fallingCount++;
+                movedCount++;
+                slid = true;
+                break;
+              }
+            }
+          }
+
+          // C. High-energy horizontal skitter along flat floor or pebble crown (prevents tall spikes!)
+          if (Math.abs(curVx) > 0.55 && ct[sideIdx] === CELL_EMPTY) {
+            const sideBelow = (y - 1) * GRID_W + nx;
+            // Only skitter laterally if supported or dropping off a ledge (keeps natural dune flow!)
+            if (ct[sideBelow] !== CELL_EMPTY || belowType === CELL_PEBBLE) {
+              this.moveGrain(idx, sideIdx, curVx * 0.62, curVy * 0.35, stamp);
               fallingCount++;
               movedCount++;
               slid = true;
@@ -1184,8 +1528,11 @@ export class SandSimulation {
 
         if (!slid) {
           // Grain settled on support
-          this.velY[idx] *= 0.25;
-          if (this.velY[idx] < 0.05) this.velY[idx] = 0;
+          vxArr[idx] = curVx * 0.25;
+          if (Math.abs(vxArr[idx]) < 0.04) vxArr[idx] = 0;
+          vyArr[idx] = curVy * 0.25;
+          if (vyArr[idx] < 0.05) vyArr[idx] = 0;
+
           const rt = this.restTicks[idx] + 1;
           this.restTicks[idx] = rt > 65000 ? 65000 : rt;
 
@@ -1211,12 +1558,19 @@ export class SandSimulation {
     return movedCount;
   }
 
-  private moveGrain(srcIdx: number, dstIdx: number, newVelY: number, stamp: number): void {
+  private moveGrain(
+    srcIdx: number,
+    dstIdx: number,
+    newVelX: number,
+    newVelY: number,
+    stamp: number
+  ): void {
     this.cellType[dstIdx] = CELL_LOOSE_SAND;
     this.pigmentId[dstIdx] = this.pigmentId[srcIdx];
     this.grainShade[dstIdx] = this.grainShade[srcIdx];
     this.bondHealth[dstIdx] = 0;
     this.faultDelay[dstIdx] = 0;
+    this.velX[dstIdx] = newVelX;
     this.velY[dstIdx] = newVelY;
     this.restTicks[dstIdx] = 0;
     this.movedStamp[dstIdx] = stamp;
@@ -1224,249 +1578,9 @@ export class SandSimulation {
     this.cellType[srcIdx] = CELL_EMPTY;
     this.bondHealth[srcIdx] = 0;
     this.faultDelay[srcIdx] = 0;
+    this.velX[srcIdx] = 0;
     this.velY[srcIdx] = 0;
     this.restTicks[srcIdx] = 0;
-  }
-
-  /**
-   * Autonomous Subterranean Burrowing Beetles (`DIGGER_COUNT = 4`):
-   * Quietly patrol tunnels, bite individual deep colored sand grains (`PACKED_SAND`),
-   * haul them up vertical shafts to the surface crest, and drop them onto miniature
-   * cratered tailings mounds (exact grain mass conservation!).
-   */
-  private stepDiggers(): void {
-    const ct = this.cellType;
-
-    for (let i = 0; i < this.diggers.length; i++) {
-      const d = this.diggers[i];
-      d.walkPhase += 0.34;
-      d.stateTimer++;
-
-      if (d.state === 'patrol_down') {
-        this.stepDiggerPatrolDown(d, ct);
-      } else if (d.state === 'excavate') {
-        this.stepDiggerExcavate(d, ct);
-      } else if (d.state === 'haul_up') {
-        this.stepDiggerHaulUp(d, ct);
-      } else {
-        this.stepDiggerDeposit(d, ct);
-      }
-    }
-  }
-
-  private stepDiggerPatrolDown(d: DiggerAgent, ct: Uint8Array): void {
-    const dx = d.targetX - d.x;
-    const dy = d.targetY - d.y;
-    const dist = Math.hypot(dx, dy);
-
-    if (dist < 4.5 || d.stateTimer > 260) {
-      d.state = 'excavate';
-      d.stateTimer = 0;
-      return;
-    }
-
-    const speed = 0.68;
-    const stepX = (dx / dist) * speed;
-    const stepY = (dy / dist) * speed;
-    const nextX = Math.max(8, Math.min(GRID_W - 9, d.x + stepX));
-    const nextY = Math.max(14, Math.min(GRID_H - 12, d.y + stepY));
-    const cellAhead = ct[Math.round(nextY) * GRID_W + Math.round(nextX)];
-
-    if (cellAhead === CELL_PEBBLE) {
-      // Skirt cleanly around hard river pebbles
-      d.targetX = Math.max(18, Math.min(GRID_W - 19, d.targetX + d.branchDir * 18));
-      d.targetY = Math.max(24, d.targetY - 8);
-      return;
-    }
-
-    // If we hit solid deep sand while heading down toward our work face, start biting!
-    const colTop = this.topSolidY[Math.round(nextX)] || Math.round(GRID_H * SURFACE_FRAC);
-    if (cellAhead === CELL_PACKED_SAND && nextY < colTop - 22) {
-      d.heading = Math.atan2(dy, dx);
-      d.state = 'excavate';
-      d.stateTimer = 0;
-      return;
-    }
-
-    // Move forward through tunnel (or gentle wiggle if crossing loose tumbled sand)
-    d.x = nextX;
-    d.y = nextY;
-    d.heading = this.lerpAngle(d.heading, Math.atan2(stepY, stepX), 0.25);
-  }
-
-  private stepDiggerExcavate(d: DiggerAgent, ct: Uint8Array): void {
-    d.mandiblePhase += 0.55;
-    if (d.stateTimer < 10) {
-      // Subtle digging wiggle at the work face
-      return;
-    }
-
-    // Search a small radius around the digger for a deep PACKED_SAND grain to bite cleanly
-    const cx = Math.round(d.x);
-    const cy = Math.round(d.y);
-    let foundIdx = -1;
-    let foundX = cx;
-    let foundY = cy;
-
-    // Prioritize digging slightly outward in branchDir & slightly downward (natural branching tunnel!)
-    const maxR = 6;
-    for (let r = 1; r <= maxR && foundIdx === -1; r++) {
-      for (let a = 0; a < 12; a++) {
-        const ang = (a / 12) * Math.PI * 2 + (d.branchDir > 0 ? -0.35 : Math.PI + 0.35);
-        const sx = Math.max(4, Math.min(GRID_W - 5, Math.round(cx + Math.cos(ang) * r)));
-        const sy = Math.max(12, Math.min(GRID_H - 35, Math.round(cy + Math.sin(ang) * r)));
-        const idx = sy * GRID_W + sx;
-        if (ct[idx] === CELL_PACKED_SAND && this.faultDelay[idx] === 0) {
-          // Avoid over-widening ceilings directly above wide open spans (natural arch instinct!)
-          const colTop = this.topSolidY[sx] || Math.round(GRID_H * SURFACE_FRAC);
-          if (sy < colTop - 16) {
-            foundIdx = idx;
-            foundX = sx;
-            foundY = sy;
-            break;
-          }
-        }
-      }
-    }
-
-    if (foundIdx !== -1) {
-      // Bite exactly 1 grain into mandibles -> 100% exact mass conservation!
-      d.carryingPigment = this.pigmentId[foundIdx];
-      d.carryingShade = this.grainShade[foundIdx];
-      ct[foundIdx] = CELL_EMPTY;
-      this.bondHealth[foundIdx] = 0;
-      this.velY[foundIdx] = 0;
-      this.excavatedCells++;
-      d.lastExcavatedY = foundY;
-      d.x = d.x * 0.65 + foundX * 0.35;
-      d.y = d.y * 0.65 + foundY * 0.35;
-      d.heading = Math.atan2(foundY - cy, foundX - cx);
-      d.state = 'haul_up';
-      d.stateTimer = 0;
-      this.texturesDirty = true;
-    } else {
-      // No solid grain within reach: pick a fresh deep target face in the gallery
-      this.pickNextDeepTarget(d);
-      d.state = 'patrol_down';
-      d.stateTimer = 0;
-    }
-  }
-
-  private stepDiggerHaulUp(d: DiggerAgent, ct: Uint8Array): void {
-    // Head upward toward the open surface crest near homeShaftX
-    const sx = Math.max(14, Math.min(GRID_W - 15, Math.round(d.homeShaftX)));
-    const surfY = Math.max(110, (this.topSolidY[sx] || Math.round(GRID_H * SURFACE_FRAC)) + 2);
-    const goalX = sx;
-    const goalY = surfY;
-
-    const dx = goalX - d.x;
-    const dy = goalY - d.y;
-    const dist = Math.hypot(dx, dy);
-
-    if (d.y >= surfY - 2.5 || dist < 4.5) {
-      // Reached surface mouth -> transition to deposit on the crater rim!
-      const side = (d.id + this.tailingsDeposited) % 2 === 0 ? -1 : 1;
-      const rimDist = 5 + ((d.id * 3 + this.tailingsDeposited * 2) % 10);
-      d.targetX = Math.max(10, Math.min(GRID_W - 11, sx + side * rimDist));
-      d.targetY = Math.min(GRID_H - 6, (this.topSolidY[Math.round(d.targetX)] || surfY) + 2);
-      d.state = 'deposit';
-      d.stateTimer = 0;
-      return;
-    }
-
-    // Prefer climbing along open EMPTY tunnel cells if nearby, curving steadily upward toward the mouth
-    let bestVx = dx / dist;
-    let bestVy = dy / dist;
-    const lookR = 3.2;
-    let bestScore = -1e9;
-
-    for (let k = -2; k <= 2; k++) {
-      const candAng = Math.atan2(dy, dx) + k * 0.38;
-      const vx = Math.cos(candAng);
-      const vy = Math.sin(candAng);
-      const px = Math.max(4, Math.min(GRID_W - 5, Math.round(d.x + vx * lookR)));
-      const py = Math.max(4, Math.min(GRID_H - 4, Math.round(d.y + vy * lookR)));
-      const cType = ct[py * GRID_W + px];
-      if (cType === CELL_PEBBLE) continue;
-
-      const alignScore = (vx * dx + vy * dy) / dist;
-      const openBonus = cType === CELL_EMPTY ? 1.15 : cType === CELL_LOOSE_SAND ? 0.2 : -0.35;
-      const score = alignScore + openBonus;
-      if (score > bestScore) {
-        bestScore = score;
-        bestVx = vx;
-        bestVy = vy;
-      }
-    }
-
-    const climbSpeed = 0.72;
-    d.x = Math.max(6, Math.min(GRID_W - 7, d.x + bestVx * climbSpeed));
-    d.y = Math.max(8, Math.min(GRID_H - 6, d.y + bestVy * climbSpeed));
-    d.heading = this.lerpAngle(d.heading, Math.atan2(bestVy, bestVx), 0.28);
-  }
-
-  private stepDiggerDeposit(d: DiggerAgent, ct: Uint8Array): void {
-    const dx = d.targetX - d.x;
-    const gx = Math.max(6, Math.min(GRID_W - 7, Math.round(d.x)));
-    const localSurf = (this.topSolidY[gx] || Math.round(GRID_H * SURFACE_FRAC)) + 1.5;
-    const dy = localSurf - d.y;
-
-    if (Math.abs(dx) > 2.2 && d.stateTimer < 45) {
-      const stepX = Math.sign(dx) * 0.62;
-      d.x = Math.max(6, Math.min(GRID_W - 7, d.x + stepX));
-      d.y = d.y * 0.65 + localSurf * 0.35;
-      d.heading = this.lerpAngle(d.heading, Math.atan2(dy, stepX), 0.3);
-      return;
-    }
-
-    // Drop the carried colored sand grain onto the surface crest (exact conservation!)
-    if (d.carryingPigment >= 0) {
-      const dropX = Math.max(4, Math.min(GRID_W - 5, Math.round(d.x)));
-      let dropY = Math.min(GRID_H - 3, Math.max(4, Math.round(d.y) + 1));
-      // Find first empty slot at or just above the surface crest
-      while (dropY < GRID_H - 2 && ct[dropY * GRID_W + dropX] !== CELL_EMPTY) {
-        dropY++;
-      }
-      if (ct[dropY * GRID_W + dropX] === CELL_EMPTY) {
-        const idx = dropY * GRID_W + dropX;
-        ct[idx] = CELL_LOOSE_SAND;
-        this.pigmentId[idx] = d.carryingPigment;
-        this.grainShade[idx] = d.carryingShade;
-        this.bondHealth[idx] = 0;
-        this.faultDelay[idx] = 0;
-        this.velY[idx] = 0.25;
-        this.restTicks[idx] = 0;
-        d.carryingPigment = -1;
-        this.tailingsDeposited++;
-        this.texturesDirty = true;
-      }
-    }
-
-    // Choose next deep subterranean excavation point & head back down!
-    this.pickNextDeepTarget(d);
-    d.state = 'patrol_down';
-    d.stateTimer = 0;
-  }
-
-  private pickNextDeepTarget(d: DiggerAgent): void {
-    // Pick a deep gallery face (y in [34..118] -> rich Burnt Sienna, Yellow Ochre & Raw Umber layers!)
-    const spread = 18 + Math.floor(this.rng.next() * 78);
-    let tx = d.homeShaftX + d.branchDir * spread;
-    if (tx < 24 || tx > GRID_W - 25) {
-      d.branchDir = -d.branchDir;
-      tx = Math.max(24, Math.min(GRID_W - 25, d.homeShaftX + d.branchDir * 36));
-    }
-    const ty = 34 + Math.floor(this.rng.next() * 82);
-    d.targetX = tx;
-    d.targetY = ty;
-    if (this.rng.next() < 0.28) d.branchDir = -d.branchDir;
-  }
-
-  private lerpAngle(cur: number, target: number, alpha: number): number {
-    let diff = target - cur;
-    while (diff > Math.PI) diff -= Math.PI * 2;
-    while (diff < -Math.PI) diff += Math.PI * 2;
-    return cur + diff * alpha;
   }
 
   /**
@@ -1479,8 +1593,6 @@ export class SandSimulation {
     const air = this.airClass;
     const vy = this.velY;
 
-    // 1. Find highest resting solid cell (topSolidY) AND highest total overburden including
-    //    active slumping LOOSE_SAND (overburdenTopY) so mid-bed collapses never expose AIR_SKY!
     for (let x = 0; x < GRID_W; x++) {
       let topRestY = 0;
       let topOverY = 0;
@@ -1492,12 +1604,12 @@ export class SandSimulation {
         if (c === CELL_EMPTY) continue;
 
         if (topOverY === 0) {
-          // Ignore single isolated high-air poured droplets far above neighboring horizon;
-          // count packed sand, pebbles, resting loose sand, or dense slumping clusters (solid neighbor below)
           const isDenseSlump =
             c !== CELL_LOOSE_SAND ||
             vy[idx] <= 0.35 ||
-            (y >= 2 && (ct[(y - 1) * GRID_W + x] !== CELL_EMPTY || ct[(y - 2) * GRID_W + x] !== CELL_EMPTY));
+            (y >= 2 &&
+              (ct[(y - 1) * GRID_W + x] !== CELL_EMPTY ||
+                ct[(y - 2) * GRID_W + x] !== CELL_EMPTY));
           if (isDenseSlump) {
             topOverY = y;
           }
@@ -1513,7 +1625,6 @@ export class SandSimulation {
       this.topSolidY[x] = topRestY;
       this.overburdenTopY[x] = topOverY;
 
-      // Record top grain linear RGB for the 3D top sand-crest ribbon mesh
       const pOff = topPigment * 3;
       const contrast = this.pigmentContrast[topPigment];
       const shadeMul = 1 + ((topShade - 128) / 128) * contrast;
@@ -1522,8 +1633,6 @@ export class SandSimulation {
       this.surfaceRgb[x * 3 + 2] = Math.min(1, this.pigmentRgbLinear[pOff + 2] * shadeMul);
     }
 
-    // 2. Smooth neighboring bedding horizon (rolling mean over ±18 cols -> keeps narrow shafts
-    //    & active mid-bed collapse zones firmly classified as shadowed AIR_CAVITY!)
     const hWin = 18;
     for (let x = 0; x < GRID_W; x++) {
       let sum = 0;
@@ -1537,8 +1646,6 @@ export class SandSimulation {
       this.smoothHorizon[x] = cnt > 0 ? sum / cnt : this.overburdenTopY[x];
     }
 
-    // 3. Classify every cell: SOLID vs SKY (open air above smooth crest) vs CAVITY (subterranean burrow!)
-    //    Count ALL non-empty cells (including slumping LOOSE_SAND!) as blocking horizontal open sky!
     this.skyFloorY.fill(0);
     for (let y = GRID_H - 1; y >= 0; y--) {
       const rowOff = y * GRID_W;
@@ -1566,7 +1673,6 @@ export class SandSimulation {
           if (y > this.skyFloorY[cx]) this.skyFloorY[cx] = y;
           continue;
         }
-        // Must sit strictly above all solid/slumping overburden in column cx
         if (y > this.overburdenTopY[cx]) {
           const horiz = this.smoothHorizon[cx];
           if (y >= horiz - 2 || (y >= horiz - 12 && this.rowOpenSpan[cx] >= SKY_MIN_OPEN_SPAN)) {
@@ -1582,7 +1688,6 @@ export class SandSimulation {
       }
     }
 
-    // Smooth 3D top sand crest height from the exact continuous sky-floor horizon (zero sheer cliffs!)
     for (let x = 0; x < GRID_W; x++) {
       let sum = 0;
       let wSum = 0;
@@ -1596,9 +1701,7 @@ export class SandSimulation {
       this.surfaceY[x] = wSum > 0 ? sum / wSum : this.topSolidY[x];
     }
 
-    // 4. Fast 2-pass Chamfer Distance Transforms:
-    //    (a) distBufA = distance inside CAVITY away from nearest SOLID wall (recessed tunnel depth!)
-    //    (b) distBufB = distance inside SOLID away from nearest EMPTY cell (thin-wall backlight glow!)
+    // Fast 2-pass Chamfer Distance Transforms for cavity recess & solid thin-wall translucency
     const dCav = this.distBufA;
     const dSol = this.distBufB;
     const INF = 28;
@@ -1608,7 +1711,6 @@ export class SandSimulation {
       dSol[i] = ct[i] !== CELL_EMPTY ? INF : 0;
     }
 
-    // Forward pass (bottom-left -> top-right, branchless integer min)
     for (let y = 1; y < GRID_H - 1; y++) {
       const rowOff = y * GRID_W;
       const prevOff = (y - 1) * GRID_W;
@@ -1637,7 +1739,6 @@ export class SandSimulation {
       }
     }
 
-    // Backward pass (top-right -> bottom-left, branchless integer min)
     for (let y = GRID_H - 2; y >= 1; y--) {
       const rowOff = y * GRID_W;
       const nextOff = (y + 1) * GRID_W;
@@ -1667,7 +1768,6 @@ export class SandSimulation {
     }
 
     for (let i = 0; i < GRID_CELLS; i++) {
-      // Floor AIR_CAVITY recess at >= 52 so bilinear sandBackwall cleanly separates CAVITY from AIR_SKY (0)
       if (air[i] === AIR_CAVITY) {
         const rc = 52 + dCav[i] * 11;
         this.recessField[i] = rc > 255 ? 255 : rc;
@@ -1680,14 +1780,14 @@ export class SandSimulation {
   }
 
   /**
-   * Packs `colorTexData` (RGBA8 SRGB, LinearFilter) and `fieldTexData` (RGBA8 Linear, LinearFilter):
+   * Packs `colorTexData` (RGBA8 SRGB, LinearFilter) and `fieldTexData` (RGBA8 Linear, LinearFilter).
+   * Preserves exact channel contracts:
    * - `colorTex.rgb`: smooth grain/stratum pigment (undisturbed bgStrata in cavities -> zero fringe bleed!)
-   * - `colorTex.a`: 255 strictly on airborne falling LOOSE_SAND (velY > 0.12), 0 elsewhere
-   * - `fieldTex.r`: 3x3 Gaussian-smoothed cohesive solid coverage (PACKED + PEBBLE + resting LOOSE_SAND;
-   *   0 on airborne falling grains -> zero parallax smudge extrusion + butter-smooth tunnel curves!)
-   * - `fieldTex.g`: smooth cavity recess depth (>= 52 in CAVITY, 0 in SKY/SOLID)
+   * - `colorTex.a`: 255 strictly on airborne falling LOOSE_SAND (`velY > 0.12`), 0 elsewhere
+   * - `fieldTex.r`: 3x3 Gaussian-smoothed cohesive solid coverage (0 on airborne falling grains)
+   * - `fieldTex.g`: smooth cavity recess depth (`>= 52` in CAVITY, `0` in SKY/SOLID)
    * - `fieldTex.b`: solid thin-wall distance for warm backlit translucency
-   * - `fieldTex.a`: compacted PACKED_SAND arch shear stress ONLY (strictly 0 on LOOSE_SAND!)
+   * - `fieldTex.a`: compacted PACKED_SAND arch shear stress ONLY (`0` on LOOSE_SAND!)
    */
   packTextures(): void {
     const ct = this.cellType;
@@ -1704,12 +1804,12 @@ export class SandSimulation {
     const fOut = this.fieldTexData;
     const lut = this.srgbByteLut;
 
-    // Pass 1: build binary cohesive solid mask (excluding airborne falling LOOSE_SAND!) + pack color/G/B/A
     for (let i = 0; i < GRID_CELLS; i++) {
       const o = i << 2;
       const c = ct[i];
       const isFalling = c === CELL_LOOSE_SAND && vy[i] > 0.12;
-      const isCohesive = c === CELL_PACKED_SAND || c === CELL_PEBBLE || (c === CELL_LOOSE_SAND && !isFalling);
+      const isCohesive =
+        c === CELL_PACKED_SAND || c === CELL_PEBBLE || (c === CELL_LOOSE_SAND && !isFalling);
       coh[i] = isCohesive ? 1 : 0;
 
       const pId = c === CELL_EMPTY ? bgP[i] : pig[i];
@@ -1718,17 +1818,14 @@ export class SandSimulation {
       cOut[o] = lut[lutOff];
       cOut[o + 1] = lut[lutOff + 1];
       cOut[o + 2] = lut[lutOff + 2];
-      // Color alpha = airborne falling sand grain mask ONLY (crisp bright tumbling grains!)
       cOut[o + 3] = isFalling ? 255 : 0;
 
-      // Field G/B/A (strictly zero arch stress on LOOSE_SAND so falling grains never darken!)
       fOut[o + 1] = rec[i];
       fOut[o + 2] = wal[i];
       fOut[o + 3] = c === CELL_PACKED_SAND ? str[i] : 0;
     }
 
-    // Pass 2: 3x3 Gaussian-weighted cohesive solid coverage -> fieldTex.r (eliminates 300x220 staircases!)
-    // Border cells take raw binary mask; interior cells take (4*c + 2*(ortho) + 1*(diag)) * 255 / 16
+    // 3x3 Gaussian-weighted cohesive solid coverage -> fieldTex.r (butter-smooth curved burrows!)
     for (let x = 0; x < GRID_W; x++) {
       fOut[x << 2] = coh[x] ? 255 : 0;
       const topIdx = (GRID_H - 1) * GRID_W + x;
@@ -1751,7 +1848,6 @@ export class SandSimulation {
           coh[upOff + x + 1] +
           coh[dnOff + x - 1] +
           coh[dnOff + x + 1];
-        // Map [0..16] -> [0..255] cleanly
         fOut[i << 2] = sum16 === 16 ? 255 : (sum16 * 16) | 0;
       }
     }
@@ -1769,16 +1865,17 @@ export class SandSimulation {
     return n;
   }
 
-  /** Counts total grains currently carried inside autonomous digger mandibles. */
+  /** Counts total grains currently carried inside autonomous worker ant mandibles. */
   countCarriedGrains(): number {
     let n = 0;
-    for (let i = 0; i < this.diggers.length; i++) {
-      if (this.diggers[i].carryingPigment >= 0) n++;
+    const ants = this.colony.ants;
+    for (let i = 0; i < ants.length; i++) {
+      if (ants[i].carryingPigment >= 0) n++;
     }
     return n;
   }
 
-  /** Total conserved sand mass (grid sand + digger-carried sand). */
+  /** Total conserved sand mass (grid sand + ant-carried sand). */
   countTotalSandMass(): number {
     return this.countGridSandGrains() + this.countCarriedGrains();
   }
@@ -1799,9 +1896,12 @@ export class SandSimulation {
       excavatedCells: this.excavatedCells,
       activeFallingGrains: this.activeFallingGrains,
       collapseEvents: this.collapseEvents,
-      diggerCount: this.diggers.length,
+      diggerCount: this.colony.ants.length,
       tailingsDeposited: this.tailingsDeposited,
       stepCount: this.stepCount,
+      active3DGrains: this.active3DGrains,
+      activeDustMotes: this.activeDustMotes,
+      colony: this.colony.getStats(),
     };
   }
 }

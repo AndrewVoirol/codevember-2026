@@ -7,7 +7,6 @@ import {
   CAVITY_W,
   GRID_H,
   GRID_W,
-  SAND_PIGMENTS,
 } from './constants';
 import { SandSimulation, type SandSimMetrics } from './sandSim';
 import { buildTerrariumAssembly } from './geometry';
@@ -16,7 +15,16 @@ import { createBurrowMaterials, createBurrowStudioEnvironment } from './material
 declare global {
   interface Window {
     __DAY27__?: {
-      getState: () => SandSimMetrics;
+      getState: () => SandSimMetrics & {
+        ants: Array<{
+          id: number;
+          role: string;
+          state: string;
+          x: number;
+          y: number;
+          carryingPigment: number;
+        }>;
+      };
     };
   }
 }
@@ -41,13 +49,13 @@ async function mountDay27Burrow(): Promise<void> {
   });
 
   stage.controls.target.set(0, -0.02, 0);
-  stage.controls.minDistance = 1.6;
+  stage.controls.minDistance = 0.88; // Allow true macro close-up inspection of worker ants & sand grains!
   stage.controls.maxDistance = 7.4;
   stage.controls.minPolarAngle = 0.08;
   stage.controls.maxPolarAngle = Math.PI - 0.08;
   stage.controls.update();
 
-  // Calibrated Studio Softbox PMREM Environment for satin brass, oiled walnut & beveled glass
+  // Calibrated Studio Softbox PMREM Environment for satin brass, oiled walnut, chitin & beveled glass
   const studioEnv = createBurrowStudioEnvironment(stage.renderer);
   stage.scene.environment = studioEnv.texture;
   stage.scene.environmentIntensity = 1.16;
@@ -72,7 +80,7 @@ async function mountDay27Burrow(): Promise<void> {
         child.shadow.camera.updateProjectionMatrix();
       } else if (dirLightIdx === 1) {
         child.position.set(3.4, 1.2, 2.4);
-        child.intensity = 0.52;
+        child.intensity = 0.54;
       } else if (dirLightIdx === 2) {
         // Warm rear studio key/rim so orbiting 180 deg behind the terrarium stays crisp & luminous
         child.position.set(-1.6, 3.2, -3.9);
@@ -84,7 +92,7 @@ async function mountDay27Burrow(): Promise<void> {
     }
   }
 
-  // Pure granular sand simulation + live RGBA8 WebGPU DataTextures
+  // Pure granular sand simulation + stigmergic 12-worker-ant colony + live RGBA8 WebGPU DataTextures
   const sim = new SandSimulation(1);
 
   const sandColorTex = new THREE.DataTexture(
@@ -123,13 +131,17 @@ async function mountDay27Burrow(): Promise<void> {
   materials.syncPebbles(sim.pebbles);
   const assembly = buildTerrariumAssembly(materials);
   stage.specimenGroup.add(assembly.group);
+
+  // Sync Frame 0 sand crest, all 12 sculpted 3D worker ants & particle buffers immediately!
   assembly.updateSandCrest(sim.surfaceY, sim.surfaceRgb);
+  assembly.updateWorkerAnts(sim.diggers, 0);
+  assembly.updateParticles3D(sim.grains3D, sim.dust3D, sim.pigmentRgbLinear);
 
   // Tactile interaction state:
-  // - Drag across glass sand bed -> excavate custom branching tunnels & chambers
-  // - Click & hold open top airspace -> pour trickling stream of layered colored sand
-  // - Drag outside frame (empty space) -> smooth 360-deg 3D orbit
-  // - Double-click empty space (or press Space) -> reset fresh stratified sand bed
+  // - Drag across glass sand bed -> excavate custom branching tunnels & test arching avalanches
+  // - Click & hold open top airspace -> pour cohesive hourglass stream of layered mineral sand
+  // - Drag outside frame (empty space) -> smooth 360-deg 3D orbit (scroll to macro-zoom onto ants!)
+  // - Double-click empty space (or press Space) -> reset fresh stratified ant farm bed
   const canvas = stage.shell.canvas;
   let activeMode: 'none' | 'excavate' | 'pour' = 'none';
   let hoverActive = false;
@@ -202,6 +214,8 @@ async function mountDay27Burrow(): Promise<void> {
     sandColorTex.needsUpdate = true;
     sandFieldTex.needsUpdate = true;
     assembly.updateSandCrest(sim.surfaceY, sim.surfaceRgb);
+    assembly.updateWorkerAnts(sim.diggers, 0);
+    assembly.updateParticles3D(sim.grains3D, sim.dust3D, sim.pigmentRgbLinear);
   };
 
   const onPointerDown = (ev: PointerEvent) => {
@@ -362,12 +376,22 @@ async function mountDay27Burrow(): Promise<void> {
     sandFieldTex.dispose();
   });
 
-  // Read-only verification hook
+  // Read-only live verification hook
   window.__DAY27__ = {
-    getState: () => sim.getMetrics(),
+    getState: () => ({
+      ...sim.getMetrics(),
+      ants: sim.diggers.map((a) => ({
+        id: a.id,
+        role: a.role,
+        state: a.state,
+        x: Math.round(a.x * 10) / 10,
+        y: Math.round(a.y * 10) / 10,
+        carryingPigment: a.carryingPigment,
+      })),
+    }),
   };
 
-  // Fixed-timestep physics accumulator & beetle animation sync (strictly zero per-frame allocations)
+  // Fixed-timestep physics accumulator & instanced worker-ant/granule sync (strictly zero allocations!)
   let simAccum = 0;
   let hoverAlphaSmooth = 0;
 
@@ -376,7 +400,7 @@ async function mountDay27Burrow(): Promise<void> {
 
     while (simAccum >= FIXED_SIM_DT) {
       if (activeMode === 'pour') {
-        sim.pourSandAt(activeGridX, activeGridY, 9);
+        sim.pourSandAt(activeGridX, activeGridY, 10);
       }
       sim.step();
       simAccum -= FIXED_SIM_DT;
@@ -401,50 +425,9 @@ async function mountDay27Burrow(): Promise<void> {
     hoverAlphaSmooth += (targetHover - hoverAlphaSmooth) * Math.min(1, dtSec * 16);
     materials.uHoverUv.value.set(hoverU, hoverV, hoverIsPour ? 1 : 0, hoverAlphaSmooth);
 
-    // Sync 4 articulated 3D subterranean burrowing beetles inside the glass cavity (z ~ 0)
-    for (let i = 0; i < assembly.diggers.length; i++) {
-      const rig = assembly.diggers[i];
-      const d = sim.diggers[i];
-
-      const wx = -CAVITY_HALF_W + ((d.x + 0.5) / GRID_W) * CAVITY_W;
-      const wy = -CAVITY_HALF_H + ((d.y + 0.5) / GRID_H) * CAVITY_H;
-      const wz = d.zLane * 0.022;
-
-      rig.root.position.set(wx, wy, wz);
-      const bodyWiggle =
-        d.state === 'excavate'
-          ? Math.sin(d.mandiblePhase * 2.2) * 0.14
-          : Math.sin(d.walkPhase) * 0.055;
-      rig.root.rotation.set(0, 0, d.heading + bodyWiggle);
-
-      // Alternating tripod scuttle gait across 6 articulated legs
-      const stride = Math.sin(d.walkPhase) * 0.34;
-      rig.legsLeft[0].rotation.z = 0.25 + stride;
-      rig.legsLeft[1].rotation.z = -0.03 - stride;
-      rig.legsLeft[2].rotation.z = -0.31 + stride;
-      rig.legsRight[0].rotation.z = Math.PI - (0.25 - stride);
-      rig.legsRight[1].rotation.z = Math.PI - (-0.03 + stride);
-      rig.legsRight[2].rotation.z = Math.PI - (-0.31 - stride);
-
-      // Articulated mandibles (pinch tightly around carried grain or chew during excavation)
-      const jawOpen =
-        d.carryingPigment >= 0
-          ? 0.08
-          : d.state === 'excavate'
-            ? 0.28 + Math.sin(d.mandiblePhase * 2.6) * 0.24
-            : 0.16;
-      rig.leftMandible.rotation.z = -0.25 - jawOpen;
-      rig.rightMandible.rotation.z = 0.25 + jawOpen;
-
-      // Visible carried colored mineral sand grain held between mandibles!
-      if (d.carryingPigment >= 0 && d.carryingPigment < SAND_PIGMENTS.length) {
-        const rgb = SAND_PIGMENTS[d.carryingPigment].rgbLinear;
-        rig.carriedGrainMat.color.setRGB(rgb[0], rgb[1], rgb[2]);
-        rig.carriedGrain.visible = true;
-      } else {
-        rig.carriedGrain.visible = false;
-      }
-    }
+    // Sync all 12 articulated 3D worker ants + live 3D tumbling mineral granules & avalanche dust!
+    assembly.updateWorkerAnts(sim.diggers, elapsedSec);
+    assembly.updateParticles3D(sim.grains3D, sim.dust3D, sim.pigmentRgbLinear);
   });
 }
 

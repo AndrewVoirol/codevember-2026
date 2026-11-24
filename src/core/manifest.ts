@@ -334,8 +334,8 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
     'tsl',
     'burntSienna',
     'boneCalcite',
-    'Suspended oiled dark-walnut and satin-brass observation terrarium slice with slotted corner hardware, 45° beveled glass panes, and a live 300×220 stratified mineral sand bed of Yellow Ochre, Burnt Sienna, Bone Calcite, Raw Umber, Hematite Rust, and embedded quartz/basalt river pebbles featuring 3D parallax shadowed burrow walls, Terzaghi granular arching vs. shear-fault cave-ins, and four articulated subterranean burrowing beetles hauling deep grains to surface tailings craters',
-    'Drag directly across the glass sand bed to carve branching burrows and test vaulted arch spans against cascading shear-fault cave-ins; click and hold in the clear open top airspace to pour fresh layered mineral sand; drag empty space to orbit 360°; double-click empty space or press Space to reset a freshly stratified sand bed'
+    'Suspended oiled dark-walnut and satin-brass observation ant-farm terrarium slice with slotted corner hardware, 45° beveled glass panes, and a live 300×220 stratified mineral sand bed with pebble-draped strata, momentum-coupled granular avalanches, Terzaghi arching vs. conjugate shear-fault cave-ins, 3D tumbling mineral granules, and a 12-worker-ant colony with articulated anatomy, open-corridor BFS navigation, cave-in rescue digging, and antennae-tap nestmate greetings',
+    'Drag directly across the glass sand bed to carve branching burrows and test vaulted arch spans against cascading shear-fault cave-ins; click and hold in the clear open top airspace to pour a cohesive hourglass stream of layered mineral sand; drag empty space to orbit 360° or scroll to inspect the worker ants close-up; double-click empty space or press Space to reset'
   ),
   createDay(
     28,

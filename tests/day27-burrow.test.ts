@@ -410,13 +410,214 @@ describe('Day 27 - Burrow (Glass-Walled Stratified Sand-Slice Terrarium)', () =>
     expect(checkedBottomWraps).toBe(2);
     expect(checkedBottomScrews).toBe(12);
 
-    // Exercise live 3D crest ribbon update with real sim data
+    // Exercise live 3D crest ribbon, worker ants & 3D granule sync with real sim data
     const sim = new SandSimulation(1);
     assembly.updateSandCrest(sim.surfaceY, sim.surfaceRgb);
+    assembly.updateWorkerAnts(sim.diggers, 0.5);
+    assembly.updateParticles3D(sim.grains3D, sim.dust3D, sim.pigmentRgbLinear);
     assertOpenSurfaceNormal('SandCrestTopRibbonAfterUpdate', assembly.sandCrestGeo, new THREE.Vector3(0, 1, 0));
 
     assembly.dispose();
     dummyMat.dispose();
+  });
+
+  it('enforces zero solid-wall phasing across 1,000 live colony ticks, user carvings, pours, and cave-ins', () => {
+    const sim = new SandSimulation(27);
+    const startMass = sim.countTotalSandMass();
+
+    for (let t = 0; t < 1000; t++) {
+      // Simulate real player carving a winding side tunnel & triggering a mid-bed cave-in!
+      if (t === 120) {
+        sim.excavateCapsule(160, 115, 220, 102, 5.8, true);
+      }
+      if (t === 280) {
+        sim.pourSandAt(120, GRID_H - 12, 24);
+      }
+      if (t === 450) {
+        sim.excavateBox(168, 66, 208, 84); // wide flat cave-in trigger!
+      }
+
+      sim.step({ enableDiggers: true, enableArchCheck: true });
+
+      // Every single non-buried worker ant must strictly occupy CELL_EMPTY (NEVER packed sand or pebble!)
+      for (let i = 0; i < sim.diggers.length; i++) {
+        const a = sim.diggers[i];
+        const gx = Math.max(0, Math.min(GRID_W - 1, Math.round(a.x)));
+        const gy = Math.max(0, Math.min(GRID_H - 1, Math.round(a.y)));
+        const ct = sim.cellType[sim.idx(gx, gy)];
+        if (a.state !== 'buried') {
+          expect(ct, `tick ${t} ant ${a.id} (${a.state}) must not phase into solid cell`).toBe(
+            CELL_EMPTY
+          );
+        }
+      }
+    }
+
+    expect(sim.colony.solidWallPenetrations).toBe(0);
+    // Exact mass conservation holds after non-excavating/non-pouring phases; check colony stats live!
+    expect(sim.diggers.length).toBe(DIGGER_COUNT);
+    expect(sim.tailingsDeposited).toBeGreaterThanOrEqual(4);
+    expect(startMass).toBeGreaterThan(25000);
+  });
+
+  it('routes grain-hauling ants strictly through open winding corridors rather than phasing vertically through solid sand', () => {
+    const sim = new SandSimulation(77);
+    sim.reset(77, false);
+
+    // Carve an explicit L-shaped winding open tunnel:
+    // Vertical shaft at x = 90 down to y = 92, then horizontal corridor right to x = 165!
+    const topY = sim.topSolidY[90] || 175;
+    sim.excavateCapsule(90, topY + 3, 90, 92, 5.2, false);
+    sim.excavateCapsule(90, 92, 165, 92, 5.2, false);
+    sim.recomputeSurfaceAndOpticalFields();
+    sim.colony.rebuildNavigationFields(sim);
+
+    // Place Ant 0 carrying a Burnt Sienna grain at the far right end (162, 92) — solid packed sand sits directly above it!
+    const ant = sim.diggers[0];
+    ant.x = 162;
+    ant.y = 92;
+    ant.state = 'haul_up';
+    ant.carryingPigment = 3;
+    ant.homeShaftX = 90;
+    ant.stateTimer = 0;
+
+    // Confirm thick solid impassable overburden (packed sand or pebble) exists directly above (162, 92)
+    expect(sim.cellType[sim.idx(162, 120)]).not.toBe(CELL_EMPTY);
+    expect(sim.cellType[sim.idx(162, 152)]).toBe(CELL_PACKED_SAND);
+
+    let passedLeftCorner = false;
+    let reachedSurface = false;
+
+    for (let t = 0; t < 420; t++) {
+      sim.step({ enableDiggers: true, enableArchCheck: false });
+      const gx = Math.round(ant.x);
+      const gy = Math.round(ant.y);
+      expect(sim.cellType[sim.idx(gx, gy)], `tick ${t} ant must stay in open corridor`).toBe(
+        CELL_EMPTY
+      );
+      if (ant.x < 104 && ant.y < 110) passedLeftCorner = true;
+      if (ant.state === 'deposit' || ant.y >= topY - 4) {
+        reachedSurface = true;
+        break;
+      }
+    }
+
+    expect(passedLeftCorner).toBe(true);
+    expect(reachedSurface).toBe(true);
+    expect(sim.colony.solidWallPenetrations).toBe(0);
+  });
+
+  it('detects sealed trapped chambers after cave-ins and initiates rescue digging while conserving sand mass', () => {
+    const sim = new SandSimulation(55);
+    sim.reset(55, false);
+
+    // Carve an isolated deep oval chamber completely cut off from the surface (y = 80..92, x = 140..158)
+    sim.excavateCapsule(142, 86, 156, 86, 5.2, false);
+    sim.recomputeSurfaceAndOpticalFields();
+    sim.colony.rebuildNavigationFields(sim);
+
+    // Place Ant 0 strictly inside this sealed subterranean chamber
+    const ant = sim.diggers[0];
+    ant.x = 149;
+    ant.y = 86;
+    ant.state = 'patrol_down';
+    ant.carryingPigment = -1;
+    ant.stateTimer = 0;
+
+    const exactMassStart = sim.countTotalSandMass();
+    const initialExcavated = sim.excavatedCells;
+    let enteredRescueOrBackfill = false;
+
+    for (let t = 0; t < 180; t++) {
+      sim.step({ enableDiggers: true, enableArchCheck: true });
+      if (ant.state === 'rescue_dig' || ant.state === 'backfill') {
+        enteredRescueOrBackfill = true;
+      }
+      expect(sim.countTotalSandMass(), `rescue tick ${t} exact sand mass`).toBe(exactMassStart);
+    }
+
+    expect(enteredRescueOrBackfill).toBe(true);
+    expect(sim.colony.rescuesTriggered).toBeGreaterThan(0);
+    expect(sim.excavatedCells).toBeGreaterThan(initialExcavated);
+  });
+
+  it('applies gravity tumble and clean landing recovery when floor support disappears beneath an ant', () => {
+    const sim = new SandSimulation(61);
+    sim.reset(61, false);
+
+    // Carve a tall vertical cavern (24 cells tall) and drop Ant 0 near mid-air center
+    sim.excavateBox(136, 70, 152, 108);
+    sim.recomputeSurfaceAndOpticalFields();
+    sim.colony.rebuildNavigationFields(sim);
+
+    const ant = sim.diggers[0];
+    ant.x = 144;
+    ant.y = 95;
+    ant.state = 'patrol_down';
+    ant.carryingPigment = -1;
+
+    let sawFalling = false;
+    let recovered = false;
+
+    for (let t = 0; t < 90; t++) {
+      sim.step({ enableDiggers: true, enableArchCheck: false });
+      if (ant.state === 'falling') sawFalling = true;
+      if (sawFalling && ant.state !== 'falling') {
+        recovered = true;
+        break;
+      }
+    }
+
+    expect(sawFalling).toBe(true);
+    expect(recovered).toBe(true);
+    expect(ant.y).toBeLessThan(86);
+  });
+
+  it('fans poured sand laterally off river pebbles and spawns live 3D tumbling granules and dust', () => {
+    const sim = new SandSimulation(88);
+    const p = sim.pebbles[1]; // central-upper river pebble
+    // Excavate airspace above the pebble and pour a brisk stream right onto its crown
+    sim.excavateBox(p.cx - 22, p.cy + 4, p.cx + 22, GRID_H - 6);
+    sim.pourSandAt(p.cx, Math.min(GRID_H - 6, p.cy + 34), 24);
+
+    let peak3DGrains = 0;
+    let sawLateralMomentum = false;
+    for (let t = 0; t < 80; t++) {
+      if (t < 15) sim.pourSandAt(p.cx, Math.min(GRID_H - 6, p.cy + 34), 10);
+      sim.step({ enableDiggers: false, enableArchCheck: false });
+      if (sim.active3DGrains > peak3DGrains) peak3DGrains = sim.active3DGrains;
+      for (let i = 0; i < sim.cellCount; i++) {
+        if (sim.cellType[i] === CELL_LOOSE_SAND && Math.abs(sim.velX[i]) > 0.25) {
+          sawLateralMomentum = true;
+          break;
+        }
+      }
+    }
+
+    expect(peak3DGrains).toBeGreaterThan(10);
+    expect(sawLateralMomentum).toBe(true);
+  });
+
+  it('starts with 0 trapped ants in the connected starter burrow and keeps every worker moving without corner stalls', () => {
+    const sim = new SandSimulation(1);
+    const bootStats = sim.colony.getStats();
+    expect(bootStats.trappedCount).toBe(0);
+
+    const startPos = sim.diggers.map((a) => ({ x: a.x, y: a.y }));
+    const maxMove = new Float32Array(sim.diggers.length);
+
+    for (let t = 0; t < 320; t++) {
+      sim.step({ enableDiggers: true, enableArchCheck: true });
+      for (let i = 0; i < sim.diggers.length; i++) {
+        const d = Math.hypot(sim.diggers[i].x - startPos[i].x, sim.diggers[i].y - startPos[i].y);
+        if (d > maxMove[i]) maxMove[i] = d;
+      }
+    }
+
+    for (let i = 0; i < sim.diggers.length; i++) {
+      expect(maxMove[i], `ant ${i} should travel smoothly without freezing`).toBeGreaterThan(6.0);
+    }
+    expect(sim.colony.solidWallPenetrations).toBe(0);
   });
 
   it('instantiates all TSL WebGPU materials and DataTexture bindings cleanly without runtime errors', () => {
@@ -449,6 +650,10 @@ describe('Day 27 - Burrow (Glass-Walled Stratified Sand-Slice Terrarium)', () =>
     expect(mats.sandBackwall.opacityNode).toBeTruthy();
     expect(mats.sandCrestTop.colorNode).toBeTruthy();
     expect(mats.beetleChitin.colorNode).toBeTruthy();
+    expect(mats.antGaster.colorNode).toBeTruthy();
+    expect(mats.antEye.colorNode).toBeTruthy();
+    expect(mats.mineralGrain3D.colorNode).toBeTruthy();
+    expect(mats.dustMote3D.colorNode).toBeTruthy();
 
     mats.dispose();
     colorTex.dispose();

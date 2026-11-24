@@ -1,7 +1,7 @@
 import { MINERAL_PALETTE, type PigmentKey } from '../../core/palette';
 
 /**
- * Day 27 - Burrow: Physical Dimensions & Granular Simulation Constants
+ * Day 27 - Burrow: Physical Dimensions, Granular Simulation & Colony Constants
  *
  * Narrow vertical museum ant-farm observation slice (~1.76 W x 1.36 H x 0.24 D)
  * framed in oiled dark raw-umber walnut, satin-brass corner brackets & slotted screws,
@@ -28,13 +28,18 @@ export const GLASS_PANE_H = 1.184;
 export const GLASS_PANE_THICK = 0.012;
 export const GLASS_CENTER_Z = CAVITY_HALF_D + GLASS_PANE_THICK * 0.5 + 0.002; // 0.076
 
-// Recessed interior tunnel back-wall offset (physically behind beetles at z = 0)
-export const BACKWALL_Z = 0.054;
+// Recessed interior tunnel back-wall offset (physically behind ants at z ~ 0)
+export const BACKWALL_Z = 0.056;
 
 // Granular cellular grid resolution (x = 0..W-1 left->right, y = 0..H-1 bottom->top)
 export const GRID_W = 300;
 export const GRID_H = 220;
 export const GRID_CELLS = GRID_W * GRID_H;
+
+// Half-resolution stigmergic pheromone & disturbance field dimensions (150 x 110)
+export const COARSE_W = GRID_W >> 1;
+export const COARSE_H = GRID_H >> 1;
+export const COARSE_CELLS = COARSE_W * COARSE_H;
 
 // Cell occupancy types
 export const CELL_EMPTY = 0;
@@ -160,7 +165,13 @@ export const SAND_PIGMENTS: readonly SandPigmentDef[] = [
   },
 ];
 
-export const DIGGER_COUNT = 4;
+/** Active worker ant colony population (kept exported as DIGGER_COUNT for manifest/test parity) */
+export const DIGGER_COUNT = 12;
+export const ANT_COUNT = DIGGER_COUNT;
+
+/** Live 3D instanced tumbling mineral granule & avalanche dust pool capacities */
+export const MAX_3D_GRAINS = 420;
+export const MAX_DUST_MOTES = 72;
 
 /** Convert linear [0..1] channel to sRGB byte [0..255] for RGBA8 SRGB DataTexture */
 export function linearToSrgbByte(v: number): number {
