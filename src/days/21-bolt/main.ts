@@ -3,13 +3,14 @@ import { SpecimenStage } from '../../core/stage/SpecimenStage';
 import { createBoltStudioEnvironment } from './environment';
 import { buildGearTrainAssembly } from './gearTrain';
 import {
+  buildCamBarrelAssembly,
   buildDeadboltAssembly,
   buildForendAssembly,
-  buildKeyAssembly,
   buildLeverPackAssembly,
   buildLockCaseAssembly,
   buildOakSpecimenBlock,
   buildSpringPackAssembly,
+  buildThumbTurnAssembly,
 } from './geometry';
 import {
   BOLT_TRAVEL,
@@ -32,7 +33,7 @@ declare global {
   }
 }
 
-type HitKind = 'none' | 'key' | 'bolt' | 'lever';
+type HitKind = 'none' | 'knob' | 'bolt' | 'lever';
 
 interface RaycastResult {
   kind: HitKind;
@@ -48,8 +49,8 @@ const _planeNormal = new THREE.Vector3();
 const _planePoint = new THREE.Vector3();
 const _planeHit = new THREE.Vector3();
 const _localHit = new THREE.Vector3();
-const _keyWorldCenter = new THREE.Vector3();
-const _keyNdc = new THREE.Vector3();
+const _knobWorldCenter = new THREE.Vector3();
+const _knobNdc = new THREE.Vector3();
 const _camForward = new THREE.Vector3();
 const _lockForward = new THREE.Vector3();
 const _orbitOffset = new THREE.Vector3();
@@ -65,20 +66,20 @@ function wrapDeltaPi(delta: number): number {
 async function mountDay21Bolt(): Promise<void> {
   const stage = await SpecimenStage.create({
     day: 21,
-    cameraPosition: [1.52, 0.44, 3.74],
+    cameraPosition: [1.46, 0.42, 3.68],
     fov: 35,
     enableOrbit: true,
     enableShadows: true,
   });
 
-  stage.controls.target.set(0.10, 0.01, 0.03);
+  stage.controls.target.set(0.08, 0.01, 0.03);
   stage.controls.minDistance = 1.65;
   stage.controls.maxDistance = 7.8;
   stage.controls.maxPolarAngle = Math.PI * 0.88;
   stage.controls.minPolarAngle = 0.14;
   stage.controls.update();
 
-  // Calibrate Horologist's Studio Softbox PMREM Environment for brushed brass, blued steel & bronze
+  // Calibrate Horologist's Studio Softbox PMREM Environment for brass, blued steel, bronze & glass
   const studioEnv = createBoltStudioEnvironment(stage.renderer);
   stage.scene.environment = studioEnv.texture;
   stage.scene.environmentIntensity = 1.18;
@@ -91,7 +92,7 @@ async function mountDay21Bolt(): Promise<void> {
         child.position.set(-2.3, 4.4, 4.6);
         child.intensity = 1.48;
         child.shadow.mapSize.set(2048, 2048);
-        const d = 1.95;
+        const d = 1.98;
         child.shadow.camera.left = -d;
         child.shadow.camera.right = d;
         child.shadow.camera.top = d;
@@ -115,8 +116,8 @@ async function mountDay21Bolt(): Promise<void> {
     }
   }
 
-  // Build deterministic 5-lever Chubb mortise deadbolt physics & TSL materials
-  const lock = new LockMechanism(true); // Boots locked so massive blued-steel deadbolt is proudly extended
+  // Build deterministic 3:1 geared 5-lever Chubb thumb-turn deadbolt physics & TSL materials
+  const lock = new LockMechanism(true); // Boots LOCKED: Horizontal 90-deg brass thumb-turn & massive extended blue bolt!
   const materials = createBoltMaterials();
 
   // Root assembly allows crisp tactile recoil impulse without fighting OrbitControls
@@ -124,7 +125,7 @@ async function mountDay21Bolt(): Promise<void> {
   lockRoot.name = 'ChubbDeadboltSpecimenRoot';
   stage.specimenGroup.add(lockRoot);
 
-  // Assemble all 7 precision mechanical sub-assemblies
+  // Assemble all 9 precision mechanical & optical sub-assemblies
   const oak = buildOakSpecimenBlock(materials);
   lockRoot.add(oak.group);
 
@@ -143,24 +144,29 @@ async function mountDay21Bolt(): Promise<void> {
   const springPack = buildSpringPackAssembly(materials);
   lockRoot.add(springPack.group);
 
+  const camBarrel = buildCamBarrelAssembly(materials);
+  lockRoot.add(camBarrel.group);
+
   const gearTrain = buildGearTrainAssembly(materials);
   lockRoot.add(gearTrain.group);
 
-  const key = buildKeyAssembly(materials);
-  lockRoot.add(key.group);
+  const thumbTurn = buildThumbTurnAssembly(materials);
+  lockRoot.add(thumbTurn.group);
 
   // Sync initial visual transforms immediately before first frame
   deadbolt.group.position.x = lock.boltThrow01 * BOLT_TRAVEL;
-  key.group.rotation.z = -lock.keyAngleRad;
+  camBarrel.group.rotation.z = -lock.camAngleRad;
+  thumbTurn.group.rotation.z = -lock.knobAngleRad;
   springPack.update(lock.leverAnglesRad);
   gearTrain.update(
     lock.upperPinionAngleRad,
     lock.upperDetentAngleRad,
     lock.upperPawlAngleRad,
-    lock.curtainB1AngleRad,
-    lock.curtainB2AngleRad,
-    lock.curtainB3AngleRad,
-    lock.keyHomeB4AngleRad,
+    lock.knobDriveB1AngleRad,
+    lock.stepUpB2AngleRad,
+    lock.camDrivenC1AngleRad,
+    lock.transferB3AngleRad,
+    lock.lowerDetentB4AngleRad,
     lock.lowerPawlAngleRad
   );
 
@@ -169,7 +175,7 @@ async function mountDay21Bolt(): Promise<void> {
     getState: () => lock.getState(),
   };
 
-  // Interactive pointer ergonomics (key circular drag/click/scroll, individual lever picking, bolt nudge, orbit)
+  // Interactive pointer ergonomics (quarter-turn thumb-turn knob, deadbolt push/pull, lever inspect, 360 orbit)
   const canvas = stage.shell.canvas;
   let hoveredKind: HitKind = 'none';
   let hoveredLeverIndex = -1;
@@ -184,8 +190,8 @@ async function mountDay21Bolt(): Promise<void> {
   let prevOrbitX = 0;
   let prevOrbitY = 0;
 
-  let prevKeyPointerAngle = 0;
-  let keyScreenSign = 1;
+  let prevKnobPointerAngle = 0;
+  let knobScreenSign = 1;
 
   let leverDragStartPointerAngle = 0;
   let leverDragStartAngle = 0;
@@ -218,20 +224,20 @@ async function mountDay21Bolt(): Promise<void> {
     updateNdc(clientX, clientY);
     _raycaster.setFromCamera(_ndc, stage.camera);
 
-    const keyHits = _raycaster.intersectObjects(key.hitMeshes, false);
-    if (keyHits.length > 0) {
-      return { kind: 'key', leverIndex: -1, point: keyHits[0].point };
+    const knobHits = _raycaster.intersectObjects(thumbTurn.hitMeshes, false);
+    if (knobHits.length > 0) {
+      return { kind: 'knob', leverIndex: -1, point: knobHits[0].point };
+    }
+
+    const boltHits = _raycaster.intersectObjects(deadbolt.hitMeshes, false);
+    if (boltHits.length > 0) {
+      return { kind: 'bolt', leverIndex: -1, point: boltHits[0].point };
     }
 
     const leverHits = _raycaster.intersectObjects(leverPack.leverMeshes, false);
     if (leverHits.length > 0) {
       const idx = (leverHits[0].object.userData.leverIndex as number | undefined) ?? -1;
       return { kind: 'lever', leverIndex: idx, point: leverHits[0].point };
-    }
-
-    const boltHits = _raycaster.intersectObjects(deadbolt.hitMeshes, false);
-    if (boltHits.length > 0) {
-      return { kind: 'bolt', leverIndex: -1, point: boltHits[0].point };
     }
 
     return { kind: 'none', leverIndex: -1, point: null };
@@ -259,30 +265,29 @@ async function mountDay21Bolt(): Promise<void> {
     return true;
   }
 
-  const _keyAngleOut = { angle: 0, radiusPx: 0 };
+  const _knobAngleOut = { angle: 0, radiusPx: 0 };
 
-  function computeKeyScreenPolar(
+  function computeKnobScreenPolar(
     clientX: number,
     clientY: number,
     out: { angle: number; radiusPx: number }
   ): void {
     const rect = canvas.getBoundingClientRect();
     lockRoot.updateMatrixWorld();
-    _keyWorldCenter.set(KEY_X, KEY_Y, 0.55).applyMatrix4(lockRoot.matrixWorld);
-    _keyNdc.copy(_keyWorldCenter).project(stage.camera);
-    const sx = rect.left + (_keyNdc.x * 0.5 + 0.5) * rect.width;
-    const sy = rect.top + (-_keyNdc.y * 0.5 + 0.5) * rect.height;
+    _knobWorldCenter.set(KEY_X, KEY_Y, 0.31).applyMatrix4(lockRoot.matrixWorld);
+    _knobNdc.copy(_knobWorldCenter).project(stage.camera);
+    const sx = rect.left + (_knobNdc.x * 0.5 + 0.5) * rect.width;
+    const sy = rect.top + (-_knobNdc.y * 0.5 + 0.5) * rect.height;
     const dx = clientX - sx;
     const dy = clientY - sy;
     out.radiusPx = Math.hypot(dx, dy);
     out.angle = Math.atan2(dy, dx);
   }
 
-  function computeKeyViewSign(): number {
+  function computeKnobViewSign(): number {
     lockRoot.updateMatrixWorld();
     _lockForward.set(0, 0, 1).transformDirection(lockRoot.matrixWorld);
     stage.camera.getWorldDirection(_camForward);
-    // Viewing front face (+Z) means camera looks along -Z -> dot < 0 -> screen CW == lock CW (+1)
     return _lockForward.dot(_camForward) <= 0 ? 1 : -1;
   }
 
@@ -300,12 +305,12 @@ async function mountDay21Bolt(): Promise<void> {
     leverDragPhase = 'none';
     boltDragPhase = 'none';
 
-    if (hit.kind === 'key') {
+    if (hit.kind === 'knob') {
       stage.controls.enabled = false;
-      lock.beginKeyDrag();
-      computeKeyScreenPolar(ev.clientX, ev.clientY, _keyAngleOut);
-      prevKeyPointerAngle = _keyAngleOut.angle;
-      keyScreenSign = computeKeyViewSign();
+      lock.beginKnobDrag();
+      computeKnobScreenPolar(ev.clientX, ev.clientY, _knobAngleOut);
+      prevKnobPointerAngle = _knobAngleOut.angle;
+      knobScreenSign = computeKnobViewSign();
       canvas.style.cursor = 'grabbing';
       canvas.setPointerCapture(ev.pointerId);
     } else if (hit.kind === 'lever' && hit.leverIndex >= 0) {
@@ -317,8 +322,6 @@ async function mountDay21Bolt(): Promise<void> {
       } else {
         leverDragStartAngle = lock.leverAnglesRad[hit.leverIndex];
       }
-      // If lever is already lifted, pick directly; if resting at 0 deg, wait for directional intent
-      // so dragging downward/diagonally seamlessly orbits instead of dead-stopping against the 0-deg pin!
       if (leverDragStartAngle > 0.015) {
         leverDragPhase = 'picking';
         lock.beginLeverDrag(hit.leverIndex, leverDragStartAngle);
@@ -351,16 +354,15 @@ async function mountDay21Bolt(): Promise<void> {
       return;
     }
 
-    if (activeDrag === 'key') {
-      computeKeyScreenPolar(ev.clientX, ev.clientY, _keyAngleOut);
-      const curAngle = _keyAngleOut.angle;
-      const delta = wrapDeltaPi(curAngle - prevKeyPointerAngle);
-      prevKeyPointerAngle = curAngle;
-      // Smooth hub-proximity guard prevents erratic ±PI spin spikes when dragging straight across keyhole hub
-      if (_keyAngleOut.radiusPx < 9) return;
-      const hubWeight = Math.min(1, (_keyAngleOut.radiusPx - 9) / 14);
-      const clampedDelta = Math.max(-0.48, Math.min(0.48, delta)) * hubWeight * keyScreenSign;
-      lock.applyKeyDragDelta(clampedDelta);
+    if (activeDrag === 'knob') {
+      computeKnobScreenPolar(ev.clientX, ev.clientY, _knobAngleOut);
+      const curAngle = _knobAngleOut.angle;
+      const delta = wrapDeltaPi(curAngle - prevKnobPointerAngle);
+      prevKnobPointerAngle = curAngle;
+      if (_knobAngleOut.radiusPx < 9) return;
+      const hubWeight = Math.min(1, (_knobAngleOut.radiusPx - 9) / 14);
+      const clampedDelta = Math.max(-0.42, Math.min(0.42, delta)) * hubWeight * knobScreenSign;
+      lock.applyKnobDragDelta(clampedDelta);
       return;
     }
 
@@ -371,8 +373,6 @@ async function mountDay21Bolt(): Promise<void> {
         const dist = Math.hypot(dx, dy);
         if (dist < 5) return;
 
-        // Upward drag (dy < 0 and predominantly vertical) lifts that exact brass lever;
-        // downward or sideways sweep across a resting lever smoothly falls back to 3D orbit!
         if (dy < -3 && Math.abs(dy) >= Math.abs(dx) * 0.65) {
           leverDragPhase = 'picking';
           lock.beginLeverDrag(activeLeverIndex, leverDragStartAngle);
@@ -403,7 +403,6 @@ async function mountDay21Bolt(): Promise<void> {
         const dist = Math.hypot(dx, dy);
         if (dist < 5) return;
 
-        // Evaluate push direction in lock-local X so bolt dragging works identically from front & rear 180° orbits!
         const hasLocal = intersectLockLocalPlane(ev.clientX, ev.clientY, 0, _localHit);
         const localDx = hasLocal ? _localHit.x - boltDragStartLocalX : dx * 0.004;
         const pushingPastLockStop = lock.boltThrow01 >= 0.99 && localDx > 0.012;
@@ -434,12 +433,12 @@ async function mountDay21Bolt(): Promise<void> {
     hoveredKind = hit.kind;
     hoveredLeverIndex = hit.leverIndex;
 
-    if (hit.kind === 'key') {
+    if (hit.kind === 'knob') {
       canvas.style.cursor = 'grab';
-    } else if (hit.kind === 'lever') {
-      canvas.style.cursor = 'ns-resize';
     } else if (hit.kind === 'bolt') {
       canvas.style.cursor = 'ew-resize';
+    } else if (hit.kind === 'lever') {
+      canvas.style.cursor = 'ns-resize';
     } else {
       canvas.style.cursor = 'default';
     }
@@ -458,8 +457,8 @@ async function mountDay21Bolt(): Promise<void> {
     const heldMs = performance.now() - pointerDownTime;
     const isCleanClick = moveDist < 7 && heldMs < 400;
 
-    if (activeDrag === 'key') {
-      lock.endKeyDrag();
+    if (activeDrag === 'knob') {
+      lock.endKnobDrag();
       stage.controls.enabled = true;
       releaseCaptureSafe(ev);
       if (isCleanClick) {
@@ -470,7 +469,6 @@ async function mountDay21Bolt(): Promise<void> {
       if (leverDragPhase === 'picking') {
         lock.endLeverDrag();
       } else if (isCleanClick && activeLeverIndex >= 0) {
-        // Tactile quick spring-pluck impulse when clicking a lever directly
         lock.leverAngVels[activeLeverIndex] = Math.max(lock.leverAngVels[activeLeverIndex], 2.4);
       }
       stage.controls.enabled = true;
@@ -497,7 +495,7 @@ async function mountDay21Bolt(): Promise<void> {
   };
 
   const onPointerCancel = (ev: PointerEvent) => {
-    if (activeDrag === 'key') lock.endKeyDrag();
+    if (activeDrag === 'knob') lock.endKnobDrag();
     if (activeDrag === 'lever' && leverDragPhase === 'picking') lock.endLeverDrag();
     if (activeDrag === 'bolt' && boltDragPhase === 'sliding') lock.endBoltDrag();
     activeDrag = 'none';
@@ -511,12 +509,12 @@ async function mountDay21Bolt(): Promise<void> {
   };
 
   const onWheel = (ev: WheelEvent) => {
-    if (hoveredKind === 'key' && activeDrag === 'none') {
+    if (hoveredKind === 'knob' && activeDrag === 'none') {
       ev.preventDefault();
       ev.stopPropagation();
-      const sign = computeKeyViewSign();
-      const delta = Math.max(-0.42, Math.min(0.42, ev.deltaY * 0.0045)) * sign;
-      lock.nudgeKeyAngle(delta);
+      const sign = computeKnobViewSign();
+      const delta = Math.max(-0.28, Math.min(0.28, ev.deltaY * 0.0028)) * sign;
+      lock.nudgeKnobAngle(delta);
     }
   };
 
@@ -550,8 +548,9 @@ async function mountDay21Bolt(): Promise<void> {
     deadbolt.dispose();
     leverPack.dispose();
     springPack.dispose();
+    camBarrel.dispose();
     gearTrain.dispose();
-    key.dispose();
+    thumbTurn.dispose();
     materials.dispose();
   });
 
@@ -562,25 +561,27 @@ async function mountDay21Bolt(): Promise<void> {
     // 1. Subtle physical recoil tremor when heavy deadbolt strikes end stop or levers snap home
     lockRoot.position.x = lock.caseRecoilX;
 
-    // 2. Drive key rotation (-keyAngleRad maps phi=0 down -> CW around +Z view)
-    key.group.rotation.z = -lock.keyAngleRad;
+    // 2. Drive front quarter-turn brass thumb-turn knob (0..90 deg) & 3x faster coaxial inner cam barrel (45..315 deg)
+    thumbTurn.group.rotation.z = -lock.knobAngleRad;
+    camBarrel.group.rotation.z = -lock.camAngleRad;
 
-    // 3. Drive heavy blued-steel deadbolt translation through brass forend slot
+    // 4. Drive heavy blued-steel deadbolt translation through brass forend slot
     deadbolt.group.position.x = lock.boltThrow01 * BOLT_TRAVEL;
 
-    // 4. Drive coupled horological gear train & spring-loaded detent escapement pawls
+    // 5. Drive load-bearing 3:1 horological gear train & dual spring-loaded detent escapement pawls
     gearTrain.update(
       lock.upperPinionAngleRad,
       lock.upperDetentAngleRad,
       lock.upperPawlAngleRad,
-      lock.curtainB1AngleRad,
-      lock.curtainB2AngleRad,
-      lock.curtainB3AngleRad,
-      lock.keyHomeB4AngleRad,
+      lock.knobDriveB1AngleRad,
+      lock.stepUpB2AngleRad,
+      lock.camDrivenC1AngleRad,
+      lock.transferB3AngleRad,
+      lock.lowerDetentB4AngleRad,
       lock.lowerPawlAngleRad
     );
 
-    // 4. Drive all 5 independent brass lever pivots & their flexing phosphor-bronze leaf springs
+    // 6. Drive all 5 independent brass lever pivots & staggered flexing phosphor-bronze leaf springs
     for (let i = 0; i < LEVER_COUNT; i++) {
       leverPack.leverPivots[i].rotation.z = lock.leverAnglesRad[i];
 
@@ -595,11 +596,13 @@ async function mountDay21Bolt(): Promise<void> {
     }
     springPack.update(lock.leverAnglesRad);
 
-    // 5. Smooth hover burnish lifts for key bow & blued-steel deadbolt
-    const keyHoverGoal = activeDrag === 'key' || (activeDrag === 'none' && hoveredKind === 'key') ? 1 : 0;
-    materials.uKeyHover.value += (keyHoverGoal - materials.uKeyHover.value) * Math.min(1, dtSec * 14);
+    // 7. Smooth hover burnish lifts for thumb-turn brass knob & blued-steel deadbolt
+    const knobHoverGoal =
+      activeDrag === 'knob' || (activeDrag === 'none' && hoveredKind === 'knob') ? 1 : 0;
+    materials.uKnobHover.value += (knobHoverGoal - materials.uKnobHover.value) * Math.min(1, dtSec * 14);
 
-    const boltHoverGoal = activeDrag === 'bolt' || (activeDrag === 'none' && hoveredKind === 'bolt') ? 1 : 0;
+    const boltHoverGoal =
+      activeDrag === 'bolt' || (activeDrag === 'none' && hoveredKind === 'bolt') ? 1 : 0;
     materials.uBoltHover.value += (boltHoverGoal - materials.uBoltHover.value) * Math.min(1, dtSec * 14);
   });
 }

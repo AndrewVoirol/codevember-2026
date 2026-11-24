@@ -274,8 +274,8 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
     'tsl',
     'yellowOchre',
     'azuritePrussian',
-    'Skeletonized 19th-century Chubb-style 5-lever mortise deadbolt cutaway set into an oiled Raw-Umber charred-oak timber block with a beveled satin-brass forend faceplate, slotted wood-screws, heavy Prussian-blued steel deadbolt with U-shaped talon and riveted square bolt stump, five stacked independently patinated brass lever tumblers separated by spacer washers with anti-pick serrations, five flexing phosphor-bronze leaf springs, and a stepped Victorian warded bit key',
-    'Drag the Victorian key bow circularly (or click it, scroll over it, or press Space) to turn 360° and watch the 5 stepped bitting teeth lift all five brass levers against their flexing phosphor-bronze leaf springs to align their gates and throw the blued-steel deadbolt; drag any individual brass lever to pick it against spring torque; drag the deadbolt head or stump to feel misaligned lever blocking; drag empty space to orbit'
+    'Skeletonized cutaway 19th-century geared 5-lever Chubb thumb-turn mortise deadbolt set into an oiled Raw-Umber charred-oak door stile with a beveled satin-brass cutaway bezel and forend faceplate, pairing a quarter-turn architectural satin-brass thumb-turn knob and 3:1 coaxial involute speed-up gear train on a horological brass bridge with five patinated brass lever tumblers, staggered phosphor-bronze cantilever leaf springs, a heavy Prussian-blued steel deadbolt with upper rack-and-pinion detent escapement, and dual spring-loaded escapement pawls',
+    'Drag the brass thumb-turn knob circularly (or click it, scroll over it, or press Space) to throw 90° between Vertical Unlocked and Horizontal Locked and watch the 3:1 coaxial gear train drive the internal cam barrel 270°, lifting all five brass levers against their staggered phosphor-bronze leaf springs to throw the heavy blued-steel deadbolt; drag any brass lever upward to pick it against spring torque; drag the deadbolt head to feel misaligned lever blocking or back-drive the gear train when aligned; drag empty space to orbit 360°'
   ),
   createDay(
     22,

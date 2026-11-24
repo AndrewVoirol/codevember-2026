@@ -43,6 +43,8 @@ export interface BoltMaterials {
   keyBrass: THREE.MeshStandardNodeMaterial;
   hardenedSteel: THREE.MeshStandardNodeMaterial;
   leverMaterials: THREE.MeshStandardNodeMaterial[];
+  uKnobHover: { value: number };
+  /** Alias for uKnobHover */
   uKeyHover: { value: number };
   uBoltHover: { value: number };
   uLeverHovers: Array<{ value: number }>;
@@ -51,8 +53,7 @@ export interface BoltMaterials {
 }
 
 /**
- * Analytical 4-tap tetrahedral 3D FBM micro-normal perturbation in object space,
- * returned in OBJECT space (so concentric lathe/ring bumps can be composed before transforming to view space).
+ * Analytical 4-tap tetrahedral 3D FBM micro-normal perturbation in object space.
  */
 const perturbNormalAnisoObject = Fn(
   ([baseNorm_in, pos_in, scaleVec_in, strength_in]: [TslNode, TslNode, TslNode, TslNode]) => {
@@ -87,9 +88,6 @@ const perturbNormalAnisoObject = Fn(
   }
 );
 
-/**
- * View-space wrapper for anisotropic FBM normal perturbation.
- */
 const perturbNormalAniso = Fn(
   ([baseNorm_in, pos_in, scaleVec_in, strength_in]: [TslNode, TslNode, TslNode, TslNode]) => {
     return transformNormalToView(
@@ -98,10 +96,6 @@ const perturbNormalAniso = Fn(
   }
 );
 
-/**
- * Computes chamfered bevel / edge wear mask in object space:
- * returns ~0 on flat cardinal faces (|nx|, |ny|, or |nz| ~ 1) and ~1 on 45-deg chamfers & curved fillets.
- */
 const computeBevelEdgeMask = Fn(([nObj_in]: [TslNode]) => {
   const n = normalize(vec3(nObj_in));
   const maxAxis = max(abs(n.x), max(abs(n.y), abs(n.z)));
@@ -109,7 +103,7 @@ const computeBevelEdgeMask = Fn(([nObj_in]: [TslNode]) => {
 });
 
 export function createBoltMaterials(): BoltMaterials {
-  const uKeyHover = uniform(0);
+  const uKnobHover = uniform(0);
   const uBoltHover = uniform(0);
   const uLeverHovers: Array<{ value: number }> = [];
   const uLeverBinds: Array<{ value: number }> = [];
@@ -119,7 +113,6 @@ export function createBoltMaterials(): BoltMaterials {
   const pSienna = createPigmentUniforms('burntSienna');
   const pPrussian = createPigmentUniforms('azuritePrussian');
 
-  // Strictly canonical physical pigments from src/core/palette.ts (zero hardcoded RGBs)
   const rawUmberRgb = vec3(...MINERAL_PALETTE.rawUmber.rInfLinear);
   const burntSiennaRgb = vec3(...MINERAL_PALETTE.burntSienna.rInfLinear);
   const yellowOchreRgb = vec3(...MINERAL_PALETTE.yellowOchre.rInfLinear);
@@ -133,10 +126,6 @@ export function createBoltMaterials(): BoltMaterials {
 
   // ---------------------------------------------------------------------------
   // 1. Natural Oiled Charred-Oak Architectural Door-Stile Specimen Block
-  //    Organic non-uniform ring-porous oak cathedral growth rings (zero zebra stripes!),
-  //    dense fibrous vertical wood strands, etched dark oak vessel pores, luminous
-  //    quarter-sawn medullary ray flecks, lighter chisel-cut mortise walls, and
-  //    crisp concentric cross-cut end-grain with radial medullary spokes!
   // ---------------------------------------------------------------------------
   const charredOak = new THREE.MeshStandardNodeMaterial({
     metalness: 0.03,
@@ -148,14 +137,15 @@ export function createBoltMaterials(): BoltMaterials {
     const bevelMask = computeBevelEdgeMask(nObj);
     const endGrainMask = smoothstep(float(0.54), float(0.86), abs(nObj.y));
 
-    // Offset tree pith creates authentic natural cathedral grain on front & concentric rings on cut ends
     const pithOffset = vec2(positionLocal.x.add(1.48), positionLocal.z.add(1.12));
     const gentleBow = positionLocal.y.mul(positionLocal.y).mul(0.115);
     const slowWander = mineralToothFbm(positionLocal.mul(vec3(2.2, 0.48, 2.2)), float(1.45));
     const midWander = mineralToothFbm(positionLocal.mul(vec3(6.8, 1.4, 6.8)), float(1.25));
-    const growthRateVar = mineralToothFbm(positionLocal.mul(vec3(4.1, 0.35, 4.1)).add(vec3(3.2, 1.1, 5.7)), float(1.3));
+    const growthRateVar = mineralToothFbm(
+      positionLocal.mul(vec3(4.1, 0.35, 4.1)).add(vec3(3.2, 1.1, 5.7)),
+      float(1.3)
+    );
 
-    // Organic ring radius with natural tree growth-rate variation (breaks up any uniform stripe spacing!)
     const rPith = length(pithOffset)
       .add(gentleBow)
       .add(slowWander.sub(0.5).mul(0.24))
@@ -163,9 +153,6 @@ export function createBoltMaterials(): BoltMaterials {
     const warpedRingCoord = rPith.mul(22.5).add(growthRateVar.sub(0.5).mul(3.4));
     const warpedEndCoord = rPith.mul(26.0).add(growthRateVar.sub(0.5).mul(3.6));
 
-    // Authentic ring-porous oak profile:
-    //  - Narrow crisp dark latewood boundary (~24% of ring width) with asymmetric autumn->spring transition
-    //  - Open earlywood vessel-pore band right along the spring boundary of each annual ring
     const phaseLong = fract(warpedRingCoord.add(20.0));
     const latewoodLong = smoothstep(float(0.70), float(0.93), phaseLong).mul(
       float(1.0).sub(smoothstep(float(0.95), float(1.0), phaseLong))
@@ -188,14 +175,12 @@ export function createBoltMaterials(): BoltMaterials {
     const ringGrad = mix(earlySoftGradLong, earlySoftGradEnd, endGrainMask);
     const earlyPorousBand = mix(earlyPorousLong, earlyPorousEnd, endGrainMask);
 
-    // Rich fibrous vertical oak grain strands + elongated etched open oak vessel pores!
     const broadFiber = mineralToothFbm(positionLocal.mul(vec3(36.0, 2.6, 36.0)), float(1.3));
     const fineFibers = mineralToothFbm(positionLocal.mul(vec3(115.0, 6.2, 115.0)), float(1.25));
     const microVesselsLong = mineralToothFbm(positionLocal.mul(vec3(165.0, 11.5, 165.0)), float(1.2));
     const endPoresRaw = mineralToothFbm(positionLocal.mul(vec3(135.0, 135.0, 135.0)), float(1.3));
     const activePores = mix(microVesselsLong, endPoresRaw, endGrainMask);
 
-    // Dark recessed oak vessel streaks concentrated in earlywood porous ring zones + scattered fine fibers
     const vesselGroove = clamp(
       float(1.0)
         .sub(smoothstep(float(0.18), float(0.46), activePores))
@@ -205,7 +190,6 @@ export function createBoltMaterials(): BoltMaterials {
       1.0
     );
 
-    // Prominent quarter-sawn oak medullary ray flecks (iridescent silver-amber ribbons across grain!)
     const rayAngle = atan(pithOffset.y, pithOffset.x);
     const rayNoise = mineralToothFbm(
       vec3(rayAngle.mul(42.0), positionLocal.y.mul(16.0), rPith.mul(6.5)),
@@ -221,7 +205,6 @@ export function createBoltMaterials(): BoltMaterials {
     );
     const rayAccent = mix(rayFleckLong, rayLinesEnd.mul(0.74), endGrainMask);
 
-    // Rich deep linseed-oiled dark charred-oak heartwood palette (warm espresso-chestnut, NEVER cartoon milk-chocolate!)
     const heartwoodBase = mix(
       rawUmberRgb.mul(0.64),
       burntSiennaRgb.mul(0.50),
@@ -235,21 +218,21 @@ export function createBoltMaterials(): BoltMaterials {
     const raySheen = mix(yellowOchreRgb.mul(0.64), warmKaolinRgb.mul(0.38), 0.24);
     const earlyWithRays = mix(heartwoodRich, raySheen, rayAccent.mul(0.42));
 
-    // Deep charred latewood growth lines (crisp natural dark espresso contrast!)
     const darkLate = mix(rawUmberRgb.mul(0.085), azuriteRgb.mul(0.045), 0.22);
     const woodFigure = mix(earlyWithRays, darkLate, latewood.mul(0.86));
 
-    // Calibrated Kubelka-Munk raw-umber linseed-oil depth glaze
     const glazeThick = float(0.28).add(latewood.mul(0.26)).add(vesselGroove.mul(0.24));
     const kmGlazed = kubelkaMunkGlaze(pUmber.K, pUmber.S, glazeThick, woodFigure).mul(0.76);
     const oiledTimber = mix(woodFigure.mul(0.68), kmGlazed, 0.48);
 
-    // Lighter freshly-chiseled oak inside the mortise pocket & rebated forend walls vs deeper oiled exterior
     const inPocketX = smoothstep(float(-0.87), float(-0.81), positionLocal.x);
-    const inPocketY = float(1.0).sub(smoothstep(float(0.58), float(0.65), abs(positionLocal.y.sub(0.01))));
+    const inPocketY = float(1.0).sub(smoothstep(float(0.60), float(0.67), abs(positionLocal.y.sub(0.01))));
     const inRebateWall = smoothstep(float(0.89), float(0.95), positionLocal.x);
     const chiselCutMask = clamp(
-      inPocketX.mul(inPocketY).mul(smoothstep(float(0.24), float(0.10), positionLocal.z)).add(inRebateWall.mul(0.52)),
+      inPocketX
+        .mul(inPocketY)
+        .mul(smoothstep(float(0.24), float(0.10), positionLocal.z))
+        .add(inRebateWall.mul(0.52)),
       0.0,
       1.0
     );
@@ -258,11 +241,9 @@ export function createBoltMaterials(): BoltMaterials {
     );
     const withMortiseWalls = mix(oiledTimber, chiseledTone, chiselCutMask.mul(0.44));
 
-    // Warm hand-rubbed chamfer lift + richer oiled end-grain absorption
     const chamferLift = mix(withMortiseWalls, withMortiseWalls.mul(1.24), bevelMask.mul(0.52));
     const endGrainTone = chamferLift.mul(mix(float(1.0), float(0.88), endGrainMask));
 
-    // Crisp etched dark vessel-pore valleys + realistic deep-pocket shadow
     const deepPocketAO = mix(
       float(1.0),
       float(0.76),
@@ -272,7 +253,6 @@ export function createBoltMaterials(): BoltMaterials {
       .mul(mix(float(1.05), float(0.32), vesselGroove))
       .mul(deepPocketAO);
 
-    // Tactile fibrous grain relief: crisp vertical wood fibers + etched vessel grooves + ring boundary step!
     const normLongObj = perturbNormalAnisoObject(nObj, positionLocal, vec3(110.0, 6.2, 110.0), float(0.082));
     const normEndObj = perturbNormalAnisoObject(nObj, positionLocal, vec3(130.0, 130.0, 130.0), float(0.098));
     const ringSlope = sin(mix(warpedRingCoord, warpedEndCoord, endGrainMask).mul(6.283185)).mul(0.022);
@@ -296,7 +276,6 @@ export function createBoltMaterials(): BoltMaterials {
 
   // ---------------------------------------------------------------------------
   // 2. Oil-Blackened Machined Gunmetal Steel Lock Case Interior & Cutaway Rim
-  //    Visible fly-cutter / surface-grinder milling sheen + rubbed steel chamfer arrises!
   // ---------------------------------------------------------------------------
   const gunmetalCase = new THREE.MeshStandardNodeMaterial({
     metalness: 0.85,
@@ -307,13 +286,11 @@ export function createBoltMaterials(): BoltMaterials {
     const nObj = normalize(normalLocal);
     const bevelMask = computeBevelEdgeMask(nObj);
 
-    // Parallel surface-grinder tool-path lines along X + subtle rotary fly-cutter face-mill arcs on backplate
     const fineMill = mineralToothFbm(positionLocal.mul(vec3(12.0, 210.0, 72.0)), float(1.15));
     const millArcR = length(vec2(positionLocal.x.add(0.15), positionLocal.y.sub(0.08)));
     const flyCutterArc = sin(millArcR.mul(165.0).add(fineMill.mul(1.8))).mul(0.5).add(0.5);
     const oilMottle = mineralToothFbm(positionLocal.add(vec3(3.1, 1.7, 5.4)), float(12.5));
 
-    // Calibrated oil-blackened gunmetal slate (lifted cleanly above pitch black so backplate machining reads!)
     const steelDeep = mix(rawUmberRgb.mul(0.28), azuriteRgb.mul(0.34), 0.56);
     const steelMid = mix(rawUmberRgb.mul(0.44), azuriteRgb.mul(0.52), 0.54);
     const steelHighlight = mix(steelMid, boneCalciteRgb.mul(0.28), 0.42);
@@ -322,10 +299,8 @@ export function createBoltMaterials(): BoltMaterials {
     const millBlend = smoothstep(float(0.15), float(0.85), fineMill.mul(0.72).add(flyCutterArc.mul(0.28)));
     const baseSteel = mix(steelDeep, steelMid, millBlend.mul(0.65).add(0.22));
     const withOil = mix(baseSteel, oilCrevice, smoothstep(float(0.62), float(0.92), oilMottle).mul(0.26));
-    // Crisp bright rubbed-steel edge highlights along chamfered cutaway rim & wall bevels
     const withBevelWear = mix(withOil, steelHighlight, bevelMask.mul(0.58));
 
-    // Gentle cavity depth shading toward backplate (preserves visible fly-cutter steel behind gears!)
     const backAO = smoothstep(float(-0.22), float(0.06), positionLocal.z);
     gunmetalCase.colorNode = withBevelWear.mul(mix(float(0.78), float(1.04), backAO));
 
@@ -346,9 +321,7 @@ export function createBoltMaterials(): BoltMaterials {
   }
 
   // ---------------------------------------------------------------------------
-  // 3. Heavy Thermally Blued-Steel Deadbolt & Coaxial Detent Cams (Prussian-Blue Temper Steel)
-  //    Crisp parallel draw-filed milling lines, organic thermal temper sheen, AND
-  //    authentic bright-steel mechanical rub-through along chamfered edges & sliding rails!
+  // 3. Heavy Thermally Blued-Steel Deadbolt, Detent Cams & Accents
   // ---------------------------------------------------------------------------
   const bluedSteelBolt = new THREE.MeshStandardNodeMaterial({
     metalness: 0.92,
@@ -360,14 +333,12 @@ export function createBoltMaterials(): BoltMaterials {
     const bevelMask = computeBevelEdgeMask(nObj);
     const noseFaceMask = smoothstep(float(0.55), float(0.85), abs(nObj.x));
 
-    // High-frequency multi-scale draw-filed satin grain on sides (zero synthetic corduroy sine stripes!)
     const drawSide = mineralToothFbm(positionLocal.mul(vec3(8.5, 285.0, 285.0)), float(1.15));
     const drawMicro = mineralToothFbm(positionLocal.mul(vec3(22.0, 560.0, 560.0)), float(1.1));
     const groundNose = mineralToothFbm(positionLocal.mul(vec3(54.0, 220.0, 220.0)), float(1.15));
     const activeGrain = mix(drawSide.mul(0.62).add(drawMicro.mul(0.38)), groundNose, noseFaceMask);
     const temperWave = mineralToothFbm(positionLocal.add(vec3(4.2, 8.1, 2.3)), float(7.8));
 
-    // Deep Prussian-blue thermal temper steel + subtle violet-straw heat iridescence
     const blueDeep = mix(azuriteRgb.mul(0.52), lapisRgb.mul(0.46), 0.42);
     const blueMid = mix(azuriteRgb.mul(0.94), boneCalciteRgb.mul(0.24), 0.26);
     const temperVioletStraw = mix(lapisRgb.mul(0.68), burntSiennaRgb.mul(0.32), 0.32);
@@ -383,7 +354,6 @@ export function createBoltMaterials(): BoltMaterials {
     const boltBase = mix(blueDeep, mix(blueMid, kmBlue, 0.36), grainFactor);
     const withTemper = mix(boltBase, temperVioletStraw, smoothstep(float(0.54), float(0.88), temperWave).mul(0.30));
 
-    // Authentic mechanical wear: bright steel rub-through along forend sliding rails AND chamfered bevel edges!
     const railWearY = smoothstep(float(0.115), float(0.162), abs(positionLocal.y.sub(0.16))).mul(
       float(1.0).sub(noseFaceMask)
     );
@@ -411,9 +381,7 @@ export function createBoltMaterials(): BoltMaterials {
   }
 
   // ---------------------------------------------------------------------------
-  // 4. Precision Lathe-Turned Horological Gear Brass (Gears, Pinions, Curtain Wheel & Bridge)
-  //    True concentric lathe turning rings (length(localXY)), bright-burnished tooth tips &
-  //    chamfers, amber-umber oil-patinated roots & spoke recesses, and subtle verdigris age!
+  // 4. Precision Lathe-Turned Horological Gear Brass
   // ---------------------------------------------------------------------------
   const machinedGearBrass = new THREE.MeshStandardNodeMaterial({
     metalness: 0.91,
@@ -427,14 +395,12 @@ export function createBoltMaterials(): BoltMaterials {
     const rXY = length(positionLocal.xy);
     const angXY = atan(positionLocal.y, positionLocal.x);
 
-    // Authentic fine concentric watchmaker lathe turning grooves + radial chatter
     const latheFine = sin(rXY.mul(420.0)).mul(0.5).add(0.5);
     const latheMed = sin(rXY.mul(175.0).add(mineralToothFbm(positionLocal, float(24.0)).mul(1.8))).mul(0.5).add(0.5);
     const latheWave = latheFine.mul(0.58).add(latheMed.mul(0.42));
     const patinaMottle = mineralToothFbm(positionLocal.add(vec3(5.3, 2.7, 1.9)), float(26.0));
     const microFile = mineralToothFbm(positionLocal.mul(vec3(110.0, 110.0, 22.0)), float(1.15));
 
-    // Oil-patinated recesses near spoke pockets / tooth roots vs bright burnished outer tooth crowns & chamfers
     const rootRecessMask = smoothstep(float(0.125), float(0.042), rXY).mul(
       smoothstep(float(0.32), float(0.84), patinaMottle)
     );
@@ -455,19 +421,15 @@ export function createBoltMaterials(): BoltMaterials {
       mix(satinBrass, kmBrass, 0.22),
       latheWave.mul(0.55).add(microFile.mul(0.25)).add(0.20)
     );
-    // Warm dried clock-oil amber darkening + restrained trace of sheltered verdigris oxidation in recesses
     const withOilPatina = mix(baseGear, agedUmberBrass, rootRecessMask.mul(0.48));
     const creviceVerdigris = smoothstep(float(0.74), float(0.94), patinaMottle).mul(rootRecessMask);
     const withAge = mix(withOilPatina, patinaVerdigris, creviceVerdigris.mul(0.32));
-    // Crisp bright-burnished tooth tips & beveled spoke edges
     machinedGearBrass.colorNode = mix(withAge, brightBurnished, tipBurnishMask.mul(0.46));
 
-    // Concentric lathe turning normal grooves on front/back gear faces + crisp radial filing on tooth flanks!
     const baseMicroNorm = perturbNormalAnisoObject(nObj, positionLocal, vec3(92.0, 92.0, 26.0), float(0.014));
     const safeR = max(rXY, float(0.002));
     const radialDir = vec3(positionLocal.x.div(safeR), positionLocal.y.div(safeR), float(0.0));
     const radialTan = radialDir.sub(nObj.mul(dot(radialDir, nObj)));
-    // Add subtle tangential sunburst modulation so studio softbox splits across gear face
     const latheSlope = cos(rXY.mul(420.0))
       .mul(0.022)
       .add(cos(rXY.mul(175.0)).mul(0.011))
@@ -489,8 +451,7 @@ export function createBoltMaterials(): BoltMaterials {
   }
 
   // ---------------------------------------------------------------------------
-  // 5. Precision-Milled Aged Dark Horological Bronze (Deadbolt Upper Rack & Compound Pinion)
-  //    Warm patinated gunmetal-bronze with fine parallel milling lines, oil-darkened roots & bright tooth crowns!
+  // 5. Precision-Milled Aged Dark Horological Bronze (Rack, C1 & Rear Pinions)
   // ---------------------------------------------------------------------------
   const machinedBronzeRack = new THREE.MeshStandardNodeMaterial({
     metalness: 0.91,
@@ -533,8 +494,7 @@ export function createBoltMaterials(): BoltMaterials {
   }
 
   // ---------------------------------------------------------------------------
-  // 6. Mortised Forend Satin Brass Faceplate, Escutcheon, Washers & Slotted Screws
-  //    Crisp vertical satin draw-brushing + subtle oil patina in recesses + bright chamfers!
+  // 6. Mortised Forend Satin Brass Faceplate, Glazing Trim, Rosette & Screws
   // ---------------------------------------------------------------------------
   const forendBrass = new THREE.MeshStandardNodeMaterial({
     metalness: 0.91,
@@ -576,8 +536,7 @@ export function createBoltMaterials(): BoltMaterials {
   }
 
   // ---------------------------------------------------------------------------
-  // 7. Tempered Phosphor-Bronze Curved Leaf Springs & Detent Springs
-  //    Rolled spring temper grain + darkened anchor oil patina + bright rubbed contact tips
+  // 7. Tempered Phosphor-Bronze Curved Leaf Springs & Click Springs
   // ---------------------------------------------------------------------------
   const phosphorBronze = new THREE.MeshStandardNodeMaterial({
     metalness: 0.89,
@@ -619,13 +578,12 @@ export function createBoltMaterials(): BoltMaterials {
   }
 
   // ---------------------------------------------------------------------------
-  // 8. Ornate Victorian Key Hand-Rubbed Antique Brass Bow & Concentric Bitting Teeth
-  //    Darkened antique umber-patinated recesses contrasted against hand-burnished rims!
+  // 8. Architectural Hand-Rubbed Antique Brass Deadbolt Thumb-Turn Knob & Cam Lobes
   // ---------------------------------------------------------------------------
   const keyBrass = new THREE.MeshStandardNodeMaterial({
     metalness: 0.92,
     roughness: 0.20,
-    envMapIntensity: 1.38,
+    envMapIntensity: 1.40,
   });
   {
     const nObj = normalize(normalLocal);
@@ -634,8 +592,8 @@ export function createBoltMaterials(): BoltMaterials {
     const fineBuff = mineralToothFbm(positionLocal.add(vec3(2.9, 7.1, 1.3)), float(115.0));
 
     const antiqueDeep = mix(rawUmberRgb.mul(0.52), burntSiennaRgb.mul(0.46), 0.28);
-    const antiqueMid = mix(yellowOchreRgb.mul(0.96), rawUmberRgb.mul(0.68), 0.16);
-    const burnishedGold = mix(yellowOchreRgb.mul(1.26), boneCalciteRgb.mul(0.94), 0.42);
+    const antiqueMid = mix(yellowOchreRgb.mul(0.98), rawUmberRgb.mul(0.66), 0.14);
+    const burnishedGold = mix(yellowOchreRgb.mul(1.26), boneCalciteRgb.mul(0.95), 0.44);
 
     const rubMix = smoothstep(float(0.16), float(0.84), handRub.mul(0.55).add(fineBuff.mul(0.45)))
       .mul(0.52)
@@ -643,7 +601,7 @@ export function createBoltMaterials(): BoltMaterials {
     const patinated = mix(antiqueDeep, antiqueMid, rubMix);
     const withEdgeRub = mix(patinated, burnishedGold, clamp(bevelMask.mul(0.64), 0.0, 0.72));
 
-    keyBrass.colorNode = withEdgeRub.add(burnishedGold.mul(uKeyHover.mul(0.18)));
+    keyBrass.colorNode = withEdgeRub.add(burnishedGold.mul(uKnobHover.mul(0.18)));
     keyBrass.normalNode = perturbNormalAniso(
       nObj,
       positionLocal,
@@ -654,15 +612,14 @@ export function createBoltMaterials(): BoltMaterials {
       float(0.20)
         .add(handRub.sub(0.5).mul(0.10))
         .sub(bevelMask.mul(0.08))
-        .sub(uKeyHover.mul(0.04)),
+        .sub(uKnobHover.mul(0.04)),
       0.11,
       0.34
     );
   }
 
   // ---------------------------------------------------------------------------
-  // 9. Lathe-Turned Hardened Tool Steel (Arbors, Pawls, Bolt Stump, Pivot Post, Key Barrel)
-  //    Crisp concentric lathe turning grooves + oil-darkened shoulders + bright polished chamfers!
+  // 9. Lathe-Turned Hardened Tool Steel (Arbors, Pawls, Bolt Stump, Pivot Post, Shafts)
   // ---------------------------------------------------------------------------
   const hardenedSteel = new THREE.MeshStandardNodeMaterial({
     metalness: 0.94,
@@ -713,9 +670,7 @@ export function createBoltMaterials(): BoltMaterials {
   }
 
   // ---------------------------------------------------------------------------
-  // 10. Five Distinctly Patinated Hand-Filed Satin-Brass Chubb Lever Tumbler Plates (lever[0..4])
-  //     Crisp horizontal draw-file machining lines, oil-patinated H-gate/anti-pick roots,
-  //     and bright burnished sliding wear along the curved Chubb belly & spring contact crest!
+  // 10. Five Distinctly Patinated Hand-Filed Satin-Brass Chubb Lever Tumbler Plates
   // ---------------------------------------------------------------------------
   const leverMaterials: THREE.MeshStandardNodeMaterial[] = [];
   const leverToneScale = [0.76, 0.96, 0.83, 1.04, 0.91];
@@ -737,7 +692,6 @@ export function createBoltMaterials(): BoltMaterials {
     const bevelMask = computeBevelEdgeMask(nObj);
     const seedOff = vec3(float(i * 3.71 + 1.1), float(i * 2.13 + 0.7), float(i * 4.37));
 
-    // Crisp horizontal hand-filed satin grain along X (zero corduroy sine aliasing!) + aged patina mottle
     const brushX = mineralToothFbm(positionLocal.add(seedOff).mul(vec3(10.0, 280.0, 128.0)), float(1.15));
     const microFile = mineralToothFbm(positionLocal.add(seedOff.mul(1.3)).mul(vec3(26.0, 560.0, 210.0)), float(1.1));
     const ageMottle = mineralToothFbm(positionLocal.add(seedOff.mul(1.7)), float(22.0));
@@ -762,7 +716,6 @@ export function createBoltMaterials(): BoltMaterials {
       .add(0.28);
     const brushed = mix(brassOilPatina, mix(brassMid, kmLever, 0.18), grainMix);
 
-    // Oil darkening in sheltered H-gate / anti-pick root region + trace of verdigris oxidation
     const gatePocketMask = smoothstep(float(0.40), float(0.52), positionLocal.x)
       .mul(float(1.0).sub(smoothstep(float(0.86), float(0.98), positionLocal.x)))
       .mul(float(1.0).sub(smoothstep(float(0.14), float(0.22), abs(positionLocal.y.sub(0.04)))));
@@ -774,13 +727,11 @@ export function createBoltMaterials(): BoltMaterials {
       smoothstep(float(0.76), float(0.95), ageMottle).mul(gatePocketMask).mul(0.28)
     );
 
-    // Bright burnished wear along sliding Chubb belly arc (y < -0.09), top spring crest (y > 0.225), and beveled edges!
     const bellyWear = smoothstep(float(-0.08), float(-0.15), positionLocal.y);
     const crestWear = smoothstep(float(0.22), float(0.262), positionLocal.y);
     const wearMask = clamp(bevelMask.mul(0.54).add(bellyWear.mul(0.42)).add(crestWear.mul(0.38)), 0.0, 0.72);
     const finished = mix(withVerdigris, brassBurnish, wearMask);
 
-    // Subtle hover sheen lift + warm Realgar-Amber contact gleam when lever physically binds bolt stump
     const bindTint = mix(realgarAmberRgb, yellowOchreRgb, 0.35).mul(0.32);
     mat.colorNode = finished
       .add(brassMid.mul(uHover.mul(0.22)))
@@ -816,7 +767,8 @@ export function createBoltMaterials(): BoltMaterials {
     keyBrass,
     hardenedSteel,
     leverMaterials,
-    uKeyHover,
+    uKnobHover,
+    uKeyHover: uKnobHover,
     uBoltHover,
     uLeverHovers,
     uLeverBinds,

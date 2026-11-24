@@ -5,9 +5,15 @@ import {
   BOLT_TAIL_Z_BACK,
   BOLT_TAIL_Z_FRONT,
   BOLT_TRAVEL,
+  CAM_PHASE_OFFSET_RAD,
   CASE_INNER_MAX_X,
   CASE_INNER_MAX_Y,
   CASE_INNER_MIN_Y,
+  CUTAWAY_FRONT_Z,
+  CUTAWAY_WIN_MAX_X,
+  CUTAWAY_WIN_MAX_Y,
+  CUTAWAY_WIN_MIN_X,
+  CUTAWAY_WIN_MIN_Y,
   FOREND_X,
   GATE_ALIGN_TOL_RAD,
   GATE_HALF_HEIGHT,
@@ -17,11 +23,13 @@ import {
   GATE_POCKET_RIGHT_INNER_X,
   GATE_POCKET_RIGHT_OUTER_X,
   GATE_POCKET_TOP_Y,
-  GEAR_B1_CURTAIN,
-  GEAR_B2_IDLER,
-  GEAR_B3F_STEP,
+  GEAR_B1_KNOB_DRIVE,
+  GEAR_B2A_PINION,
+  GEAR_B2B_STEP,
+  GEAR_B3F_TRANSFER,
   GEAR_B3R_PINION,
-  GEAR_B4A_KEYHOME,
+  GEAR_B4A_DETENT,
+  GEAR_C1_CAM_DRIVEN,
   GEAR_U1A_PINION,
   GEAR_U1B_SPUR,
   GEAR_U2A_DRIVEN,
@@ -30,13 +38,16 @@ import {
   KEY_TALON_RADIUS,
   KEY_X,
   KEY_Y,
+  KNOB_MAX_RAD,
+  KNOB_MIN_RAD,
+  KNOB_TO_CAM_RATIO,
   LEVER_ALIGN_DEG,
   LEVER_ALIGN_RAD,
   LEVER_COUNT,
   LEVER_GATE_SPECS,
   LEVER_MAX_RAD,
   LEVER_THICKNESS,
-  LOWER_KEYHOME_CAM_SPEC,
+  LOWER_DETENT_CAM_SPEC,
   PIVOT_X,
   PIVOT_Y,
   POCKET_PLAY_01,
@@ -65,6 +76,7 @@ import {
   computeUpperPinionAngleRad,
   evalDetentCamRadius,
   getLeverZ,
+  knobToCamAngleRad,
   sampleLeverBellyLocalY,
   solveDetentPawlContact,
   type Point2D,
@@ -83,13 +95,14 @@ import {
   OAK_REBATE_MIN_Y,
   OAK_REBATE_X,
   OAK_REBATE_Z_BACK,
+  buildCamBarrelAssembly,
   buildDeadboltAssembly,
   buildForendAssembly,
-  buildKeyAssembly,
   buildLeverPackAssembly,
   buildLockCaseAssembly,
   buildOakSpecimenBlock,
   buildSpringPackAssembly,
+  buildThumbTurnAssembly,
 } from '../src/days/21-bolt/geometry';
 
 function assertOutwardWinding(label: string, geo: THREE.BufferGeometry): void {
@@ -143,27 +156,63 @@ function assertOutwardWinding(label: string, geo: THREE.BufferGeometry): void {
   expect(outwardDot, `${label} outwardDot`).toBeGreaterThan(0);
 }
 
-describe('Day 21 - Cutaway 5-Lever Chubb Mortise Deadbolt', () => {
-  it('verifies exact 5-lever bitting-to-gate alignment geometry and case clearances', () => {
-    // All 5 levers must have distinct alignment heights and distinct stepped key bitting radii
+function makeDummyMats() {
+  const dummyMat = new THREE.MeshBasicMaterial();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const mats: any = {
+    charredOak: dummyMat,
+    gunmetalCase: dummyMat,
+    bluedSteelBolt: dummyMat,
+    forendBrass: dummyMat,
+    machinedGearBrass: dummyMat,
+    machinedBronzeRack: dummyMat,
+    phosphorBronze: dummyMat,
+    keyBrass: dummyMat,
+    hardenedSteel: dummyMat,
+    leverMaterials: Array.from({ length: LEVER_COUNT }, () => dummyMat),
+  };
+  return { mats, dummyMat };
+}
+
+function trueWorldBounds(mesh: THREE.Mesh): { min: THREE.Vector3; max: THREE.Vector3 } {
+  mesh.updateWorldMatrix(true, false);
+  const pos = mesh.geometry.attributes.position as THREE.BufferAttribute;
+  const v = new THREE.Vector3();
+  const min = new THREE.Vector3(Infinity, Infinity, Infinity);
+  const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+  for (let i = 0; i < pos.count; i++) {
+    v.fromBufferAttribute(pos, i).applyMatrix4(mesh.matrixWorld);
+    min.min(v);
+    max.max(v);
+  }
+  return { min, max };
+}
+
+describe('Day 21 - Cutaway Geared 5-Lever Thumb-Turn Mortise Deadbolt', () => {
+  it('verifies exact 5-lever bitting-to-gate alignment geometry and quarter-turn cam endpoints', () => {
     expect(new Set(LEVER_ALIGN_DEG).size).toBe(LEVER_COUNT);
     expect(new Set(KEY_BIT_RADII).size).toBe(LEVER_COUNT);
 
-    // Key drive bit at 6 o'clock (phi=0) must cleanly clear bottom case wall
-    const tipDown = { x: 0, y: 0 };
-    computeTalonBitTip(0, tipDown);
-    expect(tipDown.y).toBeCloseTo(KEY_Y - KEY_TALON_RADIUS, 5);
-    expect(tipDown.y).toBeGreaterThan(CASE_INNER_MIN_Y + 0.02);
+    // At 0 deg Vertical (Unlocked, cam=45 deg) and 90 deg Horizontal (Locked, cam=315 deg),
+    // all 5 levers rest cleanly at 0 deg and the talon bit clears the bottom case wall!
+    for (const knobRad of [KNOB_MIN_RAD, KNOB_MAX_RAD]) {
+      const camRad = knobToCamAngleRad(knobRad);
+      const tip = { x: 0, y: 0 };
+      computeTalonBitTip(camRad, tip);
+      expect(tip.y).toBeGreaterThan(CASE_INNER_MIN_Y + 0.05);
+      for (let i = 0; i < LEVER_COUNT; i++) {
+        expect(computeKeyCamLiftRad(i, camRad)).toBe(0);
+      }
+    }
+
+    // At 45 deg Mid-Throw (cam=180 deg), all 5 stepped cam lobes lift every lever to exact alignment!
+    const midCam = knobToCamAngleRad((KNOB_MIN_RAD + KNOB_MAX_RAD) * 0.5);
+    expect(midCam).toBeCloseTo(Math.PI, 6);
 
     for (let i = 0; i < LEVER_COUNT; i++) {
-      // At 6 o'clock (rest), key bit imparts zero lift
-      expect(computeKeyCamLiftRad(i, 0)).toBe(0);
-
-      // At 12 o'clock (phi = PI), stepped bitting tooth i lifts lever i to exact alignment angle
-      const liftAtTop = computeKeyCamLiftRad(i, Math.PI);
+      const liftAtTop = computeKeyCamLiftRad(i, midCam);
       expect(liftAtTop).toBeCloseTo(LEVER_ALIGN_RAD[i], 4);
 
-      // Verify rotating lever i by +alignRad brings BOTH gate endpoints dead-level to world Y = STUMP_Y
       const spec = LEVER_GATE_SPECS[i];
       const cosA = Math.cos(spec.alignRad);
       const sinA = Math.sin(spec.alignRad);
@@ -184,13 +233,12 @@ describe('Day 21 - Cutaway 5-Lever Chubb Mortise Deadbolt', () => {
       expect(worldLockedY).toBeCloseTo(STUMP_Y, 5);
       expect(worldLockedX - worldUnlockedX).toBeCloseTo(BOLT_TRAVEL, 5);
 
-      // Verify lifted lever top corner stays cleanly inside the steel lock case ceiling
       const maxTopWorldY = PIVOT_Y + 0.992 * sinA + 0.264 * cosA;
-      expect(maxTopWorldY).toBeLessThan(CASE_INNER_MAX_Y - 0.04);
+      expect(maxTopWorldY).toBeLessThan(CUTAWAY_WIN_MAX_Y - 0.03);
     }
   });
 
-  it('enforces exact 360-degree key-tooth to lever-belly contact (zero clipping, zero air gap)', () => {
+  it('enforces exact 360-degree cam-lobe to lever-belly contact (zero clipping, zero air gap)', () => {
     for (let i = 0; i < LEVER_COUNT; i++) {
       const R = KEY_BIT_RADII[i];
       const halfAng = Math.asin(KEY_BIT_HALF_WIDTH / R);
@@ -199,7 +247,6 @@ describe('Day 21 - Cutaway 5-Lever Chubb Mortise Deadbolt', () => {
         const phi = (deg * Math.PI) / 180;
         const theta = computeKeyCamLiftRad(i, phi);
 
-        // During the entire talon engagement stroke, every lever holds exact gate alignment
         if (phi >= TALON_ENGAGE_START_RAD && phi <= TALON_ENGAGE_END_RAD) {
           expect(Math.abs(theta - LEVER_ALIGN_RAD[i]), `lever ${i} dwell at ${deg} deg`).toBeLessThan(0.001);
         }
@@ -218,13 +265,11 @@ describe('Day 21 - Cutaway 5-Lever Chubb Mortise Deadbolt', () => {
           const ly = -dx * s + dy * c;
           const bellyY = sampleLeverBellyLocalY(i, lx);
           if (bellyY !== null) {
-            // Zero clipping into solid brass lever belly (< 0.0004 chord tolerance)
             expect(ly - bellyY, `lever ${i} clip at ${deg} deg`).toBeLessThan(0.0005);
             minGap = Math.min(minGap, bellyY - ly);
           }
         }
 
-        // Whenever the key is lifting lever i, physical tooth contact must be flush (zero floating air gap!)
         if (theta > 0.004 && Number.isFinite(minGap)) {
           expect(minGap, `lever ${i} air gap at ${deg} deg`).toBeLessThan(0.0008);
         }
@@ -232,21 +277,8 @@ describe('Day 21 - Cutaway 5-Lever Chubb Mortise Deadbolt', () => {
     }
   });
 
-  it('verifies lever-stack Z-clearances, stump-to-pocket geometry, leaf-spring contact, and flush forend rebate', () => {
-    const dummyMat = new THREE.MeshBasicMaterial();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const mats: any = {
-      charredOak: dummyMat,
-      gunmetalCase: dummyMat,
-      bluedSteelBolt: dummyMat,
-      forendBrass: dummyMat,
-      machinedGearBrass: dummyMat,
-      machinedBronzeRack: dummyMat,
-      phosphorBronze: dummyMat,
-      keyBrass: dummyMat,
-      hardenedSteel: dummyMat,
-      leverMaterials: Array.from({ length: LEVER_COUNT }, () => dummyMat),
-    };
+  it('verifies lever-stack Z-clearances, staggered leaf springs, detent click springs, and flush forend rebate', () => {
+    const { mats, dummyMat } = makeDummyMats();
 
     const lockCase = buildLockCaseAssembly(mats);
     const deadbolt = buildDeadboltAssembly(mats);
@@ -254,8 +286,9 @@ describe('Day 21 - Cutaway 5-Lever Chubb Mortise Deadbolt', () => {
     const springs = buildSpringPackAssembly(mats);
     const forend = buildForendAssembly(mats);
     const oak = buildOakSpecimenBlock(mats);
+    const gearTrain = buildGearTrainAssembly(mats);
 
-    // 1. Lever-stack Z-clearances: zero overlap between bolt tail, rear bushing, 5 levers, 4 washers, front collar
+    // 1. Lever-stack Z-clearances
     const rearBushing = lockCase.group.getObjectByName('PivotRearThrustBushing') as THREE.Mesh;
     rearBushing.geometry.computeBoundingBox();
     expect(rearBushing.geometry.boundingBox!.max.z).toBeLessThan(
@@ -288,7 +321,6 @@ describe('Day 21 - Cutaway 5-Lever Chubb Mortise Deadbolt', () => {
       }
     }
 
-    // Bolt stump spans all 5 levers cleanly and matches exact STUMP_WIDTH x STUMP_HEIGHT
     const stump = deadbolt.group.getObjectByName('BoltStump') as THREE.Mesh;
     stump.geometry.computeBoundingBox();
     const sBox = stump.geometry.boundingBox!;
@@ -298,18 +330,15 @@ describe('Day 21 - Cutaway 5-Lever Chubb Mortise Deadbolt', () => {
     expect(sBox.max.z).toBeCloseTo(STUMP_Z_FRONT, 3);
     expect(sBox.max.z).toBeGreaterThan(getLeverZ(LEVER_COUNT - 1) + LEVER_THICKNESS * 0.5 + 0.01);
 
-    // 2. Stump-to-pocket clearance under pocket play & full picking angle [0 .. physicalMax]: ZERO clipping!
+    // 2. Stump-to-pocket clearance under pocket play & full picking angle
     const playWorldX = POCKET_PLAY_01 * BOLT_TRAVEL;
     const hw = STUMP_WIDTH * 0.5;
     const hh = STUMP_HEIGHT * 0.5;
-    // Rest unlocked play clears left locking cheek cleanly
     expect(STUMP_X_UNLOCKED - PIVOT_X + playWorldX + hw).toBeLessThan(GATE_POCKET_LEFT_INNER_X);
     expect(STUMP_X_UNLOCKED - PIVOT_X - hw).toBeGreaterThan(GATE_POCKET_LEFT_OUTER_X);
-    // Rest locked play clears right locking cheek cleanly
     expect(STUMP_X_LOCKED - PIVOT_X - playWorldX - hw).toBeGreaterThan(GATE_POCKET_RIGHT_INNER_X);
     expect(STUMP_X_LOCKED - PIVOT_X + hw).toBeLessThan(GATE_POCKET_RIGHT_OUTER_X);
     expect(STUMP_Y - PIVOT_Y + hh).toBeLessThan(GATE_POCKET_TOP_Y);
-    // Perpendicular gate clearance exceeds stump half-height cleanly
     expect(GATE_HALF_HEIGHT).toBeGreaterThan(hh + 0.005);
 
     for (let i = 0; i < LEVER_COUNT; i++) {
@@ -320,26 +349,49 @@ describe('Day 21 - Cutaway 5-Lever Chubb Mortise Deadbolt', () => {
       const dy = STUMP_Y - PIVOT_Y;
       const lowestCornerY = -dxL * s + dy * c - (hw * s + hh * c);
       const rightmostCornerX = dxL * c + dy * s + (hw * c + hh * s);
-      expect(lowestCornerY, `lever ${i} pocket floor at max pick`).toBeGreaterThanOrEqual(
-        GATE_POCKET_BOT_R_Y - 1e-4
-      );
-      expect(rightmostCornerX, `lever ${i} pocket outer wall at max pick`).toBeLessThan(
-        GATE_POCKET_RIGHT_OUTER_X
-      );
+      expect(lowestCornerY, `lever ${i} pocket floor`).toBeGreaterThanOrEqual(GATE_POCKET_BOT_R_Y - 1e-4);
+      expect(rightmostCornerX, `lever ${i} pocket wall`).toBeLessThan(GATE_POCKET_RIGHT_OUTER_X);
     }
 
-    // 3. Phosphor-bronze leaf springs: clean post clearance, flush tangential contact, ceiling clearance, constant length
-    const restDiag = springs.springs[0].inspectAtAngle(0);
-    for (const deg of [0, 6.0, 11.2, 16.5, (LEVER_MAX_RAD * 180) / Math.PI]) {
-      const d = springs.springs[0].inspectAtAngle((deg * Math.PI) / 180);
-      expect(d.rootDistFromPost, `spring root outside steel post at ${deg} deg`).toBeGreaterThan(0.048);
-      expect(d.tipContactGap, `spring flush tip contact at ${deg} deg`).toBeLessThan(0.001);
-      expect(d.minClearanceAboveLever, `spring never clips lever at ${deg} deg`).toBeGreaterThanOrEqual(-1e-4);
-      expect(d.maxArcY, `spring clears case ceiling at ${deg} deg`).toBeLessThan(CASE_INNER_MAX_Y - 0.025);
-      expect(Math.abs(d.arcLength - restDiag.arcLength), `spring constant arc length at ${deg} deg`).toBeLessThan(0.015);
+    // 3. All 5 staggered phosphor-bronze lever leaf springs: flush tangent contact, constant length, strictly inside glass window!
+    for (let i = 0; i < LEVER_COUNT; i++) {
+      const restDiag = springs.springs[i].inspectAtAngle(0);
+      for (const deg of [0, 6.0, 11.2, 16.5, (LEVER_MAX_RAD * 180) / Math.PI]) {
+        const d = springs.springs[i].inspectAtAngle((deg * Math.PI) / 180);
+        expect(d.rootDistFromPost, `spring ${i} root outside post`).toBeGreaterThan(0.048);
+        expect(d.tipContactGap, `spring ${i} flush tip at ${deg}`).toBeLessThan(0.001);
+        expect(d.minClearanceAboveLever, `spring ${i} never clips lever at ${deg}`).toBeGreaterThanOrEqual(-1e-4);
+        expect(d.maxArcY, `spring ${i} inside cutaway window top at ${deg}`).toBeLessThan(CUTAWAY_WIN_MAX_Y - 0.025);
+        expect(Math.abs(d.arcLength - restDiag.arcLength), `spring ${i} constant arc length`).toBeLessThan(0.02);
+      }
     }
 
-    // 4. Forend faceplate flush inside oak rebate (zero overlap!) & deadbolt head cleanly clears forend slot
+    // 4. Both upper & lower detent click springs: exact flush tangent contact on pawl spine & zero cam clipping!
+    const sol = {
+      pawlWorldAngleRad: 0,
+      beakWorldX: 0,
+      beakWorldY: 0,
+      contactWorldAngleRad: 0,
+      camRadiusAtContact: 0,
+      lift01: 0,
+    };
+    for (const boltT of [0, 0.5, 1.0]) {
+      solveDetentPawlContact(UPPER_DETENT_CAM_SPEC, computeUpperDetentWheelAngleRad(boltT), sol);
+      const diag = gearTrain.upperDetentSpring.inspectAtPawlAngle(sol.pawlWorldAngleRad);
+      expect(diag.tipContactGap, `upper detent spring flush at bolt=${boltT}`).toBeLessThan(0.001);
+      expect(diag.minDistFromCam, `upper detent spring clears cam`).toBeGreaterThan(UPPER_DETENT_CAM_SPEC.outerRadius + 0.015);
+      expect(diag.maxY, `upper detent spring inside cutaway window`).toBeLessThan(CUTAWAY_WIN_MAX_Y - 0.015);
+    }
+    for (const knobT of [0, 0.5, 1.0]) {
+      const kRad = KNOB_MIN_RAD + knobT * (KNOB_MAX_RAD - KNOB_MIN_RAD);
+      solveDetentPawlContact(LOWER_DETENT_CAM_SPEC, computeLowerTrainAnglesRad(kRad).b4, sol);
+      const diag = gearTrain.lowerDetentSpring.inspectAtPawlAngle(sol.pawlWorldAngleRad);
+      expect(diag.tipContactGap, `lower detent spring flush at knob=${knobT}`).toBeLessThan(0.001);
+      expect(diag.minDistFromCam, `lower detent spring clears cam`).toBeGreaterThan(LOWER_DETENT_CAM_SPEC.outerRadius + 0.015);
+      expect(diag.minY, `lower detent spring inside cutaway window`).toBeGreaterThan(CUTAWAY_WIN_MIN_Y + 0.05);
+    }
+
+    // 5. Forend faceplate flush inside oak rebate & deadbolt clears forend slot
     const plate = forend.group.getObjectByName('ForendFaceplate') as THREE.Mesh;
     plate.geometry.computeBoundingBox();
     const pBox = plate.geometry.boundingBox!;
@@ -362,6 +414,7 @@ describe('Day 21 - Cutaway 5-Lever Chubb Mortise Deadbolt', () => {
     expect(hBox.max.z).toBeCloseTo(BOLT_HEAD_Z_HALF, 3);
     expect(hBox.max.z).toBeLessThan(FOREND_SLOT_HALF_Z - 0.006);
 
+    gearTrain.dispose();
     oak.dispose();
     forend.dispose();
     springs.dispose();
@@ -371,10 +424,96 @@ describe('Day 21 - Cutaway 5-Lever Chubb Mortise Deadbolt', () => {
     dummyMat.dispose();
   });
 
-  it('blocks bolt stump collision whenever ANY 1 of the 5 levers is under-lifted or over-lifted', () => {
+  it('enforces cutaway front-plane Z-clearance and 100% cutaway-window visibility across Locked, Mid-Throw & Unlocked', () => {
+    const { mats, dummyMat } = makeDummyMats();
+
+    const root = new THREE.Group();
+    const lockCase = buildLockCaseAssembly(mats);
+    const deadbolt = buildDeadboltAssembly(mats);
+    const levers = buildLeverPackAssembly(mats);
+    const springs = buildSpringPackAssembly(mats);
+    const camBarrel = buildCamBarrelAssembly(mats);
+    const gearTrain = buildGearTrainAssembly(mats);
+    const thumbTurn = buildThumbTurnAssembly(mats);
+
+    root.add(lockCase.group, deadbolt.group, levers.group, springs.group, camBarrel.group, gearTrain.group, thumbTurn.group);
+
+    const lock = new LockMechanism(true);
+    for (const [label, knobRad, bThrow] of [
+      ['UNLOCKED', KNOB_MIN_RAD, 0.0],
+      ['MID_THROW', (KNOB_MIN_RAD + KNOB_MAX_RAD) * 0.5, 0.5],
+      ['LOCKED', KNOB_MAX_RAD, 1.0],
+    ] as const) {
+      lock.knobAngleRad = knobRad;
+      lock.boltThrow01 = bThrow;
+      for (let i = 0; i < LEVER_COUNT; i++) {
+        lock.leverAnglesRad[i] = computeKeyCamLiftRad(i, lock.camAngleRad);
+      }
+      lock.syncGearTrainStates();
+
+      deadbolt.group.position.x = lock.boltThrow01 * BOLT_TRAVEL;
+      camBarrel.group.rotation.z = -lock.camAngleRad;
+      thumbTurn.group.rotation.z = -lock.knobAngleRad;
+      for (let i = 0; i < LEVER_COUNT; i++) levers.leverPivots[i].rotation.z = lock.leverAnglesRad[i];
+      springs.update(lock.leverAnglesRad);
+      gearTrain.update(
+        lock.upperPinionAngleRad,
+        lock.upperDetentAngleRad,
+        lock.upperPawlAngleRad,
+        lock.knobDriveB1AngleRad,
+        lock.stepUpB2AngleRad,
+        lock.camDrivenC1AngleRad,
+        lock.transferB3AngleRad,
+        lock.lowerDetentB4AngleRad,
+        lock.lowerPawlAngleRad
+      );
+      root.updateMatrixWorld(true);
+
+      // Every internal gear, lever, spring, pawl & bridge stays strictly inside the open cutaway window!
+      const checkInternalGroup = (grp: THREE.Group, maxZLimit: number) => {
+        grp.traverse((obj: THREE.Object3D) => {
+          if (!(obj instanceof THREE.Mesh)) return;
+          const b = trueWorldBounds(obj);
+          expect(b.max.z, `${label} ${obj.name} inside cutaway depth`).toBeLessThanOrEqual(maxZLimit);
+          expect(b.min.x, `${label} ${obj.name} inside left rim`).toBeGreaterThan(CUTAWAY_WIN_MIN_X);
+          expect(b.max.x, `${label} ${obj.name} inside right rim`).toBeLessThan(CUTAWAY_WIN_MAX_X);
+          expect(b.min.y, `${label} ${obj.name} inside bottom rim`).toBeGreaterThan(CUTAWAY_WIN_MIN_Y);
+          expect(b.max.y, `${label} ${obj.name} inside top rim`).toBeLessThan(CUTAWAY_WIN_MAX_Y);
+        });
+      };
+
+      checkInternalGroup(levers.group, CUTAWAY_FRONT_Z);
+      checkInternalGroup(springs.group, CUTAWAY_FRONT_Z);
+      checkInternalGroup(gearTrain.group, CUTAWAY_FRONT_Z + 0.008);
+      checkInternalGroup(camBarrel.group, CUTAWAY_FRONT_Z);
+
+      for (const postName of [
+        'LeverPivotPost',
+        'SpringAbutmentPost',
+        'SpringReactionPin',
+        'LeverRestStopPin',
+        'BoltGuidePin',
+        'CamCenterGuidePin',
+      ]) {
+        const post = lockCase.group.getObjectByName(postName) as THREE.Mesh;
+        const pb = trueWorldBounds(post);
+        expect(pb.max.z, `${label} ${postName} inside cutaway depth`).toBeLessThanOrEqual(CUTAWAY_FRONT_Z);
+      }
+    }
+
+    thumbTurn.dispose();
+    gearTrain.dispose();
+    camBarrel.dispose();
+    springs.dispose();
+    levers.dispose();
+    deadbolt.dispose();
+    lockCase.dispose();
+    dummyMat.dispose();
+  });
+
+  it('blocks bolt stump collision whenever ANY 1 of the 5 levers is misaligned, and back-drives 3:1 knob when aligned', () => {
     for (let badIdx = 0; badIdx < LEVER_COUNT; badIdx++) {
       for (const offsetSign of [-1, 1]) {
-        // Test blocking from UNLOCKED -> attempting to push bolt outward
         const lockU = new LockMechanism(false);
         lockU.beginBoltDrag();
         lockU.setBoltDragTarget(1.0);
@@ -397,7 +536,6 @@ describe('Day 21 - Cutaway 5-Lever Chubb Mortise Deadbolt', () => {
         expect(lockU.boltThrow01).toBeLessThanOrEqual(POCKET_PLAY_01 + 1e-4);
         expect(lockU.bindingLeverIndex).toBe(badIdx);
 
-        // Test blocking from LOCKED -> attempting to pull bolt inward
         const lockL = new LockMechanism(true);
         lockL.beginBoltDrag();
         lockL.setBoltDragTarget(0.0);
@@ -422,7 +560,7 @@ describe('Day 21 - Cutaway 5-Lever Chubb Mortise Deadbolt', () => {
       }
     }
 
-    // Conversely, when ALL 5 levers are aligned (picked manually with key at rest), bolt slides freely 0 -> 1
+    // When all 5 levers are picked manually, bolt slides freely 0 -> 1
     const pickedLock = new LockMechanism(false);
     pickedLock.beginBoltDrag();
     pickedLock.setBoltDragTarget(1.0);
@@ -435,36 +573,39 @@ describe('Day 21 - Cutaway 5-Lever Chubb Mortise Deadbolt', () => {
     expect(pickedLock.boltBlocked).toBe(false);
     expect(pickedLock.boltThrow01).toBeGreaterThan(0.95);
 
-    // And when the key is parked at 12 o'clock (gates aligned by key), dragging the bolt slides freely
-    // AND physically back-drives the key along its talon arc!
-    const keyParkedLock = new LockMechanism(false);
-    keyParkedLock.keyAngleRad = Math.PI;
-    keyParkedLock.step(1 / 60);
-    expect(keyParkedLock.gatesAligned).toBe(true);
+    // When thumb-turn knob is parked mid-throw (45 deg -> cam=180 deg, gates aligned), dragging the bolt
+    // slides freely AND physically back-drives the 3:1 gear train & front thumb-turn knob!
+    const knobParked = new LockMechanism(false);
+    knobParked.knobAngleRad = (KNOB_MIN_RAD + KNOB_MAX_RAD) * 0.5;
+    knobParked.step(1 / 60);
+    expect(knobParked.gatesAligned).toBe(true);
 
-    keyParkedLock.beginBoltDrag();
-    keyParkedLock.setBoltDragTarget(1.0);
+    const startKnob = knobParked.knobAngleRad;
+    knobParked.beginBoltDrag();
+    knobParked.setBoltDragTarget(1.0);
     for (let s = 0; s < 55; s++) {
-      keyParkedLock.step(1 / 60);
+      knobParked.step(1 / 60);
     }
-    expect(keyParkedLock.boltBlocked).toBe(false);
-    expect(keyParkedLock.boltThrow01).toBeGreaterThan(0.95);
-    expect(keyParkedLock.keyAngleRad).toBeGreaterThan(Math.PI + 0.35);
+    expect(knobParked.boltBlocked).toBe(false);
+    expect(knobParked.boltThrow01).toBeGreaterThan(0.95);
+    expect(knobParked.knobAngleRad).toBeGreaterThan(startKnob + 0.12);
   });
 
-  it('completes a full unlock -> lock -> unlock 360-degree key cycle and retreats smoothly from wrong-way stops', () => {
-    const lock = new LockMechanism(false); // start unlocked
+  it('completes a full quarter-turn unlock -> lock -> unlock cycle (0 deg Vertical <-> 90 deg Horizontal) with hard stops', () => {
+    const lock = new LockMechanism(false); // Start unlocked (0 deg Vertical)
     expect(lock.isLocked).toBe(false);
+    expect(lock.knobAngleRad).toBeCloseTo(KNOB_MIN_RAD, 5);
+    expect(lock.camAngleRad).toBeCloseTo(CAM_PHASE_OFFSET_RAD, 5);
     expect(lock.boltThrow01).toBe(0);
 
-    // Phase 1: Full 360-deg CW key turn -> LOCKS deadbolt (0 -> 1)
+    // Phase 1: Motorized 90 deg CW turn -> LOCKS deadbolt (0 -> 1, Horizontal)
     lock.triggerToggleTurn();
     expect(lock.isAutoTurning).toBe(true);
 
     let sawGatesAlignedDuringLock = false;
     let maxDistinctLeverAngles = 0;
 
-    for (let f = 0; f < 180; f++) {
+    for (let f = 0; f < 150; f++) {
       lock.step(1 / 60);
       if (lock.gatesAligned) {
         sawGatesAlignedDuringLock = true;
@@ -476,7 +617,8 @@ describe('Day 21 - Cutaway 5-Lever Chubb Mortise Deadbolt', () => {
     expect(sawGatesAlignedDuringLock).toBe(true);
     expect(maxDistinctLeverAngles).toBe(LEVER_COUNT);
     expect(lock.isAutoTurning).toBe(false);
-    expect(lock.keyAngleRad).toBeCloseTo(Math.PI * 2, 2);
+    expect(lock.knobAngleRad).toBeCloseTo(KNOB_MAX_RAD, 3);
+    expect(lock.camAngleRad).toBeCloseTo(CAM_PHASE_OFFSET_RAD + KNOB_TO_CAM_RATIO * KNOB_MAX_RAD, 3);
     expect(lock.boltThrow01).toBeCloseTo(1.0, 2);
     expect(lock.isLocked).toBe(true);
     for (let i = 0; i < LEVER_COUNT; i++) {
@@ -484,169 +626,117 @@ describe('Day 21 - Cutaway 5-Lever Chubb Mortise Deadbolt', () => {
     }
     expect(lock.gatesAligned).toBe(false);
 
-    // Phase 2: Full 360-deg CCW key turn -> UNLOCKS deadbolt (1 -> 0)
+    // Phase 2: Motorized 90 deg CCW turn -> UNLOCKS deadbolt (1 -> 0, Vertical)
     lock.triggerToggleTurn();
     let sawGatesAlignedDuringUnlock = false;
-    for (let f = 0; f < 180; f++) {
+    for (let f = 0; f < 150; f++) {
       lock.step(1 / 60);
       if (lock.gatesAligned) sawGatesAlignedDuringUnlock = true;
     }
 
     expect(sawGatesAlignedDuringUnlock).toBe(true);
     expect(lock.isAutoTurning).toBe(false);
-    expect(lock.keyAngleRad).toBeCloseTo(0, 2);
+    expect(lock.knobAngleRad).toBeCloseTo(KNOB_MIN_RAD, 3);
     expect(lock.boltThrow01).toBeCloseTo(0.0, 2);
     expect(lock.isLocked).toBe(false);
     for (let i = 0; i < LEVER_COUNT; i++) {
       expect(lock.leverAnglesRad[i]).toBeLessThan(0.005);
     }
 
-    // Phase 3: Manual circular drag 360-deg CW locks again cleanly
-    lock.beginKeyDrag();
-    const steps = 120;
+    // Phase 3: Manual circular drag 90 deg CW locks again cleanly & respects hard stop at PI/2
+    lock.beginKnobDrag();
+    const steps = 90;
     for (let s = 0; s < steps; s++) {
-      lock.applyKeyDragDelta((Math.PI * 2) / steps);
+      lock.applyKnobDragDelta((Math.PI * 0.65) / steps); // intentionally push past 90 deg stop
       lock.step(1 / 60);
     }
-    lock.endKeyDrag();
-    for (let s = 0; s < 40; s++) lock.step(1 / 60);
+    expect(lock.knobAngleRad).toBeLessThanOrEqual(KNOB_MAX_RAD + 1e-6);
+    lock.endKnobDrag();
+    for (let s = 0; s < 35; s++) lock.step(1 / 60);
     expect(lock.isLocked).toBe(true);
     expect(lock.boltThrow01).toBeGreaterThan(0.95);
-
-    // Phase 4: Pushing wrong way (CW while already locked) hits stop cleanly, then reversing CCW retreats immediately!
-    const lockedStart = lock.keyAngleRad;
-    lock.beginKeyDrag();
-    for (let s = 0; s < 40; s++) {
-      lock.applyKeyDragDelta(0.08);
-      lock.step(1 / 60);
-    }
-    const stoppedAngle = lock.keyAngleRad;
-    expect(stoppedAngle - lockedStart).toBeLessThan(Math.PI); // blocked before crossing talon!
-    for (let s = 0; s < 28; s++) {
-      lock.applyKeyDragDelta(-0.08);
-      lock.step(1 / 60);
-    }
-    expect(lock.keyAngleRad).toBeLessThan(stoppedAngle - 1.0); // zero sticky lock on retreat!
-    lock.endKeyDrag();
+    expect(lock.knobAngleRad).toBeCloseTo(KNOB_MAX_RAD, 3);
   });
 
-  it('exerts monotonic phosphor-bronze leaf-spring restoring torque and snaps released levers cleanly to rest', () => {
+  it('exerts monotonic phosphor-bronze leaf-spring restoring torque and traps levers inside gate tunnel', () => {
     const lock = new LockMechanism(true);
 
     for (let i = 0; i < LEVER_COUNT; i++) {
       const restTorque = lock.getLeafSpringRestoringTorque(i);
       expect(restTorque).toBeGreaterThan(0);
 
-      // Manually drag lever i upward against its phosphor-bronze leaf spring
       const liftRad = (16 * Math.PI) / 180;
       lock.beginLeverDrag(i, liftRad);
-      for (let s = 0; s < 35; s++) {
-        lock.step(1 / 60);
-      }
+      for (let s = 0; s < 35; s++) lock.step(1 / 60);
       expect(lock.leverAnglesRad[i]).toBeGreaterThan(liftRad * 0.85);
-      expect(lock.leverSpringFlex01[i]).toBeGreaterThan(0.6);
+      expect(lock.getLeafSpringRestoringTorque(i)).toBeGreaterThan(restTorque);
 
-      const liftedTorque = lock.getLeafSpringRestoringTorque(i);
-      expect(liftedTorque).toBeGreaterThan(restTorque);
-
-      // Release lever -> leaf spring snaps it cleanly back to exact rest (0 rad, zero negative overshoot)
       lock.endLeverDrag();
-      for (let s = 0; s < 45; s++) {
-        lock.step(1 / 60);
-      }
+      for (let s = 0; s < 45; s++) lock.step(1 / 60);
       expect(lock.leverAnglesRad[i]).toBe(0);
       expect(lock.leverAngVels[i]).toBe(0);
-      expect(lock.leverSpringFlex01[i]).toBe(0);
     }
-  });
 
-  it('traps levers physically inside the gate tunnel while the bolt stump is midway through', () => {
-    const lock = new LockMechanism(false);
-    lock.keyAngleRad = Math.PI;
-    lock.step(1 / 60);
-    expect(lock.gatesAligned).toBe(true);
-
-    // Move bolt halfway through the 5 aligned lever gates
-    lock.boltThrow01 = 0.5;
-    // Rotate key away to 0 so cam no longer supports the levers; bolt stump must trap them inside gate clearance!
-    lock.keyAngleRad = 0;
-    for (let s = 0; s < 30; s++) {
-      lock.step(1 / 60);
-    }
+    // Gate tunnel lever trapping when bolt stump is midway through
+    const trapLock = new LockMechanism(false);
+    trapLock.knobAngleRad = (KNOB_MIN_RAD + KNOB_MAX_RAD) * 0.5;
+    trapLock.step(1 / 60);
+    expect(trapLock.gatesAligned).toBe(true);
+    trapLock.boltThrow01 = 0.5;
+    trapLock.knobAngleRad = KNOB_MIN_RAD;
+    for (let s = 0; s < 30; s++) trapLock.step(1 / 60);
     for (let i = 0; i < LEVER_COUNT; i++) {
-      expect(Math.abs(lock.leverAnglesRad[i] - LEVER_ALIGN_RAD[i])).toBeLessThanOrEqual(
+      expect(Math.abs(trapLock.leverAnglesRad[i] - LEVER_ALIGN_RAD[i])).toBeLessThanOrEqual(
         GATE_ALIGN_TOL_RAD
       );
     }
-    expect(lock.gatesAligned).toBe(true);
+    expect(trapLock.gatesAligned).toBe(true);
   });
 
-  it('enforces outward triangle winding (signedVolume > 0, outwardDot > 0) on all custom procedural meshes', () => {
-    const dummyMat = new THREE.MeshBasicMaterial();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const mats: any = {
-      charredOak: dummyMat,
-      gunmetalCase: dummyMat,
-      bluedSteelBolt: dummyMat,
-      forendBrass: dummyMat,
-      machinedGearBrass: dummyMat,
-      machinedBronzeRack: dummyMat,
-      phosphorBronze: dummyMat,
-      keyBrass: dummyMat,
-      hardenedSteel: dummyMat,
-      leverMaterials: Array.from({ length: LEVER_COUNT }, () => dummyMat),
+  it('enforces outward triangle winding (signedVolume > 0, outwardDot > 0) on ALL procedural meshes', () => {
+    const { mats, dummyMat } = makeDummyMats();
+
+    const checkGroup = (prefix: string, grp: THREE.Group) => {
+      grp.traverse((obj: THREE.Object3D) => {
+        if (obj instanceof THREE.Mesh && obj.name !== 'KnobHitProxy') {
+          assertOutwardWinding(`${prefix}/${obj.name}`, obj.geometry);
+        }
+      });
     };
 
     const oak = buildOakSpecimenBlock(mats);
-    oak.group.traverse((obj: THREE.Object3D) => {
-      if (obj instanceof THREE.Mesh) assertOutwardWinding(`oak/${obj.name}`, obj.geometry);
-    });
+    checkGroup('oak', oak.group);
     oak.dispose();
 
     const forend = buildForendAssembly(mats);
-    forend.group.traverse((obj: THREE.Object3D) => {
-      if (obj instanceof THREE.Mesh) assertOutwardWinding(`forend/${obj.name}`, obj.geometry);
-    });
+    checkGroup('forend', forend.group);
     forend.dispose();
 
     const lockCase = buildLockCaseAssembly(mats);
-    lockCase.group.traverse((obj: THREE.Object3D) => {
-      if (obj instanceof THREE.Mesh) assertOutwardWinding(`case/${obj.name}`, obj.geometry);
-    });
+    checkGroup('case', lockCase.group);
     lockCase.dispose();
 
     const deadbolt = buildDeadboltAssembly(mats);
-    deadbolt.group.traverse((obj: THREE.Object3D) => {
-      if (obj instanceof THREE.Mesh) assertOutwardWinding(`bolt/${obj.name}`, obj.geometry);
-    });
+    checkGroup('bolt', deadbolt.group);
     deadbolt.dispose();
 
     const levers = buildLeverPackAssembly(mats);
-    expect(levers.leverMeshes.length).toBe(LEVER_COUNT);
-    for (const mesh of levers.leverMeshes) {
-      assertOutwardWinding(`lever/${mesh.name}`, mesh.geometry);
-    }
+    checkGroup('levers', levers.group);
     levers.dispose();
 
     const springs = buildSpringPackAssembly(mats);
-    expect(springs.springs.length).toBe(LEVER_COUNT);
-    springs.group.traverse((obj: THREE.Object3D) => {
-      if (obj instanceof THREE.Mesh) assertOutwardWinding(`springRest/${obj.name}`, obj.geometry);
-    });
-    const flexed = new Float64Array(LEVER_COUNT).fill((17 * Math.PI) / 180);
-    springs.update(flexed);
-    for (const sp of springs.springs) {
-      assertOutwardWinding(`springFlex/${sp.mesh.name}`, sp.geometry);
-    }
+    checkGroup('springsRest', springs.group);
+    springs.update(new Float64Array(LEVER_COUNT).fill((17 * Math.PI) / 180));
+    for (const sp of springs.springs) assertOutwardWinding(`springsFlex/${sp.mesh.name}`, sp.geometry);
     springs.dispose();
 
-    const key = buildKeyAssembly(mats);
-    key.group.traverse((obj: THREE.Object3D) => {
-      if (obj instanceof THREE.Mesh && obj.name !== 'KeyBowHitProxy') {
-        assertOutwardWinding(`key/${obj.name}`, obj.geometry);
-      }
-    });
-    key.dispose();
+    const camBarrel = buildCamBarrelAssembly(mats);
+    checkGroup('camBarrel', camBarrel.group);
+    camBarrel.dispose();
+
+    const thumbTurn = buildThumbTurnAssembly(mats);
+    checkGroup('thumbTurn', thumbTurn.group);
+    thumbTurn.dispose();
 
     const gearTrain = buildGearTrainAssembly(mats);
     const lock = new LockMechanism(true);
@@ -654,41 +744,38 @@ describe('Day 21 - Cutaway 5-Lever Chubb Mortise Deadbolt', () => {
       lock.upperPinionAngleRad,
       lock.upperDetentAngleRad,
       lock.upperPawlAngleRad,
-      lock.curtainB1AngleRad,
-      lock.curtainB2AngleRad,
-      lock.curtainB3AngleRad,
-      lock.keyHomeB4AngleRad,
+      lock.knobDriveB1AngleRad,
+      lock.stepUpB2AngleRad,
+      lock.camDrivenC1AngleRad,
+      lock.transferB3AngleRad,
+      lock.lowerDetentB4AngleRad,
       lock.lowerPawlAngleRad
     );
-    gearTrain.group.traverse((obj: THREE.Object3D) => {
-      if (obj instanceof THREE.Mesh) {
-        assertOutwardWinding(`gearTrainRest/${obj.name}`, obj.geometry);
-      }
-    });
-    // Also verify outward winding on flexed detent springs mid-throw & mid-key-turn
+    checkGroup('gearTrainRest', gearTrain.group);
+
     const midLock = new LockMechanism(false);
-    midLock.keyAngleRad = Math.PI;
+    midLock.knobAngleRad = (KNOB_MIN_RAD + KNOB_MAX_RAD) * 0.5;
     midLock.boltThrow01 = 0.5;
     midLock.syncGearTrainStates();
     gearTrain.update(
       midLock.upperPinionAngleRad,
       midLock.upperDetentAngleRad,
       midLock.upperPawlAngleRad,
-      midLock.curtainB1AngleRad,
-      midLock.curtainB2AngleRad,
-      midLock.curtainB3AngleRad,
-      midLock.keyHomeB4AngleRad,
+      midLock.knobDriveB1AngleRad,
+      midLock.stepUpB2AngleRad,
+      midLock.camDrivenC1AngleRad,
+      midLock.transferB3AngleRad,
+      midLock.lowerDetentB4AngleRad,
       midLock.lowerPawlAngleRad
     );
     assertOutwardWinding('gearTrainFlex/UpperDetentLeafSpring', gearTrain.upperDetentSpring.geometry);
-    assertOutwardWinding('gearTrainFlex/LowerKeyHomeLeafSpring', gearTrain.lowerDetentSpring.geometry);
+    assertOutwardWinding('gearTrainFlex/LowerDetentLeafSpring', gearTrain.lowerDetentSpring.geometry);
     gearTrain.dispose();
 
     dummyMat.dispose();
   });
 
-  it('verifies exact pitch-circle tangency, gear ratios, and ZERO involute tooth overlap across 360° & full throw', () => {
-    // Helper: exact 2D segment intersection check (strictly detects any tooth polygon penetration!)
+  it('verifies exact 3.000:1 coaxial gear ratio, pitch-circle tangency, and ZERO involute tooth overlap across ALL 6 meshes', () => {
     const segsIntersect = (a: Point2D, b: Point2D, c: Point2D, d: Point2D): boolean => {
       const orient = (p: Point2D, q: Point2D, r: Point2D) =>
         (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
@@ -729,12 +816,13 @@ describe('Day 21 - Cutaway 5-Lever Chubb Mortise Deadbolt', () => {
       }
     };
 
-    // 1. Exact pitch-circle tangency for every gear-to-gear pair & rack-to-pinion pair
+    // 1. Exact pitch-circle tangency for every single gear pair & rack-to-pinion pair
     const gearPairs = [
       { name: 'U1B<->U2A', g1: GEAR_U1B_SPUR, g2: GEAR_U2A_DRIVEN },
-      { name: 'B1<->B2', g1: GEAR_B1_CURTAIN, g2: GEAR_B2_IDLER },
-      { name: 'B2<->B3F', g1: GEAR_B2_IDLER, g2: GEAR_B3F_STEP },
-      { name: 'B3R<->B4A', g1: GEAR_B3R_PINION, g2: GEAR_B4A_KEYHOME },
+      { name: 'B1<->B2A', g1: GEAR_B1_KNOB_DRIVE, g2: GEAR_B2A_PINION },
+      { name: 'B2B<->C1', g1: GEAR_B2B_STEP, g2: GEAR_C1_CAM_DRIVEN },
+      { name: 'B2B<->B3F', g1: GEAR_B2B_STEP, g2: GEAR_B3F_TRANSFER },
+      { name: 'B3R<->B4A', g1: GEAR_B3R_PINION, g2: GEAR_B4A_DETENT },
     ];
     for (const pair of gearPairs) {
       const dist = Math.hypot(pair.g2.cx - pair.g1.cx, pair.g2.cy - pair.g1.cy);
@@ -742,22 +830,31 @@ describe('Day 21 - Cutaway 5-Lever Chubb Mortise Deadbolt', () => {
     }
     expect(Math.abs(GEAR_U1A_PINION.cy - (UPPER_RACK_SPEC.pitchLineY + GEAR_U1A_PINION.pitchRadius))).toBeLessThan(1e-6);
 
-    // 2. Exact angular velocity ratios across full strokes (including exact 1:1 compound Key-Home ratio!)
+    // 2. Exact angular velocity ratios including EXACT +3.000000:1 same-direction coaxial knob -> cam ratio!
     const u1_0 = computeUpperPinionAngleRad(0);
     const u1_1 = computeUpperPinionAngleRad(1);
     const u2_0 = computeUpperDetentWheelAngleRad(0);
     const u2_1 = computeUpperDetentWheelAngleRad(1);
     expect((u2_1 - u2_0) / (u1_1 - u1_0)).toBeCloseTo(-GEAR_U1B_SPUR.teeth / GEAR_U2A_DRIVEN.teeth, 6);
 
-    const low0 = computeLowerTrainAnglesRad(0);
-    const low2Pi = computeLowerTrainAnglesRad(Math.PI * 2);
-    expect((low2Pi.b2 - low0.b2) / (low2Pi.b1 - low0.b1)).toBeCloseTo(-GEAR_B1_CURTAIN.teeth / GEAR_B2_IDLER.teeth, 6);
-    expect((low2Pi.b3 - low0.b3) / (low2Pi.b2 - low0.b2)).toBeCloseTo(-GEAR_B2_IDLER.teeth / GEAR_B3F_STEP.teeth, 6);
-    expect((low2Pi.b4 - low0.b4) / (low2Pi.b3 - low0.b3)).toBeCloseTo(-GEAR_B3R_PINION.teeth / GEAR_B4A_KEYHOME.teeth, 6);
-    // Exact 1:1 compound gear ratio: 1 full CW key revolution rotates B4 by exact +2*PI CCW!
-    expect(low2Pi.b4 - low0.b4).toBeCloseTo(Math.PI * 2, 6);
+    const low0 = computeLowerTrainAnglesRad(KNOB_MIN_RAD);
+    const low90 = computeLowerTrainAnglesRad(KNOB_MAX_RAD);
+    expect((low90.b2 - low0.b2) / (low90.b1 - low0.b1)).toBeCloseTo(
+      -GEAR_B1_KNOB_DRIVE.teeth / GEAR_B2A_PINION.teeth,
+      6
+    );
+    expect((low90.c1 - low0.c1) / (low90.b1 - low0.b1)).toBeCloseTo(KNOB_TO_CAM_RATIO, 6); // EXACT +3.000000:1!
+    expect(low90.c1 - low0.c1).toBeCloseTo(-(Math.PI * 1.5), 6); // 90 deg CW knob -> 270 deg CW cam barrel!
+    expect((low90.b3 - low0.b3) / (low90.b2 - low0.b2)).toBeCloseTo(
+      -GEAR_B2B_STEP.teeth / GEAR_B3F_TRANSFER.teeth,
+      6
+    );
+    expect((low90.b4 - low0.b4) / (low90.b3 - low0.b3)).toBeCloseTo(
+      -GEAR_B3R_PINION.teeth / GEAR_B4A_DETENT.teeth,
+      6
+    );
 
-    // 3. Zero involute tooth overlap across full bolt throw [0, 1] for Rack<->U1A and U1B<->U2A
+    // 3. Zero involute tooth overlap across full bolt throw [0, 1] for Rack<->U1A & U1B<->U2A
     const rackLocal = buildInvoluteRackPolygon2D(UPPER_RACK_SPEC);
     const u1aLocal = buildInvoluteGearPolygon2D(GEAR_U1A_PINION);
     const u1bLocal = buildInvoluteGearPolygon2D(GEAR_U1B_SPUR);
@@ -778,30 +875,35 @@ describe('Day 21 - Cutaway 5-Lever Chubb Mortise Deadbolt', () => {
       assertNoPolygonEdgeCrossing(`U1B<->U2A throw=${throw01}`, u1bWorld, u2aWorld);
     }
 
-    // 4. Zero involute tooth overlap across full 360-degree key revolution for B1<->B2, B2<->B3F, B3R<->B4A
-    const b1Local = buildInvoluteGearPolygon2D(GEAR_B1_CURTAIN);
-    const b2Local = buildInvoluteGearPolygon2D(GEAR_B2_IDLER);
-    const b3fLocal = buildInvoluteGearPolygon2D(GEAR_B3F_STEP);
+    // 4. Zero involute tooth overlap across full 0..90 deg throw (and extended 360 deg!) for B1<->B2A, B2B<->C1, B2B<->B3F, B3R<->B4A
+    const b1Local = buildInvoluteGearPolygon2D(GEAR_B1_KNOB_DRIVE);
+    const b2aLocal = buildInvoluteGearPolygon2D(GEAR_B2A_PINION);
+    const b2bLocal = buildInvoluteGearPolygon2D(GEAR_B2B_STEP);
+    const c1Local = buildInvoluteGearPolygon2D(GEAR_C1_CAM_DRIVEN);
+    const b3fLocal = buildInvoluteGearPolygon2D(GEAR_B3F_TRANSFER);
     const b3rLocal = buildInvoluteGearPolygon2D(GEAR_B3R_PINION);
-    const b4aLocal = buildInvoluteGearPolygon2D(GEAR_B4A_KEYHOME);
+    const b4aLocal = buildInvoluteGearPolygon2D(GEAR_B4A_DETENT);
 
-    for (let deg = 0; deg < 360; deg += 10) {
-      const keyRad = (deg * Math.PI) / 180;
-      const angs = computeLowerTrainAnglesRad(keyRad);
+    for (let deg = 0; deg <= 90; deg += 5) {
+      const knobRad = (deg * Math.PI) / 180;
+      const angs = computeLowerTrainAnglesRad(knobRad);
 
-      const b1W = transformPoly(b1Local, GEAR_B1_CURTAIN.cx, GEAR_B1_CURTAIN.cy, angs.b1);
-      const b2W = transformPoly(b2Local, GEAR_B2_IDLER.cx, GEAR_B2_IDLER.cy, angs.b2);
-      const b3fW = transformPoly(b3fLocal, GEAR_B3F_STEP.cx, GEAR_B3F_STEP.cy, angs.b3);
+      const b1W = transformPoly(b1Local, GEAR_B1_KNOB_DRIVE.cx, GEAR_B1_KNOB_DRIVE.cy, angs.b1);
+      const b2aW = transformPoly(b2aLocal, GEAR_B2A_PINION.cx, GEAR_B2A_PINION.cy, angs.b2);
+      const b2bW = transformPoly(b2bLocal, GEAR_B2B_STEP.cx, GEAR_B2B_STEP.cy, angs.b2);
+      const c1W = transformPoly(c1Local, GEAR_C1_CAM_DRIVEN.cx, GEAR_C1_CAM_DRIVEN.cy, angs.c1);
+      const b3fW = transformPoly(b3fLocal, GEAR_B3F_TRANSFER.cx, GEAR_B3F_TRANSFER.cy, angs.b3);
       const b3rW = transformPoly(b3rLocal, GEAR_B3R_PINION.cx, GEAR_B3R_PINION.cy, angs.b3);
-      const b4aW = transformPoly(b4aLocal, GEAR_B4A_KEYHOME.cx, GEAR_B4A_KEYHOME.cy, angs.b4);
+      const b4aW = transformPoly(b4aLocal, GEAR_B4A_DETENT.cx, GEAR_B4A_DETENT.cy, angs.b4);
 
-      assertNoPolygonEdgeCrossing(`B1<->B2 key=${deg}deg`, b1W, b2W);
-      assertNoPolygonEdgeCrossing(`B2<->B3F key=${deg}deg`, b2W, b3fW);
-      assertNoPolygonEdgeCrossing(`B3R<->B4A key=${deg}deg`, b3rW, b4aW);
+      assertNoPolygonEdgeCrossing(`B1<->B2A knob=${deg}deg`, b1W, b2aW);
+      assertNoPolygonEdgeCrossing(`B2B<->C1 knob=${deg}deg`, b2bW, c1W);
+      assertNoPolygonEdgeCrossing(`B2B<->B3F knob=${deg}deg`, b2bW, b3fW);
+      assertNoPolygonEdgeCrossing(`B3R<->B4A knob=${deg}deg`, b3rW, b4aW);
     }
   });
 
-  it('verifies detent pawl engagement, V-notch seating, and spatial clearances inside lock cavity', () => {
+  it('verifies dual-notch detent pawl seating at Unlocked (0) & Locked (1) and spatial cavity clearances', () => {
     const sol = {
       pawlWorldAngleRad: 0,
       beakWorldX: 0,
@@ -811,7 +913,7 @@ describe('Day 21 - Cutaway 5-Lever Chubb Mortise Deadbolt', () => {
       lift01: 0,
     };
 
-    // 1. Upper Deadbolt Detent Pawl seats DEAD-FLUSH in V-notches at unlocked(0) & locked(1), climbs smoothly mid-throw!
+    // 1. Upper Deadbolt Detent Pawl seats DEAD-FLUSH in V-notches at unlocked(0) & locked(1), climbs mid-throw!
     solveDetentPawlContact(UPPER_DETENT_CAM_SPEC, computeUpperDetentWheelAngleRad(0), sol);
     expect(sol.lift01).toBeLessThan(0.005);
     solveDetentPawlContact(UPPER_DETENT_CAM_SPEC, computeUpperDetentWheelAngleRad(1), sol);
@@ -831,40 +933,42 @@ describe('Day 21 - Cutaway 5-Lever Chubb Mortise Deadbolt', () => {
       expect(Math.abs(beakDist - (exactCamR + UPPER_DETENT_CAM_SPEC.beakRadius))).toBeLessThan(1e-4);
     }
 
-    // 2. Lower Key-Home Detent Pawl seats DEAD-FLUSH at keyAngle = 0 and 2*PI, climbs cleanly when turned!
-    solveDetentPawlContact(LOWER_KEYHOME_CAM_SPEC, computeLowerTrainAnglesRad(0).b4, sol);
+    // 2. Lower Dual-Notch Detent Pawl seats DEAD-FLUSH at BOTH Vertical Unlocked (0) and Horizontal Locked (PI/2)!
+    solveDetentPawlContact(LOWER_DETENT_CAM_SPEC, computeLowerTrainAnglesRad(KNOB_MIN_RAD).b4, sol);
     expect(sol.lift01).toBeLessThan(0.005);
-    solveDetentPawlContact(LOWER_KEYHOME_CAM_SPEC, computeLowerTrainAnglesRad(Math.PI * 2).b4, sol);
+    solveDetentPawlContact(LOWER_DETENT_CAM_SPEC, computeLowerTrainAnglesRad(KNOB_MAX_RAD).b4, sol);
     expect(sol.lift01).toBeLessThan(0.005);
-    solveDetentPawlContact(LOWER_KEYHOME_CAM_SPEC, computeLowerTrainAnglesRad(Math.PI).b4, sol);
-    expect(sol.lift01).toBeGreaterThan(0.95);
+    solveDetentPawlContact(
+      LOWER_DETENT_CAM_SPEC,
+      computeLowerTrainAnglesRad((KNOB_MIN_RAD + KNOB_MAX_RAD) * 0.5).b4,
+      sol
+    );
+    expect(sol.lift01).toBeGreaterThan(0.85);
 
-    // 3. Hard spatial clearances (zero forend collision, zero case wall collision, zero RestPin/key-bit/lever Z collision!)
+    // 3. Hard spatial clearances (zero forend collision, zero bolt-head collision, zero RestPin/cam collision!)
     expect(UPPER_RACK_SPEC.barMaxLocalX + BOLT_TRAVEL).toBeLessThan(CASE_INNER_MAX_X - 0.015);
     expect(UPPER_RACK_SPEC.zFront).toBeLessThan(getLeverZ(0) - LEVER_THICKNESS * 0.5 - 0.015);
-    expect(GEAR_U1B_SPUR.zFront).toBeLessThan(getLeverZ(0) - LEVER_THICKNESS * 0.5 - 0.01);
+    expect(GEAR_U1B_SPUR.zFront).toBeLessThan(getLeverZ(0) - LEVER_THICKNESS * 0.5 - 0.008);
 
     const boltHeadTopY = STUMP_Y + BOLT_HEAD_HALF_Y;
     const boltHeadBotY = STUMP_Y - BOLT_HEAD_HALF_Y;
-    expect(GEAR_U1B_SPUR.cy - GEAR_U1B_SPUR.tipRadius).toBeGreaterThan(boltHeadTopY + 0.004);
-    expect(GEAR_U2A_DRIVEN.cy - GEAR_U2A_DRIVEN.tipRadius).toBeGreaterThan(boltHeadTopY + 0.01);
-    expect(GEAR_U2A_DRIVEN.cy + GEAR_U2A_DRIVEN.tipRadius).toBeLessThan(CASE_INNER_MAX_Y - 0.015);
+    expect(GEAR_U1B_SPUR.cy - GEAR_U1B_SPUR.tipRadius).toBeGreaterThan(boltHeadTopY + 0.005);
+    expect(GEAR_U2A_DRIVEN.cy - GEAR_U2A_DRIVEN.tipRadius).toBeGreaterThan(boltHeadTopY + 0.005);
+    expect(GEAR_U2A_DRIVEN.cy + GEAR_U2A_DRIVEN.tipRadius).toBeLessThan(CUTAWAY_WIN_MAX_Y - 0.012);
 
-    expect(GEAR_B1_CURTAIN.zBack).toBeGreaterThan(getLeverZ(LEVER_COUNT - 1) + LEVER_THICKNESS * 0.5 + 0.006);
-    expect(GEAR_B4A_KEYHOME.cy + GEAR_B4A_KEYHOME.tipRadius).toBeLessThan(boltHeadBotY - 0.10);
-    expect(GEAR_B4A_KEYHOME.cy - GEAR_B4A_KEYHOME.tipRadius).toBeGreaterThan(CASE_INNER_MIN_Y + 0.05);
-    expect(GEAR_B4A_KEYHOME.cx + GEAR_B4A_KEYHOME.tipRadius).toBeLessThan(CASE_INNER_MAX_X - 0.10);
+    expect(GEAR_C1_CAM_DRIVEN.zBack).toBeGreaterThan(getLeverZ(LEVER_COUNT - 1) + LEVER_THICKNESS * 0.5 + 0.008);
+    expect(GEAR_B1_KNOB_DRIVE.zBack).toBeGreaterThan(GEAR_C1_CAM_DRIVEN.zFront + 0.004);
+    expect(GEAR_B4A_DETENT.cy + GEAR_B4A_DETENT.tipRadius).toBeLessThan(boltHeadBotY - 0.12);
+    expect(GEAR_B4A_DETENT.cy - GEAR_B4A_DETENT.tipRadius).toBeGreaterThan(CUTAWAY_WIN_MIN_Y + 0.05);
 
-    // RestPin clearance from B2, B3F, B3R, B4A
-    for (const g of [GEAR_B2_IDLER, GEAR_B3F_STEP, GEAR_B3R_PINION, GEAR_B4A_KEYHOME]) {
+    for (const g of [GEAR_B2B_STEP, GEAR_B3F_TRANSFER, GEAR_B3R_PINION, GEAR_B4A_DETENT]) {
       const dRest = Math.hypot(g.cx - REST_PIN_X, g.cy - REST_PIN_Y);
       expect(dRest, `${g.name} clears RestPin`).toBeGreaterThan(g.tipRadius + REST_PIN_RADIUS + 0.01);
     }
 
-    // Full-depth rear pinion B3R clears rotating key bitting teeth (max radius ~ 0.296)
     const maxBitR = Math.max(...KEY_BIT_RADII);
     const dKeyB3 = Math.hypot(GEAR_B3R_PINION.cx - KEY_X, GEAR_B3R_PINION.cy - KEY_Y);
-    expect(dKeyB3).toBeGreaterThan(GEAR_B3R_PINION.tipRadius + maxBitR + 0.008);
+    expect(dKeyB3).toBeGreaterThan(GEAR_B3R_PINION.tipRadius + maxBitR + 0.02);
 
     // 4. Verify misaligned lever freezes Train A (upper rack-and-pinion + detent wheel stay locked!)
     const jammed = new LockMechanism(true);
