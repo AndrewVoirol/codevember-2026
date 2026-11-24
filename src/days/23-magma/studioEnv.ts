@@ -49,8 +49,8 @@ export function createMagmaStudioEnvironment(
 ): StudioEnvironmentHandle {
   const pmrem = new THREE.PMREMGenerator(renderer);
   const envScene = new THREE.Scene();
-  // Deep negative-fill studio enclosure preserves crisp dark-iron & obsidian contrast
-  envScene.background = new THREE.Color(0x0a0d11);
+  // Calibrated slate-grey studio enclosure prevents forged iron & gunmetal bevels from collapsing black
+  envScene.background = new THREE.Color(0x161b21);
 
   const disposables: Array<{ dispose: () => void }> = [];
 
@@ -78,25 +78,28 @@ export function createMagmaStudioEnvironment(
     disposables.push(geo, tex, mat);
   };
 
-  // 1. Primary overhead-left warm calcite studio softbox (catches brass handwheels, obsidian lobes & press beams)
-  addSoftbox(11.0, 8.8, [-5.4, 5.8, 4.2], [0, 0, 0], 1.0, 0.96, 0.90, 1.85);
+  // 1. Primary overhead-left warm calcite studio softbox (catches press chamfers, brass handwheels & obsidian lobes)
+  addSoftbox(11.5, 9.0, [-5.2, 5.6, 4.4], [0, 0, 0], 1.0, 0.96, 0.90, 2.05);
 
-  // 2. Right tall side scrim (delineates right lateral screw threads, brass collar & basalt fracture steps)
-  addSoftbox(8.5, 10.5, [6.4, 3.0, 3.2], [0, 0, 0], 0.98, 0.95, 0.90, 1.65);
+  // 2. Right tall side scrim (delineates helical ACME screw threads, brass Bourdon gauge & basalt facets)
+  addSoftbox(8.8, 10.8, [6.2, 2.8, 3.4], [0, 0, 0], 0.98, 0.95, 0.91, 1.80);
 
-  // 3. Rear-top cool mineral rim scrim (separates dark press frame & basalt crown from #212529 Chalky Slate)
-  addSoftbox(12.5, 5.0, [-0.6, 5.2, -5.8], [0, 0, 0], 0.90, 0.95, 1.0, 1.50);
+  // 3. Front-high narrow studio strip light (crisp horizontal metallic catchlight along top crosshead & quartz bezel)
+  addSoftbox(11.0, 2.4, [0.4, 4.2, 6.2], [0, 0, 0], 0.96, 0.97, 1.0, 1.45);
 
-  // 4. Overhead zenith soft fill (gives glossy cooled obsidian pillows crisp zenith catchlights)
-  addSoftbox(9.5, 9.5, [0.0, 7.4, 0.6], [0, 0, 0], 0.97, 0.95, 0.91, 1.05);
+  // 4. Rear-top cool mineral rim scrim (separates dark press frame & basalt crown from #212529 Chalky Slate)
+  addSoftbox(12.5, 5.2, [-0.6, 5.2, -5.8], [0, 0, 0], 0.90, 0.95, 1.0, 1.65);
 
-  // 5. Rear-right subtle cool fill (keeps back cutaway window & rear tie-rods legible on 360 orbit)
-  addSoftbox(8.0, 6.5, [4.8, 1.8, -5.6], [0, 0, 0], 0.89, 0.94, 1.0, 1.08);
+  // 5. Overhead zenith soft fill (gives glossy cooled obsidian pillows silky zenith catchlights)
+  addSoftbox(9.8, 9.8, [0.0, 7.4, 0.6], [0, 0, 0], 0.97, 0.95, 0.92, 1.25);
 
-  // 6. Subtle warm studio floor bounce (lifts underside of hydraulic cylinder & brass piston T-handle)
-  addSoftbox(12.0, 12.0, [0, -6.2, 0.5], [0, 0, 0], 0.98, 0.88, 0.78, 0.36);
+  // 6. Rear-right cool fill (keeps back quartz window, rear tie-rods & brass hardware legible on 360 orbit)
+  addSoftbox(8.4, 6.8, [4.8, 1.8, -5.6], [0, 0, 0], 0.89, 0.94, 1.0, 1.22);
 
-  const renderTarget = pmrem.fromScene(envScene, 0.082);
+  // 7. Subtle warm studio floor bounce (lifts underside of hydraulic cylinder, base platen & brass T-handle)
+  addSoftbox(12.5, 12.5, [0, -6.0, 0.8], [0, 0, 0], 0.98, 0.89, 0.80, 0.52);
+
+  const renderTarget = pmrem.fromScene(envScene, 0.068);
 
   for (const item of disposables) item.dispose();
   pmrem.dispose();

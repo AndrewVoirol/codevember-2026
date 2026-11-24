@@ -1,5 +1,6 @@
 import * as THREE from 'three/webgpu';
 import {
+  ACME_THREAD_PITCH,
   CHAMBER_BOTTOM_Y,
   CHAMBER_HEIGHT,
   CHAMBER_ROOF_Y,
@@ -18,6 +19,7 @@ import {
   TIER_BOUNDARIES_Y,
   evalBeddingPlaneY,
   evalColumnSeamX,
+  type RockSlabState,
 } from './tectonicSolver';
 import { type MagmaMaterials } from './materials';
 
@@ -25,7 +27,8 @@ export const EMBER_COUNT = 36;
 
 export interface PressFrameAssembly {
   group: THREE.Group;
-  heaveGaugeRods: THREE.Mesh[];
+  heaveGaugeRods: THREE.Object3D[];
+  gaugeNeedleGroup: THREE.Group;
   chamberHitMesh: THREE.Mesh;
   dispose: () => void;
 }
@@ -58,6 +61,7 @@ export interface RockCoreAssembly {
 export interface MagmaSystemAssembly {
   group: THREE.Group;
   chamberMeltMesh: THREE.Mesh;
+  chamberFeederMesh: THREE.Mesh;
   xenolithMeshes: THREE.Mesh[];
   dikeMeshes: THREE.Mesh[];
   sillMeshes: THREE.Mesh[];
@@ -169,46 +173,142 @@ function createChamferedBlock(
 }
 
 /**
- * Builds a precision ACME-threaded steel rod along local +Y using bottom-to-top LatheGeometry.
+ * Evaluates trapezoidal ACME thread radius profile for helical phase in [0, 1).
  */
-function createThreadedRodGeometry(
+export function evalAcmeThreadRadius(
+  coreRadius: number,
+  crestRadius: number,
+  phaseRaw: number
+): number {
+  const phase = phaseRaw - Math.floor(phaseRaw);
+  if (phase < 0.16) return coreRadius;
+  if (phase < 0.34) {
+    const t = (phase - 0.16) / 0.18;
+    return coreRadius + (crestRadius - coreRadius) * t;
+  }
+  if (phase < 0.64) return crestRadius;
+  if (phase < 0.82) {
+    const t = (phase - 0.64) / 0.18;
+    return crestRadius - (crestRadius - coreRadius) * t;
+  }
+  return coreRadius;
+}
+
+/**
+ * Builds a true watertight right-handed helical ACME trapezoidal threaded lead-screw
+ * along local +Y with exact pitch matching `ACME_THREAD_PITCH` (0.048 m/rev).
+ * Because the thread is genuinely helical (`phase = y / pitch + theta / (2*PI)`),
+ * rotating `screwWheelGroup.rotation.x` in lockstep with `platenOffset` visibly drives
+ * the spiral crests smoothly through the stationary brass trunnion bushings with zero slip!
+ */
+export function createHelicalAcmeScrewGeometry(
   coreRadius: number,
   crestRadius: number,
   length: number,
-  threadCount: number,
-  radialSegments = 20
-): THREE.LatheGeometry {
-  const pts: Array<[number, number]> = [];
-  const y0 = -length * 0.5;
-  const pitch = length / threadCount;
-  pts.push([0, y0]);
-  pts.push([coreRadius * 0.85, y0]);
-  pts.push([coreRadius, y0 + pitch * 0.12]);
+  pitch = ACME_THREAD_PITCH,
+  radialSegments = 24,
+  axialRingsPerPitch = 10
+): THREE.BufferGeometry {
+  const turns = length / pitch;
+  const ringsY = Math.max(16, Math.round(turns * axialRingsPerPitch));
+  const cols = radialSegments + 1;
 
-  for (let i = 0; i < threadCount; i++) {
-    const base = y0 + i * pitch;
-    pts.push([coreRadius, base + pitch * 0.18]);
-    pts.push([crestRadius, base + pitch * 0.36]);
-    pts.push([crestRadius, base + pitch * 0.64]);
-    pts.push([coreRadius, base + pitch * 0.82]);
+  // Side vertices + bottom cap center/ring + top cap center/ring
+  const sideVertCount = (ringsY + 1) * cols;
+  const capVertCount = 2 * (1 + radialSegments);
+  const positions = new Float32Array((sideVertCount + capVertCount) * 3);
+  const indices: number[] = [];
+
+  const halfL = length * 0.5;
+  const endFade = Math.min(pitch * 0.65, length * 0.08);
+
+  // 1. Helical side wall (x = r*cos(theta), z = -r*sin(theta) -> right-handed CCW outward normals)
+  for (let iy = 0; iy <= ringsY; iy++) {
+    const v = iy / ringsY;
+    const y = -halfL + v * length;
+    const distFromEnd = Math.min(y + halfL, halfL - y);
+    const threadEnv = Math.min(1, Math.max(0, (distFromEnd - 0.008) / endFade));
+
+    for (let it = 0; it <= radialSegments; it++) {
+      const uTheta = it / radialSegments;
+      const theta = uTheta * Math.PI * 2;
+      const helicalPhase = y / pitch + uTheta;
+      const rThread = evalAcmeThreadRadius(coreRadius, crestRadius, helicalPhase);
+      const r = coreRadius + (rThread - coreRadius) * threadEnv;
+
+      const idx = (iy * cols + it) * 3;
+      positions[idx] = r * Math.cos(theta);
+      positions[idx + 1] = y;
+      positions[idx + 2] = -r * Math.sin(theta);
+    }
   }
 
-  const y1 = length * 0.5;
-  pts.push([coreRadius, y1 - pitch * 0.08]);
-  pts.push([coreRadius * 0.85, y1]);
-  pts.push([0, y1]);
-  return createClosedLathe(pts, radialSegments);
+  for (let iy = 0; iy < ringsY; iy++) {
+    for (let it = 0; it < radialSegments; it++) {
+      const a = iy * cols + it;
+      const b = a + 1;
+      const c = (iy + 1) * cols + it;
+      const d = c + 1;
+      // Outward CCW winding: (a -> b -> d) and (a -> d -> c)
+      indices.push(a, b, d);
+      indices.push(a, d, c);
+    }
+  }
+
+  // 2. Watertight bottom cap (y = -halfL, normal pointing -Y)
+  const botCenterIdx = sideVertCount;
+  positions[botCenterIdx * 3] = 0;
+  positions[botCenterIdx * 3 + 1] = -halfL;
+  positions[botCenterIdx * 3 + 2] = 0;
+  const botRingStart = botCenterIdx + 1;
+  for (let it = 0; it < radialSegments; it++) {
+    const theta = (it / radialSegments) * Math.PI * 2;
+    const vi = (botRingStart + it) * 3;
+    positions[vi] = coreRadius * Math.cos(theta);
+    positions[vi + 1] = -halfL;
+    positions[vi + 2] = -coreRadius * Math.sin(theta);
+  }
+  for (let it = 0; it < radialSegments; it++) {
+    const next = (it + 1) % radialSegments;
+    // Looking from -Y: (center, next, cur) yields outward -Y normal
+    indices.push(botCenterIdx, botRingStart + next, botRingStart + it);
+  }
+
+  // 3. Watertight top cap (y = +halfL, normal pointing +Y)
+  const topCenterIdx = botRingStart + radialSegments;
+  positions[topCenterIdx * 3] = 0;
+  positions[topCenterIdx * 3 + 1] = halfL;
+  positions[topCenterIdx * 3 + 2] = 0;
+  const topRingStart = topCenterIdx + 1;
+  for (let it = 0; it < radialSegments; it++) {
+    const theta = (it / radialSegments) * Math.PI * 2;
+    const vi = (topRingStart + it) * 3;
+    positions[vi] = coreRadius * Math.cos(theta);
+    positions[vi + 1] = halfL;
+    positions[vi + 2] = -coreRadius * Math.sin(theta);
+  }
+  for (let it = 0; it < radialSegments; it++) {
+    const next = (it + 1) % radialSegments;
+    // Looking from +Y: (center, cur, next) yields outward +Y normal
+    indices.push(topCenterIdx, topRingStart + it, topRingStart + next);
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setIndex(indices);
+  geo.computeVertexNormals();
+  return geo;
 }
 
 // ---------------------------------------------------------------------------
-// 1. Heavy Steel Rock-Mechanics Geology Press Frame & Quartz Cutaway Windows
+// 1. Heavy Steel Rock-Mechanics Geology Press Frame, Quartz Windows & Bourdon Gauge
 // ---------------------------------------------------------------------------
 
 export function buildPressFrameAssembly(materials: MagmaMaterials): PressFrameAssembly {
   const group = new THREE.Group();
   group.name = 'GeologyPressFrame';
   const disposables: THREE.BufferGeometry[] = [];
-  const heaveGaugeRods: THREE.Mesh[] = [];
+  const heaveGaugeRods: THREE.Object3D[] = [];
 
   const track = <T extends THREE.BufferGeometry>(g: T): T => {
     disposables.push(g);
@@ -222,7 +322,8 @@ export function buildPressFrameAssembly(materials: MagmaMaterials): PressFrameAs
     pos: [number, number, number],
     rot?: [number, number, number],
     castShadow = true,
-    receiveShadow = true
+    receiveShadow = true,
+    parent: THREE.Object3D = group
   ): THREE.Mesh => {
     const mesh = new THREE.Mesh(geo, mat);
     mesh.name = name;
@@ -230,29 +331,61 @@ export function buildPressFrameAssembly(materials: MagmaMaterials): PressFrameAs
     if (rot) mesh.rotation.set(rot[0], rot[1], rot[2]);
     mesh.castShadow = castShadow;
     mesh.receiveShadow = receiveShadow;
-    group.add(mesh);
+    parent.add(mesh);
     return mesh;
   };
 
-  // A. Heavy Lower Base Crosshead Platen (top flush at CHAMBER_BOTTOM_Y = -0.65)
+  // A. Heavy Planed-Steel Lower Base Crosshead Platen (top flush at CHAMBER_BOTTOM_Y = -0.65)
   const basePlatenH = 0.16;
   const basePlatenY = CHAMBER_BOTTOM_Y - basePlatenH * 0.5; // -0.73
-  const basePlatenGeo = track(createChamferedBlock(2.80, basePlatenH, 1.34, 0.018));
+  const basePlatenGeo = track(createChamferedBlock(2.84, basePlatenH, 1.38, 0.018));
   addMesh('LowerBasePlaten', basePlatenGeo, materials.forgedPressIron, [0, basePlatenY, 0]);
 
-  // Lower brass trim collar ringing the chamber footprint cleanly
-  const baseRimGeo = track(createChamferedBlock(1.74, 0.028, 1.20, 0.006));
-  addMesh('ChamberBaseTrimCollar', baseRimGeo, materials.satinBrass, [0, CHAMBER_BOTTOM_Y + 0.014, 0]);
+  // Machined front/back longitudinal stiffening ribs & tie-rod boss pads on top of LowerBasePlaten
+  const deckRailGeo = track(createChamferedBlock(2.74, 0.016, 0.044, 0.004));
+  addMesh('BaseDeckRail_F', deckRailGeo, materials.forgedPressIron, [0, CHAMBER_BOTTOM_Y + 0.008, 0.635]);
+  addMesh('BaseDeckRail_B', deckRailGeo, materials.forgedPressIron, [0, CHAMBER_BOTTOM_Y + 0.008, -0.635]);
 
-  // B. Sealed Lower Magma Chamber Steel Casing (y in [-0.65, -0.22])
-  const sideWallGeo = track(createChamferedBlock(0.11, CHAMBER_HEIGHT, 1.16, 0.012));
+  const baseBossPadGeo = track(new THREE.CylinderGeometry(0.128, 0.138, 0.014, 22));
+  for (const sx of [-1, 1] as const) {
+    for (const sz of [-1, 1] as const) {
+      addMesh(
+        `BaseTieRodBoss_${sx > 0 ? 'R' : 'L'}_${sz > 0 ? 'F' : 'B'}`,
+        baseBossPadGeo,
+        materials.forgedPressIron,
+        [sx * 1.24, CHAMBER_BOTTOM_Y + 0.007, sz * 0.48]
+      );
+    }
+  }
+
+  // Non-coplanar perimeter brass mounting flange rails + 8 hex anchor bolts seating the chamber onto the bed
+  const flangeFBGeo = track(createChamferedBlock(1.792, 0.026, 0.042, 0.005));
+  const flangeLRGeo = track(createChamferedBlock(0.042, 0.026, 1.140, 0.005));
+  const anchorBoltGeo = track(new THREE.CylinderGeometry(0.016, 0.016, 0.022, 6));
+  const flangeY = CHAMBER_BOTTOM_Y + 0.014;
+  for (const sz of [-1, 1] as const) {
+    addMesh(`ChamberBaseFlange_${sz > 0 ? 'F' : 'B'}`, flangeFBGeo, materials.satinBrass, [0, flangeY, sz * 0.592]);
+    for (const bx of [-0.66, -0.22, 0.22, 0.66]) {
+      addMesh(
+        `ChamberAnchorBolt_${sz > 0 ? 'F' : 'B'}_${bx}`,
+        anchorBoltGeo,
+        materials.machinedThreadSteel,
+        [bx, flangeY + 0.016, sz * 0.602]
+      );
+    }
+  }
+  for (const sx of [-1, 1] as const) {
+    addMesh(`ChamberBaseFlange_${sx > 0 ? 'R' : 'L'}`, flangeLRGeo, materials.satinBrass, [sx * 0.875, flangeY, 0]);
+  }
+
+  // B. Sealed Lower Magma Chamber Steel Casing (y in [-0.65, -0.22], strictly non-coplanar joins)
+  const sideWallGeo = track(createChamferedBlock(0.11, CHAMBER_HEIGHT - 0.008, 1.04, 0.010));
   addMesh('ChamberLeftWall', sideWallGeo, materials.forgedPressIron, [-0.805, CHAMBER_BOTTOM_Y + CHAMBER_HEIGHT * 0.5, 0]);
   addMesh('ChamberRightWall', sideWallGeo, materials.forgedPressIron, [0.805, CHAMBER_BOTTOM_Y + CHAMBER_HEIGHT * 0.5, 0]);
 
-  // Front (+Z) & Back (-Z) lower sill & upper lintel bars framing the wide quartz windows
-  const sillBarGeo = track(createChamferedBlock(1.54, 0.072, 0.072, 0.008));
-  const lintelBarGeo = track(createChamferedBlock(1.66, 0.068, 0.082, 0.008));
-  const cornerPostGeo = track(createChamferedBlock(0.088, CHAMBER_HEIGHT, 0.088, 0.008));
+  const sillBarGeo = track(createChamferedBlock(1.40, 0.070, 0.074, 0.007));
+  const lintelBarGeo = track(createChamferedBlock(1.68, 0.064, 0.088, 0.008));
+  const cornerPostGeo = track(createChamferedBlock(0.092, CHAMBER_HEIGHT - 0.002, 0.090, 0.008));
 
   for (const zSign of [-1, 1] as const) {
     const zFrame = zSign * (CORE_HALF_D + 0.015);
@@ -266,59 +399,70 @@ export function buildPressFrameAssembly(materials: MagmaMaterials): PressFrameAs
       `ChamberUpperLintel_${zSign > 0 ? 'F' : 'B'}`,
       lintelBarGeo,
       materials.forgedPressIron,
-      [0, CHAMBER_ROOF_Y - 0.034, zFrame]
+      [0, CHAMBER_ROOF_Y - 0.032, zFrame]
     );
     for (const xSign of [-1, 1] as const) {
       addMesh(
         `ChamberCornerMullion_${zSign}_${xSign}`,
         cornerPostGeo,
         materials.forgedPressIron,
-        [xSign * 0.745, CHAMBER_BOTTOM_Y + CHAMBER_HEIGHT * 0.5, zFrame]
+        [xSign * 0.746, CHAMBER_BOTTOM_Y + CHAMBER_HEIGHT * 0.5, zFrame]
       );
     }
   }
 
-  // C. Bolted Satin-Brass Quartz Window Bezels + 12 Cap Bolts + Beveled Quartz Glass Panes (Front & Back)
-  const bezelHGeo = track(createChamferedBlock(1.42, 0.032, 0.034, 0.005));
-  const bezelVGeo = track(createChamferedBlock(0.034, 0.305, 0.034, 0.005));
+  // C. Watertight Rabbeted Satin-Brass Quartz Window Bezels + 12 Cap Bolts + Quartz Panes (Front & Back)
+  //    Vertical bezel rails butt cleanly between top/bottom rails (ZERO coplanar corner z-fighting!)
+  const bezelHGeo = track(createChamferedBlock(1.43, 0.030, 0.034, 0.005));
+  const bezelVGeo = track(createChamferedBlock(0.034, 0.264, 0.034, 0.005));
+  const rabbetHGeo = track(createChamferedBlock(1.39, 0.016, 0.016, 0.002));
+  const rabbetVGeo = track(createChamferedBlock(0.016, 0.278, 0.016, 0.002));
   const boltGeo = track(new THREE.CylinderGeometry(0.013, 0.013, 0.022, 6));
-  const quartzGeo = track(new THREE.BoxGeometry(1.36, 0.285, 0.020));
-  const windowCenterY = 0.5 * (CHAMBER_BOTTOM_Y + 0.072 + (CHAMBER_ROOF_Y - 0.068)); // -0.433
+  const quartzGeo = track(new THREE.BoxGeometry(1.375, 0.284, 0.018));
+  const windowCenterY = 0.5 * (CHAMBER_BOTTOM_Y + 0.070 + (CHAMBER_ROOF_Y - 0.064)); // -0.432
 
   for (const zSign of [-1, 1] as const) {
-    const zBezel = zSign * (CORE_HALF_D + 0.048);
-    const zGlass = zSign * (CORE_HALF_D + 0.026);
+    const zBezel = zSign * (CORE_HALF_D + 0.050);
+    const zGlass = zSign * (CORE_HALF_D + 0.028);
+    const zRabbet = zSign * (CORE_HALF_D + 0.015);
     const tag = zSign > 0 ? 'Front' : 'Back';
 
+    // Dark forged-iron inner rabbet gasket frame seating the quartz pane watertight
+    addMesh(`QuartzRabbetTop_${tag}`, rabbetHGeo, materials.forgedPressIron, [0, windowCenterY + 0.144, zRabbet]);
+    addMesh(`QuartzRabbetBot_${tag}`, rabbetHGeo, materials.forgedPressIron, [0, windowCenterY - 0.144, zRabbet]);
+    addMesh(`QuartzRabbetL_${tag}`, rabbetVGeo, materials.forgedPressIron, [-0.688, windowCenterY, zRabbet]);
+    addMesh(`QuartzRabbetR_${tag}`, rabbetVGeo, materials.forgedPressIron, [0.688, windowCenterY, zRabbet]);
+
+    // Non-overlapping outer satin-brass compression bezel rails
     addMesh(`QuartzBezelTop_${tag}`, bezelHGeo, materials.satinBrass, [0, windowCenterY + 0.148, zBezel]);
     addMesh(`QuartzBezelBot_${tag}`, bezelHGeo, materials.satinBrass, [0, windowCenterY - 0.148, zBezel]);
-    addMesh(`QuartzBezelL_${tag}`, bezelVGeo, materials.satinBrass, [-0.695, windowCenterY, zBezel]);
-    addMesh(`QuartzBezelR_${tag}`, bezelVGeo, materials.satinBrass, [0.695, windowCenterY, zBezel]);
+    addMesh(`QuartzBezelL_${tag}`, bezelVGeo, materials.satinBrass, [-0.698, windowCenterY, zBezel]);
+    addMesh(`QuartzBezelR_${tag}`, bezelVGeo, materials.satinBrass, [0.698, windowCenterY, zBezel]);
 
-    // 10 hex cap bolts seated flush on top & bottom bezel rails + 2 side bolts = 12 bolts per window
+    // 12 machined hex cap bolts per quartz window
     const boltXs = [-0.62, -0.31, 0.0, 0.31, 0.62];
     for (let bi = 0; bi < boltXs.length; bi++) {
       addMesh(
         `BezelBoltTop_${tag}_${bi}`,
         boltGeo,
         materials.machinedThreadSteel,
-        [boltXs[bi], windowCenterY + 0.148, zBezel + zSign * 0.014],
+        [boltXs[bi], windowCenterY + 0.148, zBezel + zSign * 0.015],
         [Math.PI * 0.5, 0, 0]
       );
       addMesh(
         `BezelBoltBot_${tag}_${bi}`,
         boltGeo,
         materials.machinedThreadSteel,
-        [boltXs[bi], windowCenterY - 0.148, zBezel + zSign * 0.014],
+        [boltXs[bi], windowCenterY - 0.148, zBezel + zSign * 0.015],
         [Math.PI * 0.5, 0, 0]
       );
     }
-    for (const xSide of [-0.695, 0.695]) {
+    for (const xSide of [-0.698, 0.698]) {
       addMesh(
         `BezelBoltSide_${tag}_${xSide > 0 ? 'R' : 'L'}`,
         boltGeo,
         materials.machinedThreadSteel,
-        [xSide, windowCenterY, zBezel + zSign * 0.014],
+        [xSide, windowCenterY, zBezel + zSign * 0.015],
         [Math.PI * 0.5, 0, 0]
       );
     }
@@ -336,26 +480,25 @@ export function buildPressFrameAssembly(materials: MagmaMaterials): PressFrameAs
     glassMesh.renderOrder = 4;
   }
 
-  // D. 4 Corner Heavy Machined Steel Tie-Rods (x = ±1.24, z = ±0.48) with Threads, Hex Nuts & Brass Collars
-  //    Wide tieX = 1.24 guarantees full lateral clearance for sliding platen shoes across compression [-1, +1]
+  // D. 4 Corner Heavy Machined Steel Tie-Rods (x = ±1.24, z = ±0.48) with Helical Threads, Hex Nuts & Brass Collars
   const tieX = 1.24;
   const tieZ = 0.48;
-  const rodShaftGeo = track(new THREE.CylinderGeometry(0.045, 0.045, 1.72, 20));
-  const rodTopThreadGeo = track(createThreadedRodGeometry(0.042, 0.052, 0.28, 10, 18));
-  const rodBotThreadGeo = track(createThreadedRodGeometry(0.042, 0.052, 0.18, 6, 18));
+  const rodShaftGeo = track(new THREE.CylinderGeometry(0.045, 0.045, 1.72, 22));
+  const rodTopThreadGeo = track(createHelicalAcmeScrewGeometry(0.042, 0.052, 0.30, 0.028, 20, 8));
+  const rodBotThreadGeo = track(createHelicalAcmeScrewGeometry(0.042, 0.052, 0.19, 0.028, 20, 8));
   const hexNutGeo = track(new THREE.CylinderGeometry(0.088, 0.088, 0.068, 6));
-  const washerGeo = track(new THREE.CylinderGeometry(0.096, 0.096, 0.018, 20));
+  const washerGeo = track(new THREE.CylinderGeometry(0.098, 0.098, 0.018, 22));
   const brassCollarGeo = track(
     createClosedLathe(
       [
         [0.046, -0.036],
-        [0.080, -0.036],
-        [0.086, -0.022],
-        [0.086, 0.022],
-        [0.080, 0.036],
+        [0.082, -0.036],
+        [0.090, -0.022],
+        [0.090, 0.022],
+        [0.082, 0.036],
         [0.046, 0.036],
       ],
-      22
+      24
     )
   );
 
@@ -369,66 +512,123 @@ export function buildPressFrameAssembly(materials: MagmaMaterials): PressFrameAs
       addMesh(`TieRodTopThread_${id}`, rodTopThreadGeo, materials.machinedThreadSteel, [rx, 1.03, rz]);
       addMesh(`TieRodBotThread_${id}`, rodBotThreadGeo, materials.machinedThreadSteel, [rx, -0.84, rz]);
 
-      // Lower nuts & brass collar seated flush on LowerBasePlaten
+      // Lower nuts & brass collar seated flush on BaseTieRodBoss
       addMesh(`TieRodBotWasher_${id}`, washerGeo, materials.satinBrass, [rx, -0.819, rz]);
       addMesh(`TieRodBotNut_${id}`, hexNutGeo, materials.forgedPressIron, [rx, -0.862, rz]);
-      addMesh(`TieRodBaseCollar_${id}`, brassCollarGeo, materials.satinBrass, [rx, CHAMBER_BOTTOM_Y + 0.036, rz]);
+      addMesh(`TieRodBaseCollar_${id}`, brassCollarGeo, materials.satinBrass, [rx, CHAMBER_BOTTOM_Y + 0.048, rz]);
 
-      // Upper nuts & washers clamping the Open-Bridge Upper Reaction Crosshead (y in [0.94, 1.06])
-      addMesh(`TieRodTopWasherLow_${id}`, washerGeo, materials.satinBrass, [rx, 0.931, rz]);
-      addMesh(`TieRodTopNutLow_${id}`, hexNutGeo, materials.forgedPressIron, [rx, 0.888, rz]);
-      addMesh(`TieRodTopWasherHigh_${id}`, washerGeo, materials.satinBrass, [rx, 1.069, rz]);
-      addMesh(`TieRodTopNutHigh_${id}`, hexNutGeo, materials.forgedPressIron, [rx, 1.112, rz]);
+      // Upper nuts & washers clamping the stepped Upper Reaction Yokes (y in [0.934, 1.066])
+      addMesh(`TieRodTopWasherLow_${id}`, washerGeo, materials.satinBrass, [rx, 0.925, rz]);
+      addMesh(`TieRodTopNutLow_${id}`, hexNutGeo, materials.forgedPressIron, [rx, 0.882, rz]);
+      addMesh(`TieRodTopWasherHigh_${id}`, washerGeo, materials.satinBrass, [rx, 1.075, rz]);
+      addMesh(`TieRodTopNutHigh_${id}`, hexNutGeo, materials.forgedPressIron, [rx, 1.118, rz]);
     }
   }
 
-  // E. Open-Bridge Upper Reaction Crosshead (Twin front/back beams leaving open central viewport!)
-  const upperBeamGeo = track(createChamferedBlock(2.78, 0.12, 0.15, 0.015));
+  // E. Open-Bridge Upper Reaction Crosshead (Stepped end yokes embrace longitudinal beams cleanly — ZERO z-fighting!)
+  const upperBeamGeo = track(createChamferedBlock(2.64, 0.112, 0.148, 0.014));
   addMesh('UpperBridgeFrontBeam', upperBeamGeo, materials.forgedPressIron, [0, 1.00, tieZ]);
   addMesh('UpperBridgeBackBeam', upperBeamGeo, materials.forgedPressIron, [0, 1.00, -tieZ]);
 
-  const upperYokeGeo = track(createChamferedBlock(0.24, 0.12, 1.16, 0.014));
+  const upperYokeGeo = track(createChamferedBlock(0.25, 0.132, 1.18, 0.015));
   addMesh('UpperBridgeLeftYoke', upperYokeGeo, materials.forgedPressIron, [-tieX, 1.00, 0]);
   addMesh('UpperBridgeRightYoke', upperYokeGeo, materials.forgedPressIron, [tieX, 1.00, 0]);
 
-  // Diegetic satin-brass overburden heave gauge posts riding on the upper front/back beams
+  // 4 hex cross-bolts securing upper yokes to longitudinal bridge beams
+  const yokeBoltGeo = track(new THREE.CylinderGeometry(0.019, 0.019, 0.026, 6));
+  for (const sx of [-1, 1] as const) {
+    for (const sz of [-1, 1] as const) {
+      addMesh(
+        `UpperYokeBolt_${sx > 0 ? 'R' : 'L'}_${sz > 0 ? 'F' : 'B'}`,
+        yokeBoltGeo,
+        materials.machinedThreadSteel,
+        [sx * 1.10, 1.00, sz * 0.562],
+        [Math.PI * 0.5, 0, 0]
+      );
+    }
+  }
+
+  // E2. Mechanical Overburden Heave Follower Gauges (Cantilevered from upper front beam directly onto rock crown!)
+  //     Replaces floating pins with real chamfered brass contact pads riding on the upper basalt slabs
+  const followerArmGeo = track(createChamferedBlock(0.072, 0.062, 0.25, 0.008));
   const gaugeSleeveGeo = track(
     createClosedLathe(
       [
-        [0.018, -0.035],
-        [0.034, -0.035],
-        [0.034, 0.035],
-        [0.022, 0.044],
+        [0.016, -0.055],
+        [0.032, -0.055],
+        [0.036, -0.040],
+        [0.036, 0.040],
+        [0.026, 0.052],
+        [0.016, 0.052],
       ],
-      16
+      18
     )
   );
-  const gaugeRodGeo = track(new THREE.CylinderGeometry(0.012, 0.012, 0.22, 14));
+  const followerShaftGeo = track(new THREE.CylinderGeometry(0.011, 0.011, 0.48, 14));
+  const followerFootGeo = track(
+    createClosedLathe(
+      [
+        [0.0, 0.0],
+        [0.036, 0.0],
+        [0.036, 0.012],
+        [0.022, 0.024],
+        [0.011, 0.024],
+      ],
+      18
+    )
+  );
+  const followerFinialGeo = track(
+    createClosedLathe(
+      [
+        [0.011, -0.010],
+        [0.020, -0.006],
+        [0.020, 0.012],
+        [0.010, 0.020],
+        [0.0, 0.020],
+      ],
+      14
+    )
+  );
+
   for (const sx of [-1, 1] as const) {
-    addMesh(`HeaveGaugeSleeve_${sx > 0 ? 'R' : 'L'}`, gaugeSleeveGeo, materials.satinBrass, [sx * 0.56, 1.065, tieZ]);
-    const rod = addMesh(
-      `HeaveGaugeRod_${sx > 0 ? 'R' : 'L'}`,
-      gaugeRodGeo,
-      materials.machinedThreadSteel,
-      [sx * 0.56, 1.04, tieZ]
-    );
-    heaveGaugeRods.push(rod);
+    const tag = sx > 0 ? 'R' : 'L';
+    const gx = sx * 0.25;
+    const gz = 0.28; // Rides squarely atop inner basalt cap slabs (T2_C1 & T2_C2), clear of central crest lobes
+
+    // Cantilevered steel bracket joining front upper beam (z=0.48) to follower guide sleeve (z=0.28)
+    addMesh(`HeaveFollowerArm_${tag}`, followerArmGeo, materials.forgedPressIron, [gx, 1.00, 0.375]);
+    addMesh(`HeaveGaugeSleeve_${tag}`, gaugeSleeveGeo, materials.satinBrass, [gx, 1.00, gz]);
+
+    // Translating follower rod + rock-contact foot + upper graduated brass finial
+    // Positioned at y = slabTopY each tick so foot bottom (local y = 0) rests flush on basalt!
+    const followerGroup = new THREE.Group();
+    followerGroup.name = `HeaveGaugeFollower_${tag}`;
+    followerGroup.position.set(gx, 0.65, gz);
+    group.add(followerGroup);
+
+    addMesh(`HeaveGaugeFoot_${tag}`, followerFootGeo, materials.satinBrass, [0, 0, 0], undefined, true, true, followerGroup);
+    addMesh(`HeaveGaugeRod_${tag}`, followerShaftGeo, materials.machinedThreadSteel, [0, 0.26, 0], undefined, true, true, followerGroup);
+    addMesh(`HeaveGaugeFinial_${tag}`, followerFinialGeo, materials.satinBrass, [0, 0.505, 0], undefined, true, true, followerGroup);
+
+    heaveGaugeRods.push(followerGroup);
   }
 
-  // F. Left & Right Side Trunnion Brackets (clamped across front/back tie-rods at x = ±1.24, y = +0.20)
+  // F. Left & Right Side Trunnion Brackets (Tall 0.29m forged blocks with split-clamp bosses — ZERO bushing bleed!)
   const trunnionY = 0.20;
-  const trunnionBarGeo = track(createChamferedBlock(0.18, 0.24, 1.18, 0.014));
+  const trunnionBarGeo = track(createChamferedBlock(0.18, 0.290, 1.22, 0.014));
+  const trunnionClampBossGeo = track(new THREE.CylinderGeometry(0.084, 0.084, 0.294, 20));
+  const trunnionBoltGeo = track(new THREE.CylinderGeometry(0.017, 0.017, 0.026, 6));
   const trunnionBushingGeo = track(
     createClosedLathe(
       [
-        [0.068, -0.120],
-        [0.105, -0.120],
-        [0.105, -0.088],
-        [0.126, -0.076],
-        [0.126, 0.076],
-        [0.105, 0.088],
-        [0.105, 0.120],
-        [0.068, 0.120],
+        [0.068, -0.122],
+        [0.104, -0.122],
+        [0.104, -0.090],
+        [0.122, -0.078],
+        [0.122, 0.078],
+        [0.104, 0.090],
+        [0.104, 0.122],
+        [0.068, 0.122],
       ],
       24
     )
@@ -444,7 +644,88 @@ export function buildPressFrameAssembly(materials: MagmaMaterials): PressFrameAs
       [sx * tieX, trunnionY, 0],
       [0, 0, Math.PI * 0.5]
     );
+    for (const sz of [-1, 1] as const) {
+      addMesh(
+        `TrunnionTieBoss_${tag}_${sz > 0 ? 'F' : 'B'}`,
+        trunnionClampBossGeo,
+        materials.forgedPressIron,
+        [sx * tieX, trunnionY, sz * tieZ]
+      );
+      for (const dy of [-0.075, 0.075]) {
+        addMesh(
+          `TrunnionLockBolt_${tag}_${sz > 0 ? 'F' : 'B'}_${dy > 0 ? 'T' : 'B'}`,
+          trunnionBoltGeo,
+          materials.machinedThreadSteel,
+          [sx * (tieX + 0.098), trunnionY + dy, sz * (tieZ + 0.02)],
+          [0, 0, Math.PI * 0.5]
+        );
+      }
+    }
   }
+
+  // G. Diegetic Machined Satin-Brass Bourdon Pressure Gauge (Mounted on Right Lower Chamber Manifold)
+  //    Clears right platen shoe (y >= -0.215), base platen (y <= -0.65), and front-right tie-rod (x=1.24, z=0.48)
+  const gaugeGroup = new THREE.Group();
+  gaugeGroup.name = 'BourdonPressureGaugeAssembly';
+  gaugeGroup.position.set(0.96, -0.42, 0.34);
+  gaugeGroup.rotation.set(0, 0.32, 0);
+  group.add(gaugeGroup);
+
+  // Brass manifold pipe elbow joining ChamberRightWall (x=0.86) cleanly into Bourdon stem
+  const manifoldUnionGeo = track(new THREE.CylinderGeometry(0.026, 0.026, 0.14, 16));
+  const manifoldNutGeo = track(new THREE.CylinderGeometry(0.036, 0.036, 0.026, 6));
+  const gaugeStemGeo = track(new THREE.CylinderGeometry(0.017, 0.020, 0.12, 16));
+  addMesh('GaugeManifoldPipe', manifoldUnionGeo, materials.satinBrass, [0.90, -0.51, 0.34], [0, 0, Math.PI * 0.5]);
+  addMesh('GaugeManifoldHexNut', manifoldNutGeo, materials.satinBrass, [0.87, -0.51, 0.34], [0, 0, Math.PI * 0.5]);
+  addMesh('GaugeVerticalStem', gaugeStemGeo, materials.satinBrass, [0.96, -0.49, 0.34]);
+
+  // Heavy turned brass Bourdon gauge housing & beveled front bezel ring (facing local +Z)
+  const gaugeCaseGeo = track(
+    createClosedLathe(
+      [
+        [0.0, -0.026],
+        [0.082, -0.026],
+        [0.092, -0.018],
+        [0.092, 0.014],
+        [0.088, 0.022],
+        [0.074, 0.022],
+        [0.074, 0.008],
+        [0.0, 0.008],
+      ],
+      28
+    )
+  );
+  addMesh('BourdonGaugeCase', gaugeCaseGeo, materials.satinBrass, [0, 0, 0], [Math.PI * 0.5, 0, 0], true, true, gaugeGroup);
+
+  // Mineral-enamel calibrated dial disk (closed solid cylinder -> guaranteed signedVol > 0)
+  const dialFaceGeo = track(new THREE.CylinderGeometry(0.073, 0.073, 0.006, 28));
+  const dialMat = materials.gaugeDial ?? materials.satinBrass;
+  addMesh('BourdonGaugeDial', dialFaceGeo, dialMat, [0, 0, 0.011], [Math.PI * 0.5, 0, 0], false, true, gaugeGroup);
+
+  // Pivoting blued-iron Bourdon pressure needle (rotated around local Z in main.ts!)
+  const gaugeNeedleGroup = new THREE.Group();
+  gaugeNeedleGroup.name = 'BourdonGaugeNeedleGroup';
+  gaugeNeedleGroup.position.set(0, 0, 0.017);
+  gaugeGroup.add(gaugeNeedleGroup);
+
+  const needleBladeGeo = track(createChamferedBlock(0.007, 0.068, 0.003, 0.001));
+  addMesh('BourdonNeedleBlade', needleBladeGeo, materials.forgedPressIron, [0, 0.020, 0], undefined, false, false, gaugeNeedleGroup);
+  const needleHubGeo = track(new THREE.CylinderGeometry(0.011, 0.012, 0.007, 14));
+  addMesh('BourdonNeedleHub', needleHubGeo, materials.satinBrass, [0, 0, 0.002], [Math.PI * 0.5, 0, 0], false, false, gaugeNeedleGroup);
+
+  // Protective quartz gauge crystal lens seated cleanly inside brass bezel
+  const gaugeLensGeo = track(new THREE.CylinderGeometry(0.074, 0.074, 0.005, 24));
+  const gaugeLensMesh = addMesh(
+    'BourdonGaugeCrystal',
+    gaugeLensGeo,
+    materials.quartzGlass,
+    [0, 0, 0.022],
+    [Math.PI * 0.5, 0, 0],
+    false,
+    false,
+    gaugeGroup
+  );
+  gaugeLensMesh.renderOrder = 5;
 
   // Invisible hit proxy covering the cutaway chamber for click-hold hydraulic pumping
   const chamberHitGeo = track(new THREE.BoxGeometry(1.56, CHAMBER_HEIGHT, 1.18));
@@ -457,6 +738,7 @@ export function buildPressFrameAssembly(materials: MagmaMaterials): PressFrameAs
   return {
     group,
     heaveGaugeRods,
+    gaugeNeedleGroup,
     chamberHitMesh,
     dispose: () => {
       for (const g of disposables) g.dispose();
@@ -465,7 +747,7 @@ export function buildPressFrameAssembly(materials: MagmaMaterials): PressFrameAs
 }
 
 // ---------------------------------------------------------------------------
-// 2. Vertical Brass & Steel Hydraulic Pressure Piston Assembly
+// 2. Vertical Brass & Steel Hydraulic Pressure Piston Assembly (Full-Skirted Plunger!)
 // ---------------------------------------------------------------------------
 
 export function buildHydraulicPistonAssembly(materials: MagmaMaterials): HydraulicPistonAssembly {
@@ -543,42 +825,57 @@ export function buildHydraulicPistonAssembly(materials: MagmaMaterials): Hydraul
     group.add(bolt);
   }
 
-  // Translating Hydraulic Ram Group (translates vertically by +pistonTravel in [0, 0.21])
-  // 1. Internal dark forged-iron magma-chamber plunger plate framed by a narrow outer brass wiper ring
-  //    (keeps top face dark machined steel compressing the glowing melt rather than a shiny brass floor)
-  const plungerGeo = track(createChamferedBlock(1.26, 0.084, 0.88, 0.012));
+  // Translating Hydraulic Ram Group (translates vertically by +pistonTravel in [0, 0.155])
+  // 1. Full-depth, full-skirted forged-iron chamber plunger (width 1.44, depth 1.05, height 0.24)
+  //    Top crown at -0.562 rises to -0.407 at max stroke; solid skirt extends down to -0.802 so
+  //    even at 100% stroke (-0.647) it stays seated inside the base bore with ZERO floating underside void!
+  const plungerH = 0.24;
+  const plungerTopY = CHAMBER_BOTTOM_Y + 0.088; // -0.562
+  const plungerGeo = track(createChamferedBlock(1.42, plungerH, 1.03, 0.012));
   const plungerMesh = new THREE.Mesh(plungerGeo, materials.forgedPressIron);
   plungerMesh.name = 'ChamberInternalPlunger';
-  plungerMesh.position.set(0, CHAMBER_BOTTOM_Y + 0.044, 0);
+  plungerMesh.position.set(0, plungerTopY - plungerH * 0.5, 0); // -0.682
+  plungerMesh.receiveShadow = true;
   ramGroup.add(plungerMesh);
 
-  const sealRailFBGeo = track(createChamferedBlock(1.29, 0.022, 0.024, 0.004));
-  const sealRailLRGeo = track(createChamferedBlock(0.024, 0.022, 0.88, 0.004));
-  const sealY = CHAMBER_BOTTOM_Y + 0.044;
+  // Snug satin-brass perimeter wiper seal band riding flush behind the quartz cutaway windows
+  // Top of seal at -0.581 keeps plunger crown proud by 19 mm (> 15 mm clearance contract)
+  const sealRailFBGeo = track(createChamferedBlock(1.44, 0.022, 0.022, 0.004));
+  const sealRailLRGeo = track(createChamferedBlock(0.022, 0.022, 1.03, 0.004));
+  const sealY = plungerTopY - 0.030; // -0.592
   for (const sz of [-1, 1] as const) {
     const rail = new THREE.Mesh(sealRailFBGeo, materials.satinBrass);
     rail.name = `ChamberPlungerBrassSeal_${sz > 0 ? 'F' : 'B'}`;
-    rail.position.set(0, sealY, sz * 0.442);
+    rail.position.set(0, sealY, sz * 0.520);
     ramGroup.add(rail);
   }
   for (const sx of [-1, 1] as const) {
     const rail = new THREE.Mesh(sealRailLRGeo, materials.satinBrass);
     rail.name = `ChamberPlungerBrassSeal_${sx > 0 ? 'R' : 'L'}`;
-    rail.position.set(sx * 0.635, sealY, 0);
+    rail.position.set(sx * 0.715, sealY, 0);
     ramGroup.add(rail);
   }
 
+  // Secondary lower steel scraper ring visible on the plunger skirt as it rises
+  const lowerRingFBGeo = track(createChamferedBlock(1.43, 0.014, 0.016, 0.003));
+  for (const sz of [-1, 1] as const) {
+    const ring = new THREE.Mesh(lowerRingFBGeo, materials.machinedThreadSteel);
+    ring.name = `ChamberPlungerScraper_${sz > 0 ? 'F' : 'B'}`;
+    ring.position.set(0, sealY - 0.055, sz * 0.518);
+    ramGroup.add(ring);
+  }
+
   // 2. Machined steel vertical piston rod descending cleanly out through brass gland
-  const pistonRodGeo = track(new THREE.CylinderGeometry(0.105, 0.105, 1.00, 24));
+  const pistonRodGeo = track(new THREE.CylinderGeometry(0.105, 0.105, 0.96, 24));
   const pistonRodMesh = new THREE.Mesh(pistonRodGeo, materials.machinedThreadSteel);
   pistonRodMesh.name = 'HydraulicPistonRod';
-  pistonRodMesh.position.set(0, -1.11, 0);
+  pistonRodMesh.position.set(0, -1.14, 0);
   pistonRodMesh.castShadow = true;
   pistonRodMesh.receiveShadow = true;
   ramGroup.add(pistonRodMesh);
 
   // 3. Lower Satin-Brass Pressure Collar & Ergonomic Crossbar Pump Handle
-  //    Top of collar at -1.525 rises to -1.315 at max stroke (clears -1.28 gland by 3.5cm!)
+  //    Top of collar at -1.525 rises to -1.370 at max stroke (clears -1.28 gland by 9.0 cm!)
   const footCollarGeo = track(
     createClosedLathe(
       [
@@ -647,7 +944,7 @@ export function buildHydraulicPistonAssembly(materials: MagmaMaterials): Hydraul
 }
 
 // ---------------------------------------------------------------------------
-// 3. Left & Right Lateral Threaded Tectonic Screw-Clamps & Capstan Handwheels
+// 3. Left & Right Lateral Helical ACME Screw-Clamps & Tall Sculpted Platens
 // ---------------------------------------------------------------------------
 
 export function buildLateralClampAssemblies(materials: MagmaMaterials): LateralClampAssembly {
@@ -661,24 +958,26 @@ export function buildLateralClampAssemblies(materials: MagmaMaterials): LateralC
   };
 
   const clampY = 0.20;
+  // Platen shoe spans y in [-0.215, +0.725]: clears chamber side wall (-0.220) cleanly & cradles heaved basalt cap!
+  const platenCenterY = 0.255;
 
-  // Shared geometries across both left & right screw clamps
-  const platenShoeGeo = track(createChamferedBlock(0.072, 0.82, 0.86, 0.012));
-  const gussetGeo = track(createChamferedBlock(0.046, 0.072, 0.74, 0.008));
+  const platenShoeGeo = track(createChamferedBlock(0.072, 0.94, 0.92, 0.012));
+  const gussetGeo = track(createChamferedBlock(0.048, 0.068, 0.78, 0.008));
+  const vertRibGeo = track(createChamferedBlock(0.042, 0.80, 0.056, 0.007));
   const swivelSocketGeo = track(
     createClosedLathe(
       [
         [0.0, -0.038],
-        [0.098, -0.038],
-        [0.098, 0.008],
+        [0.100, -0.038],
+        [0.100, 0.008],
         [0.080, 0.038],
         [0.0, 0.038],
       ],
-      20
+      22
     )
   );
-  // Longer 0.82m ACME lead-screw bridges seamlessly from platen socket through x=±1.24 trunnion to x=±1.68 capstan
-  const acmeScrewGeo = track(createThreadedRodGeometry(0.043, 0.060, 0.82, 20, 20));
+  // True right-handed helical ACME lead-screw (exact 0.048 m/rev pitch matching solver rotation!)
+  const acmeScrewGeo = track(createHelicalAcmeScrewGeometry(0.041, 0.059, 0.82, ACME_THREAD_PITCH, 24, 10));
   const wheelHubGeo = track(
     createClosedLathe(
       [
@@ -707,7 +1006,7 @@ export function buildLateralClampAssemblies(materials: MagmaMaterials): LateralC
       14
     )
   );
-  const hitBoxGeo = track(new THREE.BoxGeometry(0.96, 0.88, 1.00));
+  const hitBoxGeo = track(new THREE.BoxGeometry(0.96, 0.94, 1.00));
 
   function buildOneSide(side: -1 | 1): {
     platenGroup: THREE.Group;
@@ -723,19 +1022,28 @@ export function buildLateralClampAssemblies(materials: MagmaMaterials): LateralC
     const shoeCenterX = side * (CORE_HALF_W + 0.040);
     const shoe = new THREE.Mesh(platenShoeGeo, materials.forgedPressIron);
     shoe.name = `LateralPlatenShoe_${tag}`;
-    shoe.position.set(shoeCenterX, clampY, 0);
+    shoe.position.set(shoeCenterX, platenCenterY, 0);
     shoe.castShadow = true;
     shoe.receiveShadow = true;
     platenGroup.add(shoe);
 
-    for (const dy of [-0.26, 0.26]) {
+    // Horizontal & vertical forged backing ribs
+    for (const dy of [-0.30, 0.30]) {
       const rib = new THREE.Mesh(gussetGeo, materials.forgedPressIron);
       rib.name = `LateralPlatenRib_${tag}_${dy > 0 ? 'Top' : 'Bot'}`;
-      rib.position.set(shoeCenterX + side * 0.040, clampY + dy, 0);
+      rib.position.set(shoeCenterX + side * 0.042, platenCenterY + dy, 0);
       rib.castShadow = true;
       platenGroup.add(rib);
     }
+    for (const dz of [-0.32, 0.32]) {
+      const vRib = new THREE.Mesh(vertRibGeo, materials.forgedPressIron);
+      vRib.name = `LateralPlatenVRib_${tag}_${dz > 0 ? 'F' : 'B'}`;
+      vRib.position.set(shoeCenterX + side * 0.040, platenCenterY, dz);
+      vRib.castShadow = true;
+      platenGroup.add(vRib);
+    }
 
+    // Swivel socket sits coaxial with the ACME screw axis (y = clampY = 0.20)
     const socket = new THREE.Mesh(swivelSocketGeo, materials.satinBrass);
     socket.name = `LateralSwivelSocket_${tag}`;
     socket.position.set(shoeCenterX + side * 0.048, clampY, 0);
@@ -743,13 +1051,12 @@ export function buildLateralClampAssemblies(materials: MagmaMaterials): LateralC
     socket.castShadow = true;
     platenGroup.add(socket);
 
-    // Translating & Rotating Screw + 4-Spoke Brass/Iron Capstan Handwheel
+    // Translating & Rotating Helical Screw + 4-Spoke Brass/Iron Capstan Handwheel
     const screwWheelGroup = new THREE.Group();
     screwWheelGroup.name = `LateralScrewWheelGroup_${tag}`;
     screwWheelGroup.position.set(0, clampY, 0);
     group.add(screwWheelGroup);
 
-    // Horizontal ACME threaded lead-screw coaxial with x = ±1.24 trunnion bushing
     const screw = new THREE.Mesh(acmeScrewGeo, materials.machinedThreadSteel);
     screw.name = `LateralAcmeScrew_${tag}`;
     screw.position.set(side * 1.28, 0, 0);
@@ -822,16 +1129,17 @@ export function buildLateralClampAssemblies(materials: MagmaMaterials): LateralC
 }
 
 // ---------------------------------------------------------------------------
-// 4. 12 Interlocking Stratified Basalt & Ochre-Tuff Rock Slabs
+// 4. 12 Interlocking Chiseled Vesicular Basalt & Banded Ochre-Tuff Rock Slabs
 // ---------------------------------------------------------------------------
 
 /**
- * Generates a single watertight chiseled geological rock slab whose left/right/top/bottom
- * walls follow the exact shared fracture profiles (evalColumnSeamX, evalBeddingPlaneY).
- * Strictly preserves outward CCW winding (signedVolume > 0) via smooth bijective cube mapping.
+ * Generates a watertight chiseled geological rock slab whose fracture/bedding walls
+ * follow exact shared profiles (evalColumnSeamX, evalBeddingPlaneY) with crisp mineral
+ * cleavage edges (zero mushy pillow rounding) and 3D object-space petrography attributes.
  */
 function createFacetedRockSlabGeometry(tier: number, col: number, slabIndex: number): THREE.BufferGeometry {
-  const geo = new THREE.BoxGeometry(1, 1, 1, 8, 6, 8);
+  // Higher tessellation (14x10x12) yields crisp chiseled edges & sharp volcanic fracture cleavage
+  const geo = new THREE.BoxGeometry(1, 1, 1, 14, 10, 12);
   const posAttr = geo.attributes.position as THREE.BufferAttribute;
   const count = posAttr.count;
 
@@ -849,17 +1157,14 @@ function createFacetedRockSlabGeometry(tier: number, col: number, slabIndex: num
   const hasTopBedding = tier < STRATA_TIERS - 1;
 
   for (let i = 0; i < count; i++) {
-    // Unit box coordinates in [-0.5, +0.5]
-    const ux = posAttr.getX(i);
+    const ux = posAttr.getX(i); // [-0.5, +0.5]
     const uy = posAttr.getY(i);
     const uz = posAttr.getZ(i);
 
-    const tx = ux + 0.5; // [0, 1] left -> right
-    const ty = uy + 0.5; // [0, 1] bottom -> top
-
+    const tx = ux + 0.5;
+    const ty = uy + 0.5;
     const zBase = uz * CORE_DEPTH;
 
-    // Initial linear estimate for boundary evaluation
     const xApprox =
       COLUMN_BOUNDARIES_X[col] + tx * (COLUMN_BOUNDARIES_X[col + 1] - COLUMN_BOUNDARIES_X[col]);
     const yBottom = evalBeddingPlaneY(tier, xApprox, zBase);
@@ -871,40 +1176,39 @@ function createFacetedRockSlabGeometry(tier: number, col: number, slabIndex: num
     let xWorld = xLeft + tx * (xRight - xLeft);
     let zWorld = zBase;
 
-    // Micro-chamfer along slab seam edges so dark mineral joints read crisply and never Z-fight
-    const gapInsetX = 0.0032;
-    const gapInsetY = 0.0028;
-    const edgeProximityX = Math.max(0, Math.abs(ux) * 2 - 0.85) / 0.15;
-    const edgeProximityY = Math.max(0, Math.abs(uy) * 2 - 0.85) / 0.15;
-    const edgeProximityZ = Math.max(0, Math.abs(uz) * 2 - 0.85) / 0.15;
+    // Tight crisp hairline seam inset & subtle mineral edge chamfer (preserves sharp cleaved corners!)
+    const gapInsetX = 0.0022;
+    const gapInsetY = 0.0020;
+    const edgeProximityX = Math.max(0, Math.abs(ux) * 2 - 0.92) / 0.08;
+    const edgeProximityY = Math.max(0, Math.abs(uy) * 2 - 0.92) / 0.08;
+    const edgeProximityZ = Math.max(0, Math.abs(uz) * 2 - 0.92) / 0.08;
     const cornerBevel =
       (edgeProximityX * edgeProximityY + edgeProximityY * edgeProximityZ + edgeProximityX * edgeProximityZ) *
-      0.0055;
+      0.0026;
 
-    if (hasLeftFracture && tx < 0.02) xWorld += gapInsetX;
-    if (hasRightFracture && tx > 0.98) xWorld -= gapInsetX;
-    if (hasBottomBedding && ty < 0.02) yWorld += gapInsetY;
-    if (hasTopBedding && ty > 0.98) yWorld -= gapInsetY;
+    if (hasLeftFracture && tx < 0.015) xWorld += gapInsetX;
+    if (hasRightFracture && tx > 0.985) xWorld -= gapInsetX;
+    if (hasBottomBedding && ty < 0.015) yWorld += gapInsetY;
+    if (hasTopBedding && ty > 0.985) yWorld -= gapInsetY;
 
-    // Subtle organic chiseled rock cleavage relief on exposed front/back/top rock faces
-    const isOuterZ = Math.abs(uz) > 0.48;
-    const isTopCrest = tier === STRATA_TIERS - 1 && ty > 0.96;
-    const n1 = rockSmoothNoise(xWorld * 5.2 + 1.3, yWorld * 5.8 + 2.7, zWorld * 5.2 + 0.9) - 0.5;
-    const n2 = rockSmoothNoise(xWorld * 12.5 + 4.1, yWorld * 11.2 + 0.6, zWorld * 12.5 + 3.3) - 0.5;
-    const cleave = n1 * 0.022 + n2 * 0.009;
+    // Stepped angular volcanic cleavage relief on exposed front/back/top faces
+    const isOuterZ = Math.abs(uz) > 0.49;
+    const isTopCrest = tier === STRATA_TIERS - 1 && ty > 0.98;
+    const n1 = rockSmoothNoise(xWorld * 6.2 + 1.3, yWorld * 6.8 + 2.7, zWorld * 6.2 + 0.9) - 0.5;
+    const n2 = rockSmoothNoise(xWorld * 15.5 + 4.1, yWorld * 14.2 + 0.6, zWorld * 15.5 + 3.3) - 0.5;
+    // Slight angular terrace quantization gives real chiseled stone fracture planes instead of soft lumps
+    const rawCleave = n1 * 0.016 + n2 * 0.007;
+    const cleave = rawCleave * 0.65 + Math.round(rawCleave * 90) / 90 * 0.35;
 
-    // Taper relief cleanly near shared interior edges to keep neighboring slabs non-overlapping
-    const interiorFade =
-      (1 - 0.55 * edgeProximityX) * (1 - 0.55 * edgeProximityY);
+    const interiorFade = (1 - 0.45 * edgeProximityX) * (1 - 0.45 * edgeProximityY);
 
     if (isOuterZ) {
       zWorld += Math.sign(uz) * cleave * interiorFade;
     }
     if (isTopCrest) {
-      yWorld += cleave * 1.15 * interiorFade;
+      yWorld += cleave * 0.95 * interiorFade;
     }
 
-    // Apply subtle corner bevel pulling strictly toward slab centroid (strictly preserves outward normals)
     const lx = xWorld - restCenterX;
     const ly = yWorld - restCenterY;
     const lz = zWorld;
@@ -912,19 +1216,19 @@ function createFacetedRockSlabGeometry(tier: number, col: number, slabIndex: num
 
     posAttr.setXYZ(i, lx * shrink, ly * shrink, lz * shrink);
 
-    // Store continuous core rest-coordinates for 3D object-space petrography
+    // Continuous 3D core rest coordinates for zero-stretch object-space petrography
     restPosArr[i * 3] = xWorld;
     restPosArr[i * 3 + 1] = yWorld;
     restPosArr[i * 3 + 2] = zWorld;
     stratumArr[i] = tier;
     slabIdxArr[i] = slabIndex;
 
-    // Mark internal fracture faces (vertical dike seams & horizontal bedding planes) for magma glow
-    const onLeftFrac = hasLeftFracture && tx < 0.08 ? 1.0 : 0.0;
-    const onRightFrac = hasRightFracture && tx > 0.92 ? 1.0 : 0.0;
-    const onBotBed = hasBottomBedding && ty < 0.08 ? 1.0 : 0.0;
-    const onTopBed = hasTopBedding && ty > 0.92 ? 1.0 : 0.0;
-    const onChamberRoof = tier === 0 && ty < 0.08 ? 0.85 : 0.0;
+    // Mark internal fracture faces (vertical dike seams & horizontal bedding planes) for magma wall glow
+    const onLeftFrac = hasLeftFracture && tx < 0.05 ? 1.0 : 0.0;
+    const onRightFrac = hasRightFracture && tx > 0.95 ? 1.0 : 0.0;
+    const onBotBed = hasBottomBedding && ty < 0.05 ? 1.0 : 0.0;
+    const onTopBed = hasTopBedding && ty > 0.95 ? 1.0 : 0.0;
+    const onChamberRoof = tier === 0 && ty < 0.06 ? 0.85 : 0.0;
     fractureMaskArr[i] = Math.max(onLeftFrac, onRightFrac, onBotBed, onTopBed, onChamberRoof);
   }
 
@@ -960,7 +1264,6 @@ export function buildRockCoreAssembly(materials: MagmaMaterials): RockCoreAssemb
     }
   }
 
-  // Invisible unified hit proxy over the overburden rock core for easy vertical pressure drag
   const coreHitGeo = new THREE.BoxGeometry(CORE_WIDTH + 0.06, OVERBURDEN_HEIGHT + 0.14, CORE_DEPTH + 0.06);
   disposables.push(coreHitGeo);
   const coreHitMesh = new THREE.Mesh(coreHitGeo);
@@ -980,73 +1283,306 @@ export function buildRockCoreAssembly(materials: MagmaMaterials): RockCoreAssemb
 }
 
 // ---------------------------------------------------------------------------
-// 5. Magma Chamber, Xenoliths, Vertical Dikes, Horizontal Sills & Pahoehoe Lobes
+// 5. Seam-Conforming Vertical Dikes, Arched Horizontal Sills, Xenoliths & Lobes
 // ---------------------------------------------------------------------------
 
 /**
- * Creates a watertight tapered vertical magma dike blade anchored at y = 0 (chamber roof)
- * extending up to y = 1 (scaled dynamically by dike.height in onTick), following the exact
- * jagged vertical fracture contour evalColumnSeamX.
+ * Evaluates smooth column displacement `(dx, dy, rotZ)` interpolated across vertical tiers
+ * so deformable dike vertices hug the exact jagged fracture walls of parting slabs!
+ */
+function sampleColumnWallX(
+  slabs: ReadonlyArray<RockSlabState>,
+  col: number,
+  boundaryIdx: number,
+  yWorld: number,
+  zWorld: number
+): number {
+  const s0 = slabs[0 * SLAB_COLUMNS + col];
+  const s1 = slabs[1 * SLAB_COLUMNS + col];
+  const s2 = slabs[2 * SLAB_COLUMNS + col];
+
+  const y0 = s0.restCenterY + s0.dy;
+  const y1 = s1.restCenterY + s1.dy;
+  const y2 = s2.restCenterY + s2.dy;
+
+  let dx: number;
+  let dy: number;
+  let rotZ: number;
+  let restCy: number;
+  if (yWorld <= y1) {
+    const t = Math.max(0, Math.min(1, (yWorld - y0) / Math.max(1e-4, y1 - y0)));
+    dx = s0.dx + (s1.dx - s0.dx) * t;
+    dy = s0.dy + (s1.dy - s0.dy) * t;
+    rotZ = s0.rotZ + (s1.rotZ - s0.rotZ) * t;
+    restCy = s0.restCenterY + (s1.restCenterY - s0.restCenterY) * t;
+  } else {
+    const t = Math.max(0, Math.min(1, (yWorld - y1) / Math.max(1e-4, y2 - y1)));
+    dx = s1.dx + (s2.dx - s1.dx) * t;
+    dy = s1.dy + (s2.dy - s1.dy) * t;
+    rotZ = s1.rotZ + (s2.rotZ - s1.rotZ) * t;
+    restCy = s1.restCenterY + (s2.restCenterY - s1.restCenterY) * t;
+  }
+
+  const yRest = Math.max(OVERBURDEN_BOTTOM_Y, Math.min(OVERBURDEN_BOTTOM_Y + OVERBURDEN_HEIGHT, yWorld - dy));
+  const xSeamRest = evalColumnSeamX(boundaryIdx, yRest, zWorld);
+  const restCx = s0.restCenterX;
+  const lx = xSeamRest - restCx;
+  const ly = yRest - restCy;
+  // Exact 2D slab rotation in XY plane
+  return restCx + dx + lx * Math.cos(rotZ) - ly * Math.sin(rotZ);
+}
+
+/**
+ * Evaluates smooth arched bedding elevation along a tier of 4 slabs at world X.
+ */
+function sampleTierArchY(
+  slabs: ReadonlyArray<RockSlabState>,
+  tier: number,
+  xWorld: number
+): number {
+  const s0 = slabs[tier * SLAB_COLUMNS + 0];
+  const s1 = slabs[tier * SLAB_COLUMNS + 1];
+  const s2 = slabs[tier * SLAB_COLUMNS + 2];
+  const s3 = slabs[tier * SLAB_COLUMNS + 3];
+
+  const xs = [s0.restCenterX + s0.dx, s1.restCenterX + s1.dx, s2.restCenterX + s2.dx, s3.restCenterX + s3.dx];
+  const ys = [s0.dy, s1.dy, s2.dy, s3.dy];
+  const rs = [s0.rotZ, s1.rotZ, s2.rotZ, s3.rotZ];
+
+  if (xWorld <= xs[0]) return ys[0] + Math.sin(rs[0]) * (xWorld - xs[0]);
+  if (xWorld >= xs[3]) return ys[3] + Math.sin(rs[3]) * (xWorld - xs[3]);
+
+  for (let i = 0; i < 3; i++) {
+    if (xWorld <= xs[i + 1]) {
+      const t = (xWorld - xs[i]) / Math.max(1e-4, xs[i + 1] - xs[i]);
+      const yA = ys[i] + Math.sin(rs[i]) * (xWorld - xs[i]);
+      const yB = ys[i + 1] + Math.sin(rs[i + 1]) * (xWorld - xs[i + 1]);
+      // Smooth cubic blend across slab joints so the magma lens arches continuously
+      const st = t * t * (3 - 2 * t);
+      return yA + (yB - yA) * st;
+    }
+  }
+  return ys[1];
+}
+
+/**
+ * Creates a watertight deformable vertical dike geometry with saved unit `(uX, uY, uZ)`
+ * coordinates in `userData.unitCoords` for zero-allocation per-frame fracture conformation.
  */
 function createDikeWedgeGeometry(seamIdx: number): THREE.BufferGeometry {
-  const geo = new THREE.BoxGeometry(1, 1, 1, 4, 18, 10);
+  const geo = new THREE.BoxGeometry(1, 1, 1, 2, 18, 10);
   const pos = geo.attributes.position as THREE.BufferAttribute;
-  const baseX = DIKE_SEAM_X[seamIdx];
-  // Recessed cleanly inside the front/back rock faces so dikes gleam from inside opened seams
-  const depthSpan = CORE_DEPTH - 0.014;
+  const unitCoords = new Float32Array(pos.count * 3);
+  const colBoundaryIdx = seamIdx === 0 ? 2 : seamIdx === 1 ? 1 : 3;
+  const depthSpan = CORE_DEPTH - 0.024;
 
   for (let i = 0; i < pos.count; i++) {
     const ux = pos.getX(i); // [-0.5, +0.5]
     const uy = pos.getY(i) + 0.5; // [0, 1] bottom -> tip
     const uz = pos.getZ(i); // [-0.5, +0.5]
+    unitCoords[i * 3] = ux;
+    unitCoords[i * 3 + 1] = uy;
+    unitCoords[i * 3 + 2] = uz;
 
+    // Initial rest pose following the exact uncrushed jagged evalColumnSeamX contour!
     const zWorld = uz * depthSpan;
-    const yRef = OVERBURDEN_BOTTOM_Y + uy * OVERBURDEN_HEIGHT;
-    // Slight natural fracture jag relative to baseX
-    const seamOffset = (evalColumnSeamX(seamIdx === 0 ? 2 : seamIdx === 1 ? 1 : 3, yRef, zWorld) - baseX) * 0.85;
-
-    // Taper thickness gently toward sharp hydraulic-fracture tip (uy -> 1) while remaining positive volume
-    const tipTaper = 1.0 - 0.58 * uy * uy;
-    const widthX = ux * tipTaper + seamOffset * 0.15;
-
-    // Keep Z strictly inside CORE_HALF_D (gentle inward taper toward tip, zero proud ribbon bulge)
-    const zRecessed = zWorld * (1.0 - 0.012 * uy);
-    pos.setXYZ(i, widthX, uy, zRecessed);
+    const yWorld = CHAMBER_ROOF_Y - 0.02 + uy * (OVERBURDEN_HEIGHT * 0.55);
+    const xSeam = evalColumnSeamX(colBoundaryIdx, Math.max(OVERBURDEN_BOTTOM_Y, yWorld), zWorld);
+    const tipTaper = 1.0 - 0.52 * uy * uy;
+    const halfThick = 0.014 * tipTaper;
+    pos.setXYZ(i, xSeam + ux * 2 * halfThick, yWorld, zWorld * (1.0 - 0.01 * uy));
   }
+  geo.userData.unitCoords = unitCoords;
   geo.computeVertexNormals();
   return geo;
 }
 
 /**
- * Creates a watertight tapered horizontal laccolith sill lens centered at (0, 0, 0)
- * spanning unit width [-1, +1] in X and unit thickness [-0.5, +0.5] in Y.
+ * Zero-allocation per-frame update conforming a vertical magma dike mesh directly to the
+ * exact jagged `evalColumnSeamX` walls & live parted positions of its flanking rock slabs.
+ * Eliminates straight-plane clipping, hollow seam air gaps, and protruding shark-fin tips!
  */
-function createSillLensGeometry(): THREE.BufferGeometry {
-  // Recessed cleanly inside the front/back bedding-plane cavity so sills gleam inside the opened strata seam
-  const geo = new THREE.BoxGeometry(2, 1, CORE_DEPTH - 0.012, 20, 4, 10);
+export function updateDikeGeometry(
+  geo: THREE.BufferGeometry,
+  seamIdx: number,
+  height: number,
+  veinThickness: number,
+  slabs: ReadonlyArray<RockSlabState>
+): void {
+  const unitCoords = geo.userData.unitCoords as Float32Array | undefined;
+  if (!unitCoords) return;
+
   const pos = geo.attributes.position as THREE.BufferAttribute;
+  const colBoundaryIdx = seamIdx === 0 ? 2 : seamIdx === 1 ? 1 : 3;
+  const leftCol = colBoundaryIdx - 1;
+  const rightCol = colBoundaryIdx;
+  const baseX = DIKE_SEAM_X[seamIdx];
+
+  const sL2 = slabs[2 * SLAB_COLUMNS + leftCol];
+  const sR2 = slabs[2 * SLAB_COLUMNS + rightCol];
+  const crestDy = 0.5 * (sL2.dy + sR2.dy);
+
+  const depthSpan = CORE_DEPTH - 0.024;
+  const yStart = CHAMBER_ROOF_Y - 0.028;
 
   for (let i = 0; i < pos.count; i++) {
-    const x = pos.getX(i); // [-1, +1]
-    const y = pos.getY(i); // [-0.5, +0.5]
-    const z = pos.getZ(i);
+    const ux = unitCoords[i * 3]; // [-0.5, +0.5]
+    const uy = unitCoords[i * 3 + 1]; // [0, 1]
+    const uz = unitCoords[i * 3 + 2]; // [-0.5, +0.5]
 
-    // Classic lenticular laccolith profile: thickest at central feeder, smoothly pinched toward outer tips
-    const r = Math.min(1, Math.abs(x));
-    const lensFactor = 0.24 + 0.76 * Math.cos(r * Math.PI * 0.46);
-    const zEdgeTaper = 0.86 + 0.14 * Math.cos((z / CORE_HALF_D) * Math.PI * 0.45);
-    pos.setXYZ(i, x, y * lensFactor * zEdgeTaper, z);
+    const zRecessed = uz * depthSpan * (1.0 - 0.012 * uy);
+    // Cap dike top cleanly at the local basalt crest surface (zero midair shark-fin spikes!)
+    const localCrestTop = evalBeddingPlaneY(STRATA_TIERS, baseX, zRecessed) + crestDy - 0.002;
+    const yEnd = Math.min(localCrestTop, CHAMBER_ROOF_Y + height + crestDy * 0.45);
+    const yWorld = yStart + uy * Math.max(0.02, yEnd - yStart);
+
+    // Exact rotated & jagged left/right slab fracture wall coordinates at (yWorld, zRecessed)
+    const xWallL = sampleColumnWallX(slabs, leftCol, colBoundaryIdx, yWorld, zRecessed);
+    const xWallR = sampleColumnWallX(slabs, rightCol, colBoundaryIdx, yWorld, zRecessed);
+    const xMid = 0.5 * (xWallL + xWallR);
+    const actualGap = Math.max(0.004, xWallR - xWallL);
+
+    // Fill the full real fracture gap + 4mm wall-lap seal (zero black gaps!) with hydraulic tip taper
+    const tipTaper = uy > 0.86 ? 1.0 - 0.58 * ((uy - 0.86) / 0.14) : 1.0;
+    const halfWidth = Math.max(actualGap * 0.5 + 0.005, veinThickness * 0.46) * tipTaper;
+
+    pos.setXYZ(i, xMid + ux * 2.0 * halfWidth, yWorld, zRecessed);
   }
+
+  pos.needsUpdate = true;
+  geo.computeVertexNormals();
+}
+
+/**
+ * Creates a watertight deformable horizontal laccolith sill lens geometry with saved
+ * unit `(uX, uY, uZ)` coordinates for zero-allocation arched bedding conformation.
+ */
+function createSillLensGeometry(sillIdx = 0): THREE.BufferGeometry {
+  const geo = new THREE.BoxGeometry(2, 1, CORE_DEPTH - 0.024, 24, 2, 10);
+  const pos = geo.attributes.position as THREE.BufferAttribute;
+  const unitCoords = new Float32Array(pos.count * 3);
+  const depthSpan = CORE_DEPTH - 0.024;
+  const halfDepth = depthSpan * 0.5;
+
+  for (let i = 0; i < pos.count; i++) {
+    const ux = pos.getX(i); // [-1, +1]
+    const uy = pos.getY(i); // [-0.5, +0.5]
+    const uz = pos.getZ(i) / depthSpan; // [-0.5, +0.5]
+    unitCoords[i * 3] = ux;
+    unitCoords[i * 3 + 1] = uy;
+    unitCoords[i * 3 + 2] = uz;
+
+    const x = ux * 0.45;
+    const z = uz * depthSpan;
+    const bedY = evalBeddingPlaneY(sillIdx + 1, x, z);
+    const r = Math.min(1, Math.abs(ux));
+    const lensFactor = 0.22 + 0.78 * Math.cos(r * Math.PI * 0.46);
+    const zEdgeTaper = 0.88 + 0.12 * Math.cos((z / halfDepth) * Math.PI * 0.45);
+    pos.setXYZ(i, x, bedY + uy * 0.028 * lensFactor * zEdgeTaper, z);
+  }
+  geo.userData.unitCoords = unitCoords;
   geo.computeVertexNormals();
   return geo;
 }
 
 /**
- * Creates a watertight sculpted viscoplastic pahoehoe lava pillow / tongue geometry
- * using smooth 3D multi-octave noise folds (strictly zero polar star harmonics!).
+ * Zero-allocation per-frame update conforming a horizontal magma sill lens strictly to:
+ *  - Undulating `evalBeddingPlaneY` stratigraphy
+ *  - Live anticlinal dome arch & slab tilt between lower & upper strata tiers
+ *  - Actual outer rock flank boundaries (zero rigid flat tongues poking out the sides!)
+ */
+export function updateSillGeometry(
+  geo: THREE.BufferGeometry,
+  sillIdx: number,
+  halfWidth: number,
+  sillThickness: number,
+  slabs: ReadonlyArray<RockSlabState>
+): void {
+  const unitCoords = geo.userData.unitCoords as Float32Array | undefined;
+  if (!unitCoords) return;
+
+  const pos = geo.attributes.position as THREE.BufferAttribute;
+  const tierBelow = sillIdx;
+  const tierAbove = sillIdx + 1;
+
+  // Clamp sill lateral span strictly inside the outer rock slab edges so it never sticks out in midair
+  const leftBelow = slabs[tierBelow * SLAB_COLUMNS + 0];
+  const leftAbove = slabs[tierAbove * SLAB_COLUMNS + 0];
+  const rightBelow = slabs[tierBelow * SLAB_COLUMNS + 3];
+  const rightAbove = slabs[tierAbove * SLAB_COLUMNS + 3];
+  const minRockX = Math.max(COLUMN_BOUNDARIES_X[0] + leftBelow.dx, COLUMN_BOUNDARIES_X[0] + leftAbove.dx) + 0.022;
+  const maxRockX = Math.min(COLUMN_BOUNDARIES_X[4] + rightBelow.dx, COLUMN_BOUNDARIES_X[4] + rightAbove.dx) - 0.022;
+  const safeHalfW = Math.max(0.04, Math.min(halfWidth, Math.min(-minRockX, maxRockX)));
+
+  const depthSpan = CORE_DEPTH - 0.024;
+  const halfDepth = depthSpan * 0.5;
+
+  for (let i = 0; i < pos.count; i++) {
+    const ux = unitCoords[i * 3]; // [-1, +1]
+    const uy = unitCoords[i * 3 + 1]; // [-0.5, +0.5]
+    const uz = unitCoords[i * 3 + 2]; // [-0.5, +0.5]
+
+    const xWorld = ux * safeHalfW;
+    const zWorld = uz * depthSpan;
+    const bedY = evalBeddingPlaneY(tierAbove, xWorld, zWorld);
+
+    const dyBelow = sampleTierArchY(slabs, tierBelow, xWorld);
+    const dyAbove = sampleTierArchY(slabs, tierAbove, xWorld);
+    const actualBedGap = Math.max(0.006, dyAbove - dyBelow);
+
+    const r = Math.min(1, Math.abs(ux));
+    const lensFactor = 0.24 + 0.76 * Math.cos(r * Math.PI * 0.46);
+    const zEdgeTaper = 0.88 + 0.12 * Math.cos((zWorld / halfDepth) * Math.PI * 0.45);
+
+    const midY = bedY + 0.5 * (dyBelow + dyAbove);
+    // Fill actual arched cavity + 5mm bedding-wall lap seal, pinched cleanly at tips
+    const localThickness = Math.max(actualBedGap + 0.008, sillThickness) * lensFactor * zEdgeTaper;
+    pos.setXYZ(i, xWorld, midY + uy * localThickness, zWorld);
+  }
+
+  pos.needsUpdate = true;
+  geo.computeVertexNormals();
+}
+
+/**
+ * Welds duplicate vertices on a non-indexed BufferGeometry (e.g., Three.js IcosahedronGeometry)
+ * into a watertight indexed mesh so `computeVertexNormals()` produces silky smooth interpolated
+ * volcanic-glass normals instead of flat per-triangle facets!
+ */
+function weldIndexedGeometry(rawGeo: THREE.BufferGeometry): THREE.BufferGeometry {
+  const pos = rawGeo.attributes.position as THREE.BufferAttribute;
+  const vertMap = new Map<string, number>();
+  const uniquePositions: number[] = [];
+  const indices: number[] = [];
+
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i);
+    const y = pos.getY(i);
+    const z = pos.getZ(i);
+    const key = `${Math.round(x * 1e5)}_${Math.round(y * 1e5)}_${Math.round(z * 1e5)}`;
+    let idx = vertMap.get(key);
+    if (idx === undefined) {
+      idx = uniquePositions.length / 3;
+      vertMap.set(key, idx);
+      uniquePositions.push(x, y, z);
+    }
+    indices.push(idx);
+  }
+
+  const welded = new THREE.BufferGeometry();
+  welded.setAttribute('position', new THREE.Float32BufferAttribute(uniquePositions, 3));
+  welded.setIndex(indices);
+  rawGeo.dispose();
+  return welded;
+}
+
+/**
+ * Creates a smooth watertight sculpted viscoplastic pahoehoe lava pillow / tongue geometry
+ * (welded indexed subdivision-4 icosahedron -> silky-smooth glossy obsidian glass normals,
+ * flat rock-hugging underside, zero faceted polyhedron seams, zero polar harmonics).
  */
 function createPahoehoeLobeGeometry(): THREE.BufferGeometry {
-  const geo = new THREE.IcosahedronGeometry(1.0, 3);
+  const geo = weldIndexedGeometry(new THREE.IcosahedronGeometry(1.0, 4));
   const pos = geo.attributes.position as THREE.BufferAttribute;
 
   for (let i = 0; i < pos.count; i++) {
@@ -1054,20 +1590,20 @@ function createPahoehoeLobeGeometry(): THREE.BufferGeometry {
     let y = pos.getY(i);
     let z = pos.getZ(i);
 
-    // Flatten underside slightly so erupted lobes hug the rock crest/ledge naturally
+    // Flatten underside snugly so extruded pillows hug & drape over rock ledges cleanly
     if (y < 0) {
-      y *= 0.42;
+      y *= 0.34;
     } else {
-      y = Math.pow(y, 0.88);
+      y = Math.pow(y, 0.90);
     }
 
-    // Organic viscous ropy pahoehoe billow displacement using 3D smooth noise
-    const n1 = rockSmoothNoise(x * 2.1 + 1.4, y * 3.0 + 2.2, z * 2.1 + 0.7) - 0.5;
-    const n2 = rockSmoothNoise(x * 4.5 + 3.8, y * 4.8 + 1.1, z * 4.5 + 5.2) - 0.5;
-    const disp = 1.0 + n1 * 0.26 + n2 * 0.10;
+    // Gentle low-frequency organic billow + subtle arcuate ropy flow swell along tongue axis
+    const n1 = rockSmoothNoise(x * 1.6 + 1.4, y * 2.2 + 2.2, z * 1.6 + 0.7) - 0.5;
+    const ropeRipple = Math.sin(z * 6.5 + x * x * 3.0) * 0.032 * Math.max(0, y + 0.2);
+    const disp = 1.0 + n1 * 0.16 + ropeRipple;
 
-    // Slight forward tongue elongation along +Z
-    z *= 1.18;
+    // Gentle viscous tongue elongation along +Z
+    z *= 1.24;
     pos.setXYZ(i, x * disp, y * disp, z * disp);
   }
   geo.computeVertexNormals();
@@ -1078,15 +1614,15 @@ function createPahoehoeLobeGeometry(): THREE.BufferGeometry {
  * Creates a cleaved angular dark basalt xenolith rock chunk floating inside the chamber.
  */
 function createXenolithGeometry(seed: number): THREE.BufferGeometry {
-  const geo = new THREE.IcosahedronGeometry(0.088, 2);
+  const geo = new THREE.IcosahedronGeometry(0.078, 2);
   const pos = geo.attributes.position as THREE.BufferAttribute;
   for (let i = 0; i < pos.count; i++) {
     const x = pos.getX(i);
     const y = pos.getY(i);
     const z = pos.getZ(i);
-    const n = rockSmoothNoise(x * 16 + seed, y * 16 + seed * 1.7, z * 16 + seed * 0.6);
-    const sc = 0.78 + n * 0.42;
-    pos.setXYZ(i, x * sc * 1.25, y * sc * 0.76, z * sc * 0.95);
+    const n = rockSmoothNoise(x * 15 + seed, y * 15 + seed * 1.7, z * 15 + seed * 0.6);
+    const sc = 0.80 + n * 0.38;
+    pos.setXYZ(i, x * sc * 1.28, y * sc * 0.72, z * sc * 0.88);
   }
   geo.computeVertexNormals();
   return geo;
@@ -1101,20 +1637,29 @@ export function buildMagmaSystemAssembly(materials: MagmaMaterials): MagmaSystem
     return g;
   };
 
-  // 1. Churning Lower Magma Chamber Volume (behind front & back quartz windows)
-  const chamberGeo = track(new THREE.BoxGeometry(1.48, CHAMBER_HEIGHT - 0.025, CORE_DEPTH - 0.02, 16, 6, 12));
+  // 1. Churning Lower Magma Chamber Volume (recessed at z=±0.485 so drifting basalt xenoliths emerge visibly behind quartz!)
+  const chamberGeo = track(new THREE.BoxGeometry(1.42, CHAMBER_HEIGHT - 0.025, CORE_DEPTH - 0.13, 18, 8, 12));
   const chamberMeltMesh = new THREE.Mesh(chamberGeo, materials.chamberMagma);
   chamberMeltMesh.name = 'MagmaChamberMeltVolume';
   chamberMeltMesh.position.set(0, CHAMBER_BOTTOM_Y + CHAMBER_HEIGHT * 0.5, 0);
   group.add(chamberMeltMesh);
 
-  // 2. 4 Drifting Dark Basalt Xenolith Roof-Clasts suspended inside the glowing chamber
+  // 1b. Basal Chamber-Roof Magma Feeder Conduit (bridges chamber ceiling to Tier 0 slabs cleanly during basalLift!)
+  const feederGeo = track(new THREE.BoxGeometry(1.44, 0.065, CORE_DEPTH - 0.04, 10, 2, 8));
+  const chamberFeederMesh = new THREE.Mesh(feederGeo, materials.chamberMagma);
+  chamberFeederMesh.name = 'ChamberRoofFeederMelt';
+  chamberFeederMesh.position.set(0, CHAMBER_ROOF_Y - 0.025, 0);
+  group.add(chamberFeederMesh);
+
+  // 2. 6 Drifting Dark Vesicular Basalt Xenolith Roof-Clasts emerging right behind front & back quartz windows!
   const xenolithMeshes: THREE.Mesh[] = [];
   const xenoOffsets: ReadonlyArray<readonly [number, number, number]> = [
-    [-0.36, CHAMBER_ROOF_Y - 0.14, 0.24],
-    [0.28, CHAMBER_ROOF_Y - 0.18, 0.18],
-    [-0.08, CHAMBER_ROOF_Y - 0.22, -0.22],
-    [0.42, CHAMBER_ROOF_Y - 0.13, -0.18],
+    [-0.42, CHAMBER_ROOF_Y - 0.13, 0.47],
+    [0.14, CHAMBER_ROOF_Y - 0.15, 0.48],
+    [0.50, CHAMBER_ROOF_Y - 0.12, 0.46],
+    [-0.36, CHAMBER_ROOF_Y - 0.14, -0.47],
+    [0.08, CHAMBER_ROOF_Y - 0.16, -0.48],
+    [0.44, CHAMBER_ROOF_Y - 0.12, -0.46],
   ];
   for (let i = 0; i < xenoOffsets.length; i++) {
     const xGeo = track(createXenolithGeometry(i * 4.3 + 1.2));
@@ -1125,29 +1670,29 @@ export function buildMagmaSystemAssembly(materials: MagmaMaterials): MagmaSystem
     xenolithMeshes.push(mesh);
   }
 
-  // 3. 3 Dynamic Vertical Magma Dike Conduits (central primary + left/right flanks)
+  // 3. 3 Dynamic Seam-Conforming Vertical Magma Dike Conduits (world-space deformed in onTick)
   const dikeMeshes: THREE.Mesh[] = [];
   for (let i = 0; i < DIKE_SEAM_X.length; i++) {
     const dGeo = track(createDikeWedgeGeometry(i));
     const mesh = new THREE.Mesh(dGeo, materials.dikeMagma);
     mesh.name = `VerticalMagmaDike_${i}`;
-    mesh.position.set(DIKE_SEAM_X[i], CHAMBER_ROOF_Y - 0.02, 0);
+    mesh.frustumCulled = false;
     group.add(mesh);
     dikeMeshes.push(mesh);
   }
 
-  // 4. 2 Dynamic Horizontal Magma Sill Lenses (lower Basalt/Tuff & upper Tuff/Cap bedding planes)
+  // 4. 2 Dynamic Arched Horizontal Magma Sill Lenses (world-space deformed in onTick)
   const sillMeshes: THREE.Mesh[] = [];
   for (let i = 0; i < SILL_BED_Y.length; i++) {
-    const sGeo = track(createSillLensGeometry());
+    const sGeo = track(createSillLensGeometry(i));
     const mesh = new THREE.Mesh(sGeo, materials.sillMagma);
     mesh.name = `HorizontalMagmaSill_${i}`;
-    mesh.position.set(0, SILL_BED_Y[i], 0);
+    mesh.frustumCulled = false;
     group.add(mesh);
     sillMeshes.push(mesh);
   }
 
-  // 5. 24 Instanced Viscoplastic Cooling/Re-Cracking Pahoehoe Magma Lobes (1 draw call!)
+  // 5. 24 Instanced Smooth Ropy Viscoplastic Pahoehoe Magma Lobes (1 draw call!)
   const lobeGeo = track(createPahoehoeLobeGeometry());
   const lobeThermalData = new Float32Array(MAX_LOBES * 4);
   const lobeThermalAttr = new THREE.InstancedBufferAttribute(lobeThermalData, 4);
@@ -1184,6 +1729,7 @@ export function buildMagmaSystemAssembly(materials: MagmaMaterials): MagmaSystem
   return {
     group,
     chamberMeltMesh,
+    chamberFeederMesh,
     xenolithMeshes,
     dikeMeshes,
     sillMeshes,

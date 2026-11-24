@@ -1,17 +1,23 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three/webgpu';
 import {
+  ACME_THREAD_PITCH,
+  CHAMBER_BOTTOM_Y,
+  CHAMBER_ROOF_Y,
   COLUMN_BOUNDARIES_X,
   CORE_HALF_D,
   CORE_HALF_W,
   MAX_HEAVE_DISPLACEMENT,
   MAX_PISTON_TRAVEL,
+  OVERBURDEN_BOTTOM_Y,
   OVERBURDEN_HEIGHT,
   SLAB_COLUMNS,
   SLAB_COUNT,
   STRATA_TIERS,
+  TIER_BOUNDARIES_Y,
   TectonicMagmaSolver,
   computeSillFraction,
+  evalColumnSeamX,
   evalMagmaBlackbody,
 } from '../src/days/23-magma/tectonicSolver';
 import {
@@ -20,6 +26,9 @@ import {
   buildMagmaSystemAssembly,
   buildPressFrameAssembly,
   buildRockCoreAssembly,
+  evalAcmeThreadRadius,
+  updateDikeGeometry,
+  updateSillGeometry,
 } from '../src/days/23-magma/geometry';
 
 describe('Day 23 - Pressurized Tectonic Magma-Intrusion Block', () => {
@@ -261,6 +270,7 @@ describe('Day 23 - Pressurized Tectonic Magma-Intrusion Block', () => {
       forgedPressIron: dummyMat,
       machinedThreadSteel: dummyMat,
       satinBrass: dummyMat,
+      gaugeDial: dummyMat,
       quartzGlass: dummyMat,
       stratifiedRockCore: dummyMat,
       xenolithBasalt: dummyMat,
@@ -380,6 +390,7 @@ describe('Day 23 - Pressurized Tectonic Magma-Intrusion Block', () => {
       forgedPressIron: dummyMat,
       machinedThreadSteel: dummyMat,
       satinBrass: dummyMat,
+      gaugeDial: dummyMat,
       quartzGlass: dummyMat,
       stratifiedRockCore: dummyMat,
       xenolithBasalt: dummyMat,
@@ -473,6 +484,264 @@ describe('Day 23 - Pressurized Tectonic Magma-Intrusion Block', () => {
     frame.dispose();
     piston.dispose();
     clamps.dispose();
+    dummyMat.dispose();
+  });
+
+  it('enforces rotated-corner slab-to-platen and Tier-0 chamber-roof clearances under peak dome heave and tension', () => {
+    const solver = new TectonicMagmaSolver({
+      initialPressure: 1.0,
+      initialCompression: 1.0,
+      preWarmSec: 0,
+    });
+
+    const sweeps: Array<[number, number]> = [
+      [1.0, 1.0],
+      [1.0, -1.0],
+      [0.95, 0.85],
+      [0.95, -0.85],
+      [0.5, 0.0],
+    ];
+
+    for (const [p, c] of sweeps) {
+      solver.setTargetPressure(p);
+      solver.setTargetCompression(c);
+      for (let step = 0; step < 180; step++) {
+        solver.step(1 / 60);
+        // Lateral platen inner face sits at ±(CORE_HALF_W + platenOffset + 0.004)
+        const platenInnerX = CORE_HALF_W + solver.platenOffset + 0.004;
+
+        for (let i = 0; i < solver.slabs.length; i++) {
+          const s = solver.slabs[i];
+          const halfW = 0.5 * (COLUMN_BOUNDARIES_X[s.col + 1] - COLUMN_BOUNDARIES_X[s.col]);
+          const halfH = 0.5 * (TIER_BOUNDARIES_Y[s.tier + 1] - TIER_BOUNDARIES_Y[s.tier]);
+          const rotReachX = halfW * Math.cos(s.rotZ) + (halfH + 0.009) * Math.abs(Math.sin(s.rotZ));
+
+          if (s.col === 0) {
+            const leftMostCornerX = s.restCenterX + s.dx - rotReachX;
+            expect(leftMostCornerX).toBeGreaterThanOrEqual(-platenInnerX - 1e-4);
+          }
+          if (s.col === SLAB_COLUMNS - 1) {
+            const rightMostCornerX = s.restCenterX + s.dx + rotReachX;
+            expect(rightMostCornerX).toBeLessThanOrEqual(platenInnerX + 1e-4);
+          }
+          if (s.tier === 0) {
+            const lowestCornerY =
+              s.restCenterY + s.dy - (halfH * Math.cos(s.rotZ) + halfW * Math.abs(Math.sin(s.rotZ)));
+            expect(lowestCornerY).toBeGreaterThanOrEqual(CHAMBER_ROOF_Y - 0.002);
+          }
+        }
+      }
+    }
+  });
+
+  it('couples true helical ACME screw threads coherently to platen travel with zero slip at the stationary bushing', () => {
+    const dummyMat = new THREE.MeshBasicMaterial();
+    const mats: any = {
+      forgedPressIron: dummyMat,
+      machinedThreadSteel: dummyMat,
+      satinBrass: dummyMat,
+      gaugeDial: dummyMat,
+      quartzGlass: dummyMat,
+      stratifiedRockCore: dummyMat,
+      xenolithBasalt: dummyMat,
+      chamberMagma: dummyMat,
+      dikeMagma: dummyMat,
+      sillMagma: dummyMat,
+      pahoehoeLobe: dummyMat,
+      emberSpark: dummyMat,
+    };
+
+    const clamps = buildLateralClampAssemblies(mats);
+    const screwMesh = clamps.group.getObjectByName('LateralAcmeScrew_Right') as THREE.Mesh;
+    expect(screwMesh).toBeDefined();
+
+    // Verify screw geometry is truly helical (radius varies with angle at fixed axial y near center)
+    const pos = screwMesh.geometry.attributes.position as THREE.BufferAttribute;
+    let rMinAtMidY = Infinity;
+    let rMaxAtMidY = -Infinity;
+    for (let i = 0; i < pos.count; i++) {
+      const y = pos.getY(i);
+      if (Math.abs(y) < 0.003) {
+        const r = Math.hypot(pos.getX(i), pos.getZ(i));
+        if (r < rMinAtMidY) rMinAtMidY = r;
+        if (r > rMaxAtMidY) rMaxAtMidY = r;
+      }
+    }
+    expect(rMaxAtMidY - rMinAtMidY).toBeGreaterThan(0.012);
+
+    // Verify exact helical phase invariance at stationary bushing x = +1.24 across platen travel
+    const solver = new TectonicMagmaSolver({ initialPressure: 0.5, initialCompression: -0.9, preWarmSec: 1.5 });
+    const evalBushingThreadRadius = (platenOffset: number, screwAngle: number, phiWorld: number): number => {
+      // Right screw local y at stationary world x = 1.24 is yLocal = (1.24 - 1.28) - platenOffset
+      const yLocal = -0.04 - platenOffset;
+      // Right screw rotated -PI/2 around Z then +screwAngle around X maps world angle phiWorld to theta = phiWorld + PI - screwAngle
+      const thetaLocal = phiWorld + Math.PI - screwAngle;
+      const phase = yLocal / ACME_THREAD_PITCH + thetaLocal / (Math.PI * 2);
+      return evalAcmeThreadRadius(0.041, 0.059, phase);
+    };
+
+    const rAtTension = evalBushingThreadRadius(solver.platenOffset, solver.clampScrewAngle, 0.4);
+    solver.setTargetCompression(0.9);
+    for (let i = 0; i < 180; i++) solver.step(1 / 60);
+    const rAtCompression = evalBushingThreadRadius(solver.platenOffset, solver.clampScrewAngle, 0.4);
+    expect(Math.abs(rAtTension - rAtCompression)).toBeLessThan(1e-5);
+
+    clamps.dispose();
+    dummyMat.dispose();
+  });
+
+  it('conforms deformable dikes to jagged fracture seams and arches sills cleanly inside outer rock flanks', () => {
+    const dummyMat = new THREE.MeshBasicMaterial();
+    const mats: any = {
+      forgedPressIron: dummyMat,
+      machinedThreadSteel: dummyMat,
+      satinBrass: dummyMat,
+      gaugeDial: dummyMat,
+      quartzGlass: dummyMat,
+      stratifiedRockCore: dummyMat,
+      xenolithBasalt: dummyMat,
+      chamberMagma: dummyMat,
+      dikeMagma: dummyMat,
+      sillMagma: dummyMat,
+      pahoehoeLobe: dummyMat,
+      emberSpark: dummyMat,
+    };
+    const magma = buildMagmaSystemAssembly(mats);
+
+    // 1. Extensional dike tracks full jagged evalColumnSeamX contour across Y (never flattened to straight plane!)
+    const extSolver = new TectonicMagmaSolver({ initialPressure: 0.95, initialCompression: -0.9, preWarmSec: 3.0 });
+    const d0 = extSolver.dikes[0];
+    const dikeGeo = magma.dikeMeshes[0].geometry;
+    updateDikeGeometry(dikeGeo, 0, d0.height, Math.max(d0.aperture * 1.15, 0.02), extSolver.slabs);
+    const dPos = dikeGeo.attributes.position as THREE.BufferAttribute;
+
+    let minCenterX = Infinity;
+    let maxCenterX = -Infinity;
+    let maxDikeY = -Infinity;
+    for (let i = 0; i < dPos.count; i++) {
+      const y = dPos.getY(i);
+      const z = dPos.getZ(i);
+      if (y > maxDikeY) maxDikeY = y;
+      if (Math.abs(z) < 0.08 && y > OVERBURDEN_BOTTOM_Y + 0.05 && y < OVERBURDEN_BOTTOM_Y + OVERBURDEN_HEIGHT - 0.08) {
+        const x = dPos.getX(i);
+        if (x < minCenterX) minCenterX = x;
+        if (x > maxCenterX) maxCenterX = x;
+      }
+    }
+    // Seam contour varies by +/-0.022m along Y (total swing > 0.04m); dike must preserve that jag!
+    const expectedSeamMin = Math.min(evalColumnSeamX(2, 0.0, 0), evalColumnSeamX(2, 0.3, 0), evalColumnSeamX(2, 0.5, 0));
+    const expectedSeamMax = Math.max(evalColumnSeamX(2, 0.0, 0), evalColumnSeamX(2, 0.3, 0), evalColumnSeamX(2, 0.5, 0));
+    expect(maxCenterX - minCenterX).toBeGreaterThan((expectedSeamMax - expectedSeamMin) * 0.95);
+    // Dike top stays capped cleanly below upper basalt crest (zero shark-fin overshoot)
+    expect(maxDikeY).toBeLessThan(OVERBURDEN_BOTTOM_Y + OVERBURDEN_HEIGHT + extSolver.heaveDisplacement + 0.025);
+
+    // 2. Compressional sill arches higher at center than flanks AND stays strictly inside outer rock edges
+    const compSolver = new TectonicMagmaSolver({ initialPressure: 0.95, initialCompression: 0.95, preWarmSec: 3.0 });
+    const s0 = compSolver.sills[0];
+    const sillGeo = magma.sillMeshes[0].geometry;
+    updateSillGeometry(sillGeo, 0, s0.halfWidth, s0.thickness * 1.12, compSolver.slabs);
+    const sPos = sillGeo.attributes.position as THREE.BufferAttribute;
+
+    let centerYAvg = 0;
+    let centerCount = 0;
+    let flankYAvg = 0;
+    let flankCount = 0;
+    let maxAbsSillX = 0;
+    for (let i = 0; i < sPos.count; i++) {
+      const x = sPos.getX(i);
+      const y = sPos.getY(i);
+      if (Math.abs(x) > maxAbsSillX) maxAbsSillX = Math.abs(x);
+      if (Math.abs(x) < 0.12) {
+        centerYAvg += y;
+        centerCount++;
+      } else if (Math.abs(x) > 0.50) {
+        flankYAvg += y;
+        flankCount++;
+      }
+    }
+    centerYAvg /= Math.max(1, centerCount);
+    flankYAvg /= Math.max(1, flankCount);
+    expect(centerYAvg).toBeGreaterThan(flankYAvg + 0.015);
+    expect(maxAbsSillX).toBeLessThan(CORE_HALF_W + compSolver.platenOffset);
+
+    magma.dispose();
+    dummyMat.dispose();
+  });
+
+  it('verifies watertight hardware craft: full-skirted plunger, non-overlapping bezels, recessed trunnion bushings, visible xenoliths, Bourdon gauge & welded obsidian lobes', () => {
+    const dummyMat = new THREE.MeshBasicMaterial();
+    const mats: any = {
+      forgedPressIron: dummyMat,
+      machinedThreadSteel: dummyMat,
+      satinBrass: dummyMat,
+      gaugeDial: dummyMat,
+      quartzGlass: dummyMat,
+      stratifiedRockCore: dummyMat,
+      xenolithBasalt: dummyMat,
+      chamberMagma: dummyMat,
+      dikeMagma: dummyMat,
+      sillMagma: dummyMat,
+      pahoehoeLobe: dummyMat,
+      emberSpark: dummyMat,
+    };
+
+    const frame = buildPressFrameAssembly(mats);
+    const piston = buildHydraulicPistonAssembly(mats);
+    const clamps = buildLateralClampAssemblies(mats);
+    const magma = buildMagmaSystemAssembly(mats);
+
+    // Move plunger to 100% upward stroke
+    piston.ramGroup.position.y = MAX_PISTON_TRAVEL;
+    frame.group.updateMatrixWorld(true);
+    piston.group.updateMatrixWorld(true);
+    clamps.group.updateMatrixWorld(true);
+    magma.group.updateMatrixWorld(true);
+
+    const boxOf = (root: THREE.Object3D, name: string): THREE.Box3 => {
+      const obj = root.getObjectByName(name);
+      expect(obj, `mesh ${name} exists`).toBeDefined();
+      return new THREE.Box3().setFromObject(obj!);
+    };
+
+    // 1. Full-skirted hydraulic plunger stays seated inside base bore even at 100% upward stroke (zero floating gap)
+    const plungerMaxBox = boxOf(piston.group, 'ChamberInternalPlunger');
+    expect(plungerMaxBox.min.y).toBeLessThanOrEqual(CHAMBER_BOTTOM_Y + 0.005);
+
+    // 2. Side trunnion brass bushing sits cleanly inside forged iron trunnion bar vertical bounds (zero top/bot bleed)
+    const trunnionBar = boxOf(frame.group, 'SideTrunnionBracket_Right');
+    const trunnionBushing = boxOf(frame.group, 'SideTrunnionBushing_Right');
+    expect(trunnionBushing.max.y).toBeLessThan(trunnionBar.max.y - 0.005);
+    expect(trunnionBushing.min.y).toBeGreaterThan(trunnionBar.min.y + 0.005);
+
+    // 3. Quartz brass bezel vertical rails butt cleanly between top & bottom rails (zero coplanar corner z-fighting)
+    const bezelTop = boxOf(frame.group, 'QuartzBezelTop_Front');
+    const bezelBot = boxOf(frame.group, 'QuartzBezelBot_Front');
+    const bezelL = boxOf(frame.group, 'QuartzBezelL_Front');
+    expect(bezelL.max.y).toBeLessThanOrEqual(bezelTop.min.y + 0.001);
+    expect(bezelL.min.y).toBeGreaterThanOrEqual(bezelBot.max.y - 0.001);
+
+    // 4. Diegetic Bourdon pressure gauge clears lateral platen shoe, lower base platen & right tie-rod cleanly
+    const gaugeCase = boxOf(frame.group, 'BourdonGaugeCase');
+    const rightPlaten = boxOf(clamps.group, 'LateralPlatenShoe_Right');
+    const rightTieRod = boxOf(frame.group, 'TieRodShaft_R_F');
+    expect(gaugeCase.max.y).toBeLessThan(rightPlaten.min.y - 0.05);
+    expect(gaugeCase.min.y).toBeGreaterThan(CHAMBER_BOTTOM_Y + 0.05);
+    expect(gaugeCase.max.x).toBeLessThan(rightTieRod.min.x - 0.05);
+
+    // 5. Front xenolith emerges past opaque chamberMeltMesh front face while clearing quartz pane behind it
+    const meltBox = boxOf(magma.group, 'MagmaChamberMeltVolume');
+    const frontXeno = boxOf(magma.group, 'ChamberXenolith_0');
+    const frontGlass = boxOf(frame.group, 'QuartzCutawayGlass_Front');
+    expect(frontXeno.max.z).toBeGreaterThan(meltBox.max.z + 0.01);
+    expect(frontXeno.max.z).toBeLessThan(frontGlass.min.z);
+
+    // 6. Pahoehoe lobe geometry is indexed (welded vertices -> silky smooth obsidian normals, zero flat facets)
+    expect(magma.lobeInstancedMesh.geometry.index).not.toBeNull();
+
+    frame.dispose();
+    piston.dispose();
+    clamps.dispose();
+    magma.dispose();
     dummyMat.dispose();
   });
 });

@@ -7,9 +7,10 @@ import {
   DIKE_SEAM_X,
   MAX_LOBES,
   OVERBURDEN_TOP_Y,
-  SILL_BED_Y,
   SLAB_COLUMNS,
+  STRATA_TIERS,
   TectonicMagmaSolver,
+  evalBeddingPlaneY,
   type Day23Telemetry,
 } from './tectonicSolver';
 import { createMagmaStudioEnvironment } from './studioEnv';
@@ -21,6 +22,8 @@ import {
   buildMagmaSystemAssembly,
   buildPressFrameAssembly,
   buildRockCoreAssembly,
+  updateDikeGeometry,
+  updateSillGeometry,
 } from './geometry';
 
 declare global {
@@ -58,11 +61,14 @@ const _mat4 = new THREE.Matrix4();
 const _worldOriginNdc = new THREE.Vector3();
 const _worldPlusXNdc = new THREE.Vector3();
 
+// 6 drifting dark vesicular basalt xenoliths staged visibly behind front (+Z) & back (-Z) quartz panes
 const XENOLITH_BASE: ReadonlyArray<readonly [number, number, number, number]> = [
-  [-0.36, CHAMBER_ROOF_Y - 0.14, 0.24, 0.7],
-  [0.28, CHAMBER_ROOF_Y - 0.18, 0.18, 1.9],
-  [-0.08, CHAMBER_ROOF_Y - 0.21, -0.22, 3.1],
-  [0.42, CHAMBER_ROOF_Y - 0.13, -0.18, 4.4],
+  [-0.42, -0.37, 0.485, 0.7],
+  [0.10, -0.39, 0.492, 1.9],
+  [0.46, -0.36, 0.482, 3.1],
+  [-0.38, -0.38, -0.485, 4.4],
+  [0.08, -0.39, -0.492, 5.2],
+  [0.44, -0.36, -0.482, 2.5],
 ];
 
 async function mountDay23Magma(): Promise<void> {
@@ -84,7 +90,7 @@ async function mountDay23Magma(): Promise<void> {
   // Photographer's studio softbox PMREM IBL for dark machined steel, satin brass, quartz & obsidian
   const studioEnv = createMagmaStudioEnvironment(stage.renderer);
   stage.scene.environment = studioEnv.texture;
-  stage.scene.environmentIntensity = 1.18;
+  stage.scene.environmentIntensity = 1.24;
 
   // Harmonize SpecimenStage's 3-point studio rig + tight 2048x2048 shadow frustum
   let dirIdx = 0;
@@ -92,7 +98,7 @@ async function mountDay23Magma(): Promise<void> {
     if (child instanceof THREE.DirectionalLight) {
       if (dirIdx === 0) {
         child.position.set(-2.6, 5.0, 3.6);
-        child.intensity = 1.38;
+        child.intensity = 1.48;
         child.shadow.mapSize.set(2048, 2048);
         const d = 2.45;
         child.shadow.camera.left = -d;
@@ -105,21 +111,21 @@ async function mountDay23Magma(): Promise<void> {
         child.shadow.normalBias = 0.012;
         child.shadow.camera.updateProjectionMatrix();
       } else if (dirIdx === 1) {
-        child.position.set(3.4, 1.6, 2.2);
-        child.intensity = 0.42;
+        child.position.set(3.4, 1.8, 2.4);
+        child.intensity = 0.56;
       } else if (dirIdx === 2) {
         child.position.set(-1.2, 3.6, -4.0);
-        child.intensity = 1.35;
+        child.intensity = 1.42;
       }
       dirIdx++;
     } else if (child instanceof THREE.HemisphereLight) {
-      child.intensity = 0.40;
+      child.intensity = 0.46;
     }
   }
 
   // Two restrained warm volcanic point lights (interior chamber glow + active intrusion crest glow)
-  const chamberGlowLight = new THREE.PointLight(0xe06d2b, 1.35, 3.6, 1.8);
-  chamberGlowLight.position.set(0, -0.42, 0.72);
+  const chamberGlowLight = new THREE.PointLight(0xe06d2b, 1.35, 3.4, 1.9);
+  chamberGlowLight.position.set(0, -0.38, 0.72);
   stage.specimenGroup.add(chamberGlowLight);
 
   const crestGlowLight = new THREE.PointLight(0xc93b2b, 0.75, 2.8, 2.0);
@@ -177,7 +183,10 @@ async function mountDay23Magma(): Promise<void> {
   let prevClientX = 0;
   let prevClientY = 0;
   let hasDraggedBeyondDeadzone = false;
-  let lastPointerDownMs = 0;
+  let lastClickUpMs = 0;
+  let lastClickX = 0;
+  let lastClickY = 0;
+  let lastClickWasClean = false;
   let holdPumpTimerId: number | null = null;
 
   const hitTargets: Array<{ mesh: THREE.Object3D; kind: HitKind }> = [
@@ -213,14 +222,18 @@ async function mountDay23Magma(): Promise<void> {
   }
 
   /**
-   * Computes camera-relative screen-space direction of world +X so dragging either
-   * lateral clamp inward toward the core ALWAYS increases compression from any 360° orbit angle.
+   * Projects screen drag `(dx, dy)` onto the camera-space projection of world `+X`
+   * so dragging either lateral screw-clamp inward toward the rock core ALWAYS increases
+   * compression smoothly from any 360° or oblique camera angle.
    */
-  function getScreenXAxisSign(): number {
+  function projectDragAlongWorldX(dx: number, dy: number): number {
     _worldOriginNdc.set(0, 0.2, 0).project(stage.camera);
     _worldPlusXNdc.set(1, 0.2, 0).project(stage.camera);
-    const dx = _worldPlusXNdc.x - _worldOriginNdc.x;
-    return dx >= 0 ? 1 : -1;
+    const sx = _worldPlusXNdc.x - _worldOriginNdc.x;
+    const sy = -(_worldPlusXNdc.y - _worldOriginNdc.y); // invert NDC Y to client Y
+    const len = Math.hypot(sx, sy);
+    if (len < 1e-4) return dx;
+    return (dx * sx + dy * sy) / len;
   }
 
   function clearHoldTimer(): void {
@@ -242,10 +255,13 @@ async function mountDay23Magma(): Promise<void> {
     if (ev.button !== 0) return;
 
     const nowMs = performance.now();
-    const isDoubleClick = nowMs - lastPointerDownMs < 320;
-    lastPointerDownMs = nowMs;
+    // Only trigger double-click quench when two stationary clicks land close together
+    // (never accidentally quench during rapid back-to-back clamp or piston drags!)
+    const clickDist = Math.hypot(ev.clientX - lastClickX, ev.clientY - lastClickY);
+    const isDoubleClick = lastClickWasClean && nowMs - lastClickUpMs < 340 && clickDist < 24;
 
     if (isDoubleClick) {
+      lastClickWasClean = false;
       clearHoldTimer();
       sim.quenchAndReset(false);
       return;
@@ -300,9 +316,9 @@ async function mountDay23Magma(): Promise<void> {
         sim.nudgePressure(-dy / 220);
       } else if (activeDrag === 'leftClamp' || activeDrag === 'rightClamp') {
         // Dragging inward toward the center increases compression; outward opens extensional tension
-        const camSign = getScreenXAxisSign();
+        const projAlongWorldX = projectDragAlongWorldX(dx, dy);
         const sideSign = activeDrag === 'leftClamp' ? 1 : -1;
-        const deltaCompression = (dx * camSign * sideSign) / 170;
+        const deltaCompression = (projAlongWorldX * sideSign) / 170;
         sim.nudgeCompression(deltaCompression);
       }
       return;
@@ -324,6 +340,15 @@ async function mountDay23Magma(): Promise<void> {
   const finishDrag = (ev: PointerEvent) => {
     clearHoldTimer();
     sim.setHoldPump(false);
+    const totalMove = Math.hypot(ev.clientX - downClientX, ev.clientY - downClientY);
+    if (!hasDraggedBeyondDeadzone && totalMove < 7) {
+      lastClickWasClean = true;
+      lastClickUpMs = performance.now();
+      lastClickX = ev.clientX;
+      lastClickY = ev.clientY;
+    } else {
+      lastClickWasClean = false;
+    }
     if (activeDrag !== 'none') {
       releasePointerCaptureSafe(ev.pointerId);
       stage.controls.enabled = true;
@@ -375,35 +400,37 @@ async function mountDay23Magma(): Promise<void> {
   stage.onTick(({ dtSec, elapsedSec }) => {
     sim.step(dtSec);
 
-    // 1. Update Hydraulic Piston Vertical Stroke & Chamber Melt Volume
+    // 1. Update Full-Skirted Hydraulic Piston Vertical Stroke & Chamber Melt Volume
     piston.ramGroup.position.y = sim.pistonTravel;
 
-    const plungerTopY = CHAMBER_BOTTOM_Y + 0.08 + sim.pistonTravel;
-    const meltBottomY = Math.min(CHAMBER_ROOF_Y - 0.08, plungerTopY - 0.015);
-    const meltHeight = Math.max(0.08, CHAMBER_ROOF_Y - meltBottomY);
+    const plungerTopY = CHAMBER_BOTTOM_Y + 0.088 + sim.pistonTravel;
+    const meltBottomY = Math.min(CHAMBER_ROOF_Y - 0.11, plungerTopY - 0.012);
+    const meltHeight = Math.max(0.11, CHAMBER_ROOF_Y - meltBottomY);
     const baseMeltH = CHAMBER_ROOF_Y - CHAMBER_BOTTOM_Y - 0.025;
     magmaSystem.chamberMeltMesh.scale.y = meltHeight / baseMeltH;
     magmaSystem.chamberMeltMesh.position.y = meltBottomY + meltHeight * 0.5;
 
-    // 2. Update Drifting Basalt Xenoliths Suspended in Lower Chamber
+    // 2. Update 6 Drifting Dark Basalt Xenoliths Emerging Visibly Behind Front & Back Quartz Panes
+    const meltMidY = 0.5 * (plungerTopY + (CHAMBER_ROOF_Y - 0.085));
     for (let i = 0; i < magmaSystem.xenolithMeshes.length; i++) {
       const xm = magmaSystem.xenolithMeshes[i];
       const base = XENOLITH_BASE[i];
       const phase = base[3];
-      const bob = Math.sin(elapsedSec * (0.55 + 0.15 * i) + phase) * 0.024;
-      const driftX = Math.cos(elapsedSec * 0.32 + phase) * 0.032;
-      const minY = plungerTopY + 0.065;
-      const maxY = CHAMBER_ROOF_Y - 0.065;
-      const clampedY = Math.max(minY, Math.min(maxY, base[1] + sim.pistonTravel * 0.35 + bob));
+      const bob = Math.sin(elapsedSec * (0.58 + 0.14 * i) + phase) * 0.018;
+      const driftX = Math.cos(elapsedSec * 0.30 + phase) * 0.036;
+      const minY = plungerTopY + 0.038;
+      const maxY = CHAMBER_ROOF_Y - 0.095;
+      const targetY = meltMidY + ((i % 3) - 1) * 0.014 + bob;
+      const clampedY = Math.max(minY, Math.min(maxY, targetY));
       xm.position.set(base[0] + driftX, clampedY, base[2]);
       xm.rotation.set(
-        elapsedSec * 0.14 + phase,
-        elapsedSec * 0.18 + phase * 1.3,
-        elapsedSec * 0.10
+        elapsedSec * 0.16 + phase,
+        elapsedSec * 0.21 + phase * 1.3,
+        elapsedSec * 0.11
       );
     }
 
-    // 3. Update Left & Right Lateral Threaded Tectonic Screw-Clamps & Capstan Handwheels
+    // 3. Update Left & Right Lateral Helical ACME Screw-Clamps & Capstan Handwheels
     lateralClamps.leftPlatenGroup.position.x = -sim.platenOffset;
     lateralClamps.leftScrewWheelGroup.position.x = -sim.platenOffset;
     lateralClamps.leftScrewWheelGroup.rotation.x = -sim.clampScrewAngle;
@@ -412,16 +439,11 @@ async function mountDay23Magma(): Promise<void> {
     lateralClamps.rightScrewWheelGroup.position.x = sim.platenOffset;
     lateralClamps.rightScrewWheelGroup.rotation.x = sim.clampScrewAngle;
 
-    // 4. Update Diegetic Upper Brass Heave Gauge Rods
-    for (let i = 0; i < pressFrame.heaveGaugeRods.length; i++) {
-      pressFrame.heaveGaugeRods[i].position.y = 1.04 + sim.heaveDisplacement * 0.55;
-    }
+    // 4. Update Diegetic Bourdon Pressure Gauge Needle (-125° at P=0 -> +125° CW at P=1)
+    pressFrame.gaugeNeedleGroup.rotation.z = 2.18 - sim.chamberPressure * 4.36;
 
     // 5. Update 12 Interlocking Stratified Basalt & Ochre-Tuff Rock Slabs
     let tier0AvgDy = 0;
-    let tier1AvgDy = 0;
-    let tier2AvgDy = 0;
-
     for (let i = 0; i < sim.slabs.length; i++) {
       const slab = sim.slabs[i];
       const mesh = rockCore.slabMeshes[i];
@@ -431,59 +453,59 @@ async function mountDay23Magma(): Promise<void> {
         slab.dz
       );
       mesh.rotation.set(slab.rotX, 0, slab.rotZ);
-
       if (slab.tier === 0) tier0AvgDy += slab.dy;
-      else if (slab.tier === 1) tier1AvgDy += slab.dy;
-      else tier2AvgDy += slab.dy;
     }
     tier0AvgDy /= SLAB_COLUMNS;
-    tier1AvgDy /= SLAB_COLUMNS;
-    tier2AvgDy /= SLAB_COLUMNS;
 
-    // 6. Update 3 Dynamic Vertical Magma Dike Blades (positioned directly inside opening seams)
+    // Bridge basal chamber feeder melt cleanly up to Tier 0 base so pressure lift never leaves a dark air gap
+    magmaSystem.chamberFeederMesh.position.y = CHAMBER_ROOF_Y - 0.025 + Math.min(0.036, tier0AvgDy * 0.92);
+
+    // 5b. Sync Mechanical Overburden Heave Follower Contact Feet Directly onto Upper Basalt Crown Slabs!
+    for (let i = 0; i < pressFrame.heaveGaugeRods.length; i++) {
+      const sx = i === 0 ? -1 : 1;
+      const gx = sx * 0.25;
+      const gz = 0.28;
+      const crownSlab = sim.slabs[2 * SLAB_COLUMNS + (sx < 0 ? 1 : 2)];
+      const baseTopY = evalBeddingPlaneY(STRATA_TIERS, gx, gz);
+      const slopeY = Math.sin(crownSlab.rotZ) * (gx - (crownSlab.restCenterX + crownSlab.dx));
+      pressFrame.heaveGaugeRods[i].position.y = baseTopY + crownSlab.dy + slopeY + 0.002;
+    }
+
+    // 6. Update 3 Seam-Conforming Vertical Magma Dikes (exact jagged fracture gap fit!)
     for (let i = 0; i < sim.dikes.length; i++) {
       const d = sim.dikes[i];
       const mesh = magmaSystem.dikeMeshes[i];
       const visibleH = d.height;
-      const veinThickness = Math.max(d.aperture * 1.18, d.quenchedObsidian * 0.018);
+      const veinThickness = Math.max(d.aperture * 1.15, d.quenchedObsidian * 0.016);
 
-      if (visibleH > 0.015 && veinThickness > 0.004) {
+      if (visibleH > 0.018 && veinThickness > 0.004) {
         mesh.visible = true;
-        const leftCol = i === 0 ? 1 : i === 1 ? 0 : 2;
-        const rightCol = leftCol + 1;
-        const sL = sim.slabs[SLAB_COLUMNS + leftCol];
-        const sR = sim.slabs[SLAB_COLUMNS + rightCol];
-        const seamMidDx = 0.5 * (sL.dx + sR.dx);
-        const crestLift = 0.5 * (sim.slabs[2 * SLAB_COLUMNS + leftCol].dy + sim.slabs[2 * SLAB_COLUMNS + rightCol].dy);
-
-        mesh.position.set(DIKE_SEAM_X[i] + seamMidDx, CHAMBER_ROOF_Y - 0.02, 0);
-        mesh.scale.set(
-          Math.max(0.012, veinThickness),
-          visibleH + crestLift * 0.72 + 0.025,
-          1.0
-        );
+        updateDikeGeometry(mesh.geometry, i, visibleH, veinThickness, sim.slabs);
       } else {
         mesh.visible = false;
       }
     }
 
-    // 7. Update 2 Dynamic Horizontal Laccolith Sill Lenses (riding flush inside bedding gaps)
+    // 7. Update 2 Arched Horizontal Laccolith Sill Lenses (strictly gated so closed extensional bedding never slices across vertical dikes!)
+    const maxDikeAperture = Math.max(sim.dikes[0].aperture, sim.dikes[1].aperture, sim.dikes[2].aperture);
     for (let i = 0; i < sim.sills.length; i++) {
       const s = sim.sills[i];
       const mesh = magmaSystem.sillMeshes[i];
-      const sillThick = Math.max(s.thickness * 1.16, s.quenchedObsidian * 0.014);
+      const sillThick = Math.max(s.thickness * 1.12, s.quenchedObsidian * 0.012);
+      const hasOpenBedding = s.thickness > 0.014;
+      const hasQuenchedCompressionalSill =
+        s.quenchedObsidian > 0.40 && s.halfWidth > 0.26 && maxDikeAperture < 0.016;
+      const sillActive = s.halfWidth > 0.06 && (hasOpenBedding || hasQuenchedCompressionalSill);
 
-      if (s.halfWidth > 0.03 && sillThick > 0.004) {
+      if (sillActive) {
         mesh.visible = true;
-        const bedDy = i === 0 ? 0.5 * (tier0AvgDy + tier1AvgDy) : 0.5 * (tier1AvgDy + tier2AvgDy);
-        mesh.position.set(0, SILL_BED_Y[i] + bedDy, 0);
-        mesh.scale.set(s.halfWidth, sillThick, 1.0);
+        updateSillGeometry(mesh.geometry, i, s.halfWidth, sillThick, sim.slabs);
       } else {
         mesh.visible = false;
       }
     }
 
-    // 8. Update 24 Instanced Viscoplastic Pahoehoe Magma Lobes (1 draw call, zero alloc)
+    // 8. Update 24 Instanced Smooth Ropy Viscoplastic Pahoehoe Magma Lobes (1 draw call, zero alloc)
     const thermalArr = magmaSystem.lobeThermalAttr.array as Float32Array;
     for (let i = 0; i < MAX_LOBES; i++) {
       const lobe = sim.lobes[i];
@@ -627,9 +649,9 @@ async function mountDay23Magma(): Promise<void> {
     materials.uHoverState.value.z += (rightHoverGoal - materials.uHoverState.value.z) * hAlpha;
     materials.uHoverState.value.w += (coreHoverGoal - materials.uHoverState.value.w) * hAlpha;
 
-    chamberGlowLight.intensity = 0.75 + sim.chamberPressure * 1.45;
+    chamberGlowLight.intensity = 0.68 + sim.chamberPressure * 1.32;
     crestGlowLight.position.y = Math.min(0.88, CHAMBER_ROOF_Y + sim.activeDikeHeight * 0.85 + 0.14);
-    crestGlowLight.intensity = 0.25 + maxHeat * 1.25;
+    crestGlowLight.intensity = 0.22 + maxHeat * 1.15;
   });
 }
 

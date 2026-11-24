@@ -60,9 +60,10 @@ export const SILL_BED_Y: readonly [number, number] = [0.07, 0.36];
 
 /** Strict press-frame physical clearance limits */
 export const MAX_HEAVE_DISPLACEMENT = 0.24; // Keeps top crest safely below upper tie-beam (y = 0.94)
-export const MAX_PLATEN_EXTENSION = 0.145; // Max outward clamp travel at compression = -1
-export const MAX_PLATEN_COMPRESSION = 0.032; // Max inward clamp travel at compression = +1
-export const MAX_PISTON_TRAVEL = 0.21; // Vertical hydraulic piston stroke into lower chamber
+export const MAX_PLATEN_EXTENSION = 0.125; // Max outward clamp travel at compression = -1 (tightly tracks expanding rock)
+export const MAX_PLATEN_COMPRESSION = 0.016; // Max inward elastic clamp preload at compression = +1 (realistic rock strain)
+export const MAX_PISTON_TRAVEL = 0.155; // Vertical hydraulic piston stroke into lower chamber (keeps upper half blazing with melt)
+export const ACME_THREAD_PITCH = 0.048; // Exact helical lead pitch (4.8 cm axial travel per revolution)
 export const MAX_LOBES = 24;
 
 export type StressRegime = 'extensional' | 'transitional' | 'compressional';
@@ -587,7 +588,7 @@ export class TectonicMagmaSolver {
       this.platenOffset = -this.tectonicCompression * MAX_PLATEN_COMPRESSION;
     }
     // Exact ACME thread lead coupling (pitch = 0.048 m/rev -> 1 full turn per 4.8 cm travel)
-    this.clampScrewAngle = (-this.platenOffset / 0.048) * Math.PI * 2;
+    this.clampScrewAngle = (-this.platenOffset / ACME_THREAD_PITCH) * Math.PI * 2;
 
     // 3. Andersonian stress regime partition (extensional dikes vs. compressional sills)
     this.sillFraction = computeSillFraction(this.tectonicCompression);
@@ -715,10 +716,10 @@ export class TectonicMagmaSolver {
       }
       s.reCrackPulse *= Math.exp(-dt * 1.4);
 
-      if (s.halfWidth > 0.10 && s.temperature < 0.35) {
+      if (s.halfWidth > 0.20 && s.thickness > 0.018 && s.temperature < 0.35) {
         s.quenchedObsidian = Math.min(1, s.quenchedObsidian + dt * 0.35);
-      } else if (s.temperature > 0.72) {
-        s.quenchedObsidian = Math.max(0, s.quenchedObsidian - dt * 0.45);
+      } else if (s.temperature > 0.72 || s.thickness < 0.008) {
+        s.quenchedObsidian = Math.max(0, s.quenchedObsidian - dt * 0.55);
       }
     }
 
@@ -732,8 +733,8 @@ export class TectonicMagmaSolver {
     const upperSillFrac = this.sills[1].halfWidth / CORE_HALF_W;
 
     // Basal chamber pressure cushion adds subtle elastic dome lift across Tier 0 under high compression
-    const basalLift = P * (0.014 + 0.026 * this.sillFraction);
-    // Strict lateral containment inside the left/right forged-iron platens
+    const basalLift = P * (0.012 + 0.022 * this.sillFraction);
+    // Strict lateral containment inside the left/right forged-iron platens (inner platen face at ±(CORE_HALF_W + platenOffset + 0.004))
     const maxOuterEdgeX = CORE_HALF_W + this.platenOffset;
 
     let maxHeave = 0;
@@ -743,40 +744,61 @@ export class TectonicMagmaSolver {
       const tier = slab.tier;
       const col = slab.col;
 
+      const colLeftRest = COLUMN_BOUNDARIES_X[col];
+      const colRightRest = COLUMN_BOUNDARIES_X[col + 1];
+      const halfW = 0.5 * (colRightRest - colLeftRest);
+      const halfH = 0.5 * (TIER_BOUNDARIES_Y[tier + 1] - TIER_BOUNDARIES_Y[tier]);
+      const effHalfH = halfH + 0.009; // includes bedding undulation allowance
+
       // Height-gated dike reach for this tier (so upper slabs wedge only once dikes reach them)
       const tierBaseH = TIER_BOUNDARIES_Y[tier] - OVERBURDEN_BOTTOM_Y;
       const centerReach = smoothstep(tierBaseH - 0.08, tierBaseH + 0.22, this.dikes[0].height);
       const leftReach = smoothstep(tierBaseH - 0.08, tierBaseH + 0.22, this.dikes[1].height);
       const rightReach = smoothstep(tierBaseH - 0.08, tierBaseH + 0.22, this.dikes[2].height);
 
-      // Target lateral displacement from dike wedging + slight inward elastic compression
-      const elasticSqueeze = Math.max(0, c) * MAX_PLATEN_COMPRESSION * (slab.restCenterX / CORE_HALF_W);
-      let targetDx = -elasticSqueeze;
-      if (col === 0) {
-        targetDx -= centerAp * 0.48 * centerReach + leftAp * 0.72 * leftReach;
-      } else if (col === 1) {
-        targetDx -= centerAp * 0.50 * centerReach;
-      } else if (col === 2) {
-        targetDx += centerAp * 0.50 * centerReach;
-      } else {
-        targetDx += centerAp * 0.48 * centerReach + rightAp * 0.72 * rightReach;
-      }
-
-      // Clamp outer columns strictly inside the steel lateral platen faces (zero interpenetration!)
-      const colLeftRest = COLUMN_BOUNDARIES_X[col];
-      const colRightRest = COLUMN_BOUNDARIES_X[col + 1];
-      const minAllowedDx = -maxOuterEdgeX - colLeftRest;
-      const maxAllowedDx = maxOuterEdgeX - colRightRest;
-      if (col === 0 && targetDx < minAllowedDx) targetDx = minAllowedDx;
-      if (col === 3 && targetDx > maxAllowedDx) targetDx = maxAllowedDx;
-      // Keep inner columns ordered strictly inside outer columns
-      targetDx = clamp(targetDx, -0.14, 0.14);
-
       // Dome radial profile: center columns (1, 2) dome highest; outer columns (0, 3) shoulder lower
       const radialNorm = Math.abs(slab.restCenterX) / CORE_HALF_W; // ~0.22 inner, ~0.72 outer
       const domeProfile = 1.0 - 0.44 * radialNorm * radialNorm;
       const lowerSillSupport = smoothstep(radialNorm * 0.65, radialNorm * 0.65 + 0.28, lowerSillFrac + 0.15);
       const upperSillSupport = smoothstep(radialNorm * 0.65, radialNorm * 0.65 + 0.28, upperSillFrac + 0.12);
+
+      // Anticlinal dome outward tilt (left slabs tilt CCW +rotZ, right slabs tilt CW -rotZ)
+      const sideSign = col < 2 ? 1 : -1;
+      const isOuter = col === 0 || col === 3;
+      const domeTiltMag =
+        (lowerSillT * (tier >= 1 ? 0.92 : 0.18) + upperSillT * (tier >= 2 ? 0.78 : 0.12)) *
+        (isOuter ? 0.88 : 0.56);
+      const wedgeTiltMag =
+        (centerAp * centerReach * (isOuter ? 0.34 : 0.46) +
+          (col === 0 ? leftAp * leftReach : col === 3 ? rightAp * rightReach : 0) * 0.52) *
+        (0.42 + 0.28 * tier);
+      // Outer slabs held by steel platens stay within physically realistic tilt (< 6.5 deg)
+      const maxTilt = isOuter ? 0.112 : 0.135;
+      const targetRotZ = clamp(sideSign * (domeTiltMag + wedgeTiltMag), -maxTilt, maxTilt);
+
+      // Target lateral displacement from dike wedging + slight inward elastic compression
+      const elasticSqueeze = Math.max(0, c) * MAX_PLATEN_COMPRESSION * (slab.restCenterX / CORE_HALF_W);
+      let targetDx = -elasticSqueeze;
+      if (col === 0) {
+        targetDx -= centerAp * 0.50 * centerReach + leftAp * 0.78 * leftReach;
+      } else if (col === 1) {
+        targetDx -= centerAp * 0.52 * centerReach;
+      } else if (col === 2) {
+        targetDx += centerAp * 0.52 * centerReach;
+      } else {
+        targetDx += centerAp * 0.50 * centerReach + rightAp * 0.78 * rightReach;
+      }
+
+      // Compute rotated outer corner horizontal reach so tilted slabs NEVER clip into lateral platens
+      const targetRotReachX = halfW * Math.cos(targetRotZ) + effHalfH * Math.abs(Math.sin(targetRotZ));
+      if (col === 0) {
+        const minAllowedDx = -maxOuterEdgeX + targetRotReachX - slab.restCenterX;
+        if (targetDx < minAllowedDx) targetDx = minAllowedDx;
+      } else if (col === 3) {
+        const maxAllowedDx = maxOuterEdgeX - targetRotReachX - slab.restCenterX;
+        if (targetDx > maxAllowedDx) targetDx = maxAllowedDx;
+      }
+      targetDx = clamp(targetDx, -0.14, 0.14);
 
       let targetDy = basalLift * domeProfile;
       if (tier >= 1) {
@@ -787,19 +809,12 @@ export class TectonicMagmaSolver {
       }
       // Mild upward shoulder lift during vigorous extensional dike wedging
       targetDy += centerAp * 0.22 * centerReach * (tier === 2 ? 1.0 : tier === 1 ? 0.55 : 0.2);
+      // Ensure Tier 0 lowest rotated corner rests cleanly atop the steel chamber roof (never dips below -0.22)
+      if (tier === 0) {
+        const cornerLift = halfW * Math.abs(Math.sin(targetRotZ)) + halfH * (Math.cos(targetRotZ) - 1);
+        targetDy = Math.max(targetDy, Math.max(0, cornerLift));
+      }
       targetDy = clamp(targetDy, 0, MAX_HEAVE_DISPLACEMENT);
-
-      // Anticlinal dome outward tilt (left slabs tilt CCW +rotZ, right slabs tilt CW -rotZ)
-      const sideSign = col < 2 ? 1 : -1;
-      const isOuter = col === 0 || col === 3;
-      const domeTiltMag =
-        (lowerSillT * (tier >= 1 ? 1.0 : 0.25) + upperSillT * (tier >= 2 ? 0.85 : 0.15)) *
-        (isOuter ? 1.25 : 0.62);
-      const wedgeTiltMag =
-        (centerAp * centerReach * (isOuter ? 0.42 : 0.55) +
-          (col === 0 ? leftAp * leftReach : col === 3 ? rightAp * rightReach : 0) * 0.65) *
-        (0.45 + 0.3 * tier);
-      const targetRotZ = clamp(sideSign * (domeTiltMag + wedgeTiltMag), -0.17, 0.17);
 
       // Overdamped spring-damper integration (rock mass inertia, zero oscillation jitter)
       const stiffness = 34.0;
@@ -814,21 +829,36 @@ export class TectonicMagmaSolver {
 
       slab.dx += slab.velX * dt;
       slab.dy = clamp(slab.dy + slab.velY * dt, 0, MAX_HEAVE_DISPLACEMENT);
-      slab.rotZ = clamp(slab.rotZ + slab.velRotZ * dt, -0.18, 0.18);
+      slab.rotZ = clamp(slab.rotZ + slab.velRotZ * dt, -maxTilt, maxTilt);
 
-      // Hard physical clamp against steel lateral platens after integration
-      if (col === 0 && colLeftRest + slab.dx < -maxOuterEdgeX) {
-        slab.dx = -maxOuterEdgeX - colLeftRest;
-        if (slab.velX < 0) slab.velX = 0;
+      // Hard physical clamp against steel lateral platens accounting for rotated slab corners!
+      const rotReachX = halfW * Math.cos(slab.rotZ) + effHalfH * Math.abs(Math.sin(slab.rotZ));
+      if (col === 0) {
+        const minAllowedDx = Math.max(-maxOuterEdgeX - colLeftRest, -maxOuterEdgeX + rotReachX - slab.restCenterX);
+        if (slab.dx < minAllowedDx) {
+          slab.dx = minAllowedDx;
+          if (slab.velX < 0) slab.velX = 0;
+        }
       }
-      if (col === 3 && colRightRest + slab.dx > maxOuterEdgeX) {
-        slab.dx = maxOuterEdgeX - colRightRest;
-        if (slab.velX > 0) slab.velX = 0;
+      if (col === 3) {
+        const maxAllowedDx = Math.min(maxOuterEdgeX - colRightRest, maxOuterEdgeX - rotReachX - slab.restCenterX);
+        if (slab.dx > maxAllowedDx) {
+          slab.dx = maxAllowedDx;
+          if (slab.velX > 0) slab.velX = 0;
+        }
+      }
+      // Hard floor clamp on Tier 0 so rotated bottom corners never sink below CHAMBER_ROOF_Y into casing walls
+      if (tier === 0) {
+        const minRoofDy = Math.max(0, halfW * Math.abs(Math.sin(slab.rotZ)) + halfH * (Math.cos(slab.rotZ) - 1));
+        if (slab.dy < minRoofDy) {
+          slab.dy = minRoofDy;
+          if (slab.velY < 0) slab.velY = 0;
+        }
       }
 
       // Subtle Z-breathing & pitch jostle on high pressure
-      slab.dz = (col === 1 || col === 2 ? 0.008 : -0.004) * P * Math.sin(tier * 1.7 + col);
-      slab.rotX = ((col % 2 === 0 ? 1 : -1) * 0.018 * P * (tier + 1)) / 3;
+      slab.dz = (col === 1 || col === 2 ? 0.005 : -0.003) * P * Math.sin(tier * 1.7 + col);
+      slab.rotX = ((col % 2 === 0 ? 1 : -1) * 0.012 * P * (tier + 1)) / 3;
 
       // Radiant fracture-wall seam heat absorbed by this slab
       const adjDikeHeat = Math.max(
@@ -870,20 +900,28 @@ export class TectonicMagmaSolver {
         }
       }
 
-      // Priority 2: Compressional bedding-plane sill side-ooze blisters
+      // Priority 2: Compressional bedding-plane sill side-ooze blisters (organic sparse distribution, max 6 active)
       if (!spawned) {
-        for (let i = 0; i < this.sills.length; i++) {
-          const s = this.sills[i];
-          if (s.thickness > 0.028 && s.halfWidth > 0.42 && s.temperature > 0.42) {
-            this.spawnLobe('flank-sill', i);
-            spawned = true;
-            break;
+        let activeFlankLobes = 0;
+        for (let k = 0; k < this.lobes.length; k++) {
+          if (this.lobes[k].active && this.lobes[k].ventType === 'flank-sill') {
+            activeFlankLobes++;
+          }
+        }
+        if (activeFlankLobes < 6) {
+          for (let i = 0; i < this.sills.length; i++) {
+            const s = this.sills[i];
+            if (s.thickness > 0.032 && s.halfWidth > 0.44 && s.temperature > 0.44) {
+              this.spawnLobe('flank-sill', i);
+              spawned = true;
+              break;
+            }
           }
         }
       }
 
       if (spawned) {
-        this.lobeSpawnCooldown = clamp(0.62 - P * 0.34, 0.24, 0.65);
+        this.lobeSpawnCooldown = clamp(0.68 - P * 0.34, 0.28, 0.72);
       }
     }
 
@@ -899,27 +937,31 @@ export class TectonicMagmaSolver {
       let ventTemp = 0;
       let parentSlabDy = 0;
       let parentSlabDx = 0;
+      let parentRotSlopeY = 0;
 
       if (lobe.ventType === 'crest-dike') {
         const d = this.dikes[lobe.ventIndex];
         ventOverpressure = d.breachedCrest ? clamp((P - 0.30) * 1.4, 0, 1) : 0;
         ventTemp = d.temperature;
-        // Anchor vertically onto the upper basalt cap slabs flanking this dike seam
-        const leftCol = lobe.ventIndex === 0 ? 1 : lobe.ventIndex === 1 ? 0 : 2;
-        const rightCol = leftCol + 1;
-        const sL = this.slabs[2 * SLAB_COLUMNS + leftCol];
-        const sR = this.slabs[2 * SLAB_COLUMNS + rightCol];
-        parentSlabDy = 0.5 * (sL.dy + sR.dy);
-        parentSlabDx = 0.5 * (sL.dx + sR.dx);
+        // Anchor directly onto the upper basalt cap slab directly beneath this lobe
+        const col = lobe.localOffsetX < -0.35 ? 0 : lobe.localOffsetX < 0 ? 1 : lobe.localOffsetX < 0.35 ? 2 : 3;
+        const slab = this.slabs[2 * SLAB_COLUMNS + col];
+        parentSlabDy = slab.dy;
+        parentSlabDx = slab.dx;
+        // Account for slab anticlinal roll slope so lobe stays seated flush on tilted basalt crest
+        parentRotSlopeY = Math.sin(slab.rotZ) * (lobe.localOffsetX - slab.restCenterX);
       } else {
         const s = this.sills[lobe.ventIndex];
-        ventOverpressure = s.thickness > 0.02 ? clamp((P - 0.26) * 1.35 * this.sillFraction, 0, 1) : 0;
+        ventOverpressure = s.thickness > 0.022 ? clamp((P - 0.26) * 1.35 * this.sillFraction, 0, 1) : 0;
         ventTemp = s.temperature;
+        const tierBelow = lobe.ventIndex;
         const tierAbove = lobe.ventIndex + 1;
         const col = lobe.localOffsetX < -0.35 ? 0 : lobe.localOffsetX < 0 ? 1 : lobe.localOffsetX < 0.35 ? 2 : 3;
-        const slab = this.slabs[tierAbove * SLAB_COLUMNS + col];
-        parentSlabDy = slab.dy * 0.72;
-        parentSlabDx = slab.dx;
+        const slabBelow = this.slabs[tierBelow * SLAB_COLUMNS + col];
+        const slabAbove = this.slabs[tierAbove * SLAB_COLUMNS + col];
+        parentSlabDy = 0.5 * (slabBelow.dy + slabAbove.dy);
+        parentSlabDx = 0.5 * (slabBelow.dx + slabAbove.dx);
+        parentRotSlopeY = Math.sin(0.5 * (slabBelow.rotZ + slabAbove.rotZ)) * (lobe.localOffsetX - slabBelow.restCenterX);
       }
 
       // Viscous inflation & sluggish gravitational pahoehoe creep while hot and fed
@@ -927,23 +969,23 @@ export class TectonicMagmaSolver {
       if (ventOverpressure > 0.05 && lobe.growth < 1.0) {
         const growStep = (0.38 + 0.52 * ventOverpressure) * (0.35 + 0.65 * fluidity) * dt;
         lobe.growth = Math.min(1.0, lobe.growth + growStep);
-        // Subtle viscous flow creep outward along the rock crest or face
-        lobe.localOffsetX += lobe.flowX * growStep * 0.055;
-        lobe.localOffsetY += lobe.flowY * growStep * 0.025;
-        lobe.localOffsetZ += lobe.flowZ * growStep * 0.055;
+        // Subtle viscous flow creep outward along the rock crest or face (stays grounded in seam)
+        lobe.localOffsetX += lobe.flowX * growStep * 0.042;
+        lobe.localOffsetY += lobe.flowY * growStep * 0.014;
+        lobe.localOffsetZ += lobe.flowZ * growStep * 0.022;
       }
 
       // Sync world coordinates strictly to the moving overburden slab so lobes never float
       if (lobe.ventType === 'crest-dike') {
         const baseY = evalBeddingPlaneY(STRATA_TIERS, lobe.localOffsetX, lobe.localOffsetZ);
-        lobe.posX = clamp(lobe.localOffsetX + parentSlabDx, -CORE_HALF_W + 0.04, CORE_HALF_W - 0.04);
-        lobe.posY = baseY + parentSlabDy + lobe.localOffsetY;
-        lobe.posZ = clamp(lobe.localOffsetZ, -CORE_HALF_D + 0.05, CORE_HALF_D - 0.05);
+        lobe.posX = clamp(lobe.localOffsetX + parentSlabDx, -CORE_HALF_W + 0.05, CORE_HALF_W - 0.05);
+        lobe.posY = baseY + parentSlabDy + parentRotSlopeY + lobe.localOffsetY;
+        lobe.posZ = clamp(lobe.localOffsetZ, -CORE_HALF_D + 0.06, CORE_HALF_D - 0.06);
       } else {
-        const sillY = SILL_BED_Y[lobe.ventIndex];
-        lobe.posX = clamp(lobe.localOffsetX + parentSlabDx, -CORE_HALF_W + 0.04, CORE_HALF_W - 0.04);
-        lobe.posY = sillY + parentSlabDy + lobe.localOffsetY;
-        lobe.posZ = lobe.localOffsetZ;
+        const bedY = evalBeddingPlaneY(lobe.ventIndex + 1, lobe.localOffsetX, lobe.localOffsetZ);
+        lobe.posX = clamp(lobe.localOffsetX + parentSlabDx, -CORE_HALF_W + 0.08, CORE_HALF_W - 0.08);
+        lobe.posY = bedY + parentSlabDy + parentRotSlopeY + lobe.localOffsetY;
+        lobe.posZ = clamp(lobe.localOffsetZ, -(CORE_HALF_D + 0.018), CORE_HALF_D + 0.018);
       }
 
       // Live Cooling & Obsidian Re-Cracking Dynamics:
@@ -1032,32 +1074,35 @@ export class TectonicMagmaSolver {
       const seamX = DIKE_SEAM_X[ventIndex];
       const zPos = (s1 - 0.5) * (CORE_DEPTH - 0.24);
       const side = s2 > 0.5 ? 1 : -1;
-      lobe.localOffsetX = seamX + side * (0.018 + s3 * 0.045);
-      lobe.localOffsetY = 0.012 + s2 * 0.016;
+      lobe.localOffsetX = seamX + side * (0.015 + s3 * 0.042);
+      // Slightly seated into the crest seam so growing pillows never float above basalt
+      lobe.localOffsetY = -0.004 + s2 * 0.008;
       lobe.localOffsetZ = zPos;
-      lobe.flowX = side * (0.75 + s3 * 0.5);
-      lobe.flowY = -0.12;
-      lobe.flowZ = (s2 - 0.5) * 0.6;
-      lobe.radiusX = 0.075 + s1 * 0.055;
-      lobe.radiusY = 0.036 + s2 * 0.024;
-      lobe.radiusZ = 0.085 + s3 * 0.065;
+      lobe.flowX = side * (0.65 + s3 * 0.45);
+      lobe.flowY = -0.05;
+      lobe.flowZ = (s2 - 0.5) * 0.5;
+      lobe.radiusX = 0.072 + s1 * 0.064;
+      lobe.radiusY = 0.032 + s2 * 0.022;
+      lobe.radiusZ = 0.092 + s3 * 0.072;
       lobe.yaw = Math.atan2(lobe.flowX, lobe.flowZ);
-      lobe.pitch = -0.14 - s3 * 0.18;
+      lobe.pitch = -0.08 - s3 * 0.12;
     } else {
       const sill = this.sills[ventIndex];
-      const frontOrBack = s2 > 0.28 ? 1 : -1; // Bias front face (+Z) so camera sees sill extrusions clearly
-      const xPos = (s1 - 0.5) * Math.min(CORE_WIDTH - 0.26, sill.halfWidth * 1.75);
+      const frontOrBack = s2 > 0.34 ? 1 : -1;
+      // Spread irregularly across central-to-mid sill span, alternating lower/upper sills cleanly
+      const xPos = (s1 - 0.5) * Math.min(CORE_WIDTH - 0.36, sill.halfWidth * 1.55);
       lobe.localOffsetX = xPos;
-      lobe.localOffsetY = -0.004 + (s3 - 0.5) * 0.012;
-      lobe.localOffsetZ = frontOrBack * (CORE_HALF_D + 0.014);
-      lobe.flowX = (s1 - 0.5) * 0.35;
-      lobe.flowY = -0.65;
-      lobe.flowZ = frontOrBack * 0.85;
-      lobe.radiusX = 0.082 + s1 * 0.052;
-      lobe.radiusY = 0.032 + s2 * 0.020;
-      lobe.radiusZ = 0.048 + s3 * 0.028;
-      lobe.yaw = (s1 - 0.5) * 0.4;
-      lobe.pitch = frontOrBack * (0.28 + s3 * 0.22);
+      lobe.localOffsetY = -0.008 + (s3 - 0.5) * 0.010;
+      // Tucked into the open bedding lip so molten tongues ooze out of the fissure instead of floating on the face
+      lobe.localOffsetZ = frontOrBack * (CORE_HALF_D - 0.008);
+      lobe.flowX = (s1 - 0.5) * 0.28;
+      lobe.flowY = -0.58;
+      lobe.flowZ = frontOrBack * 0.42;
+      lobe.radiusX = 0.078 + s1 * 0.068;
+      lobe.radiusY = 0.026 + s2 * 0.018;
+      lobe.radiusZ = 0.038 + s3 * 0.026;
+      lobe.yaw = (s1 - 0.5) * 0.32;
+      lobe.pitch = frontOrBack * (0.24 + s3 * 0.22);
     }
 
     lobe.posX = lobe.localOffsetX;
