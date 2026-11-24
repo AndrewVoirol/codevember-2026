@@ -360,12 +360,12 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
   createDay(
     30,
     'Dissolve',
-    'upcoming',
+    'complete',
     'tsl-compute',
-    'boneCalcite',
     'celadonGlauconite',
-    'Crystalline calcite sculpture undergoing Liesegang-ring reaction-diffusion dissolution into buoyant dust',
-    'Pointer sweeps a solvent wavefront across the specimen, sublimating solid geometry into drifting particles'
+    'realgarAmber',
+    'Suspended thick-walled borosilicate 500 mL laboratory beaker with flared pouring spout, etched eggshell volumetric markings, and a watertight rippling water column dissolving up to four crystalline mineral-pigment salt cubes through curvature-weighted corner rounding, rising silver effervescent micro-bubble streams, 16,384 GPU-advected descending refractive schlieren plumes, and a tactile glass stirring rod',
+    'Click over the beaker (or press Space) to drop fresh crystalline mineral cubes cycling through Celadon, Realgar Amber, Azurite, Cinnabar, and Yellow Ochre; drag inside the beaker to dip and sweep the borosilicate stirring rod into a central vortex; drag empty space to orbit 360°; double-click empty space to flush clear water and drop a starter crystal'
   ),
 ];
 

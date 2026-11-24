@@ -1,0 +1,46 @@
+{
+  "day": 30,
+  "slug": "30-dissolve",
+  "expectedHeader": "Day 30 - Dissolve",
+  "domAudit": {
+    "headerText": "Day 30 - Dissolve",
+    "bodyBg": "rgb(33, 37, 41)",
+    "drawerCount": 30
+  },
+  "telemetry": {
+    "frameCount": 355,
+    "avgFrameMs": 8.35,
+    "p95FrameMs": 10.1,
+    "sceneState": {
+      "day": 30,
+      "slug": "30-dissolve",
+      "headerLabel": "Day 30 - Dissolve",
+      "frameCount": 355,
+      "cameraPos": [
+        0,
+        0.7199999999999996,
+        4.379999999999999
+      ],
+      "pointerWorld": [
+        0.3223014905819782,
+        -0.2317580969674915,
+        0.03703896526877681
+      ],
+      "pointerSpeed": 0,
+      "pointerDwellSec": 2.057,
+      "pointerImpulse": 0.0005
+    }
+  },
+  "metrics": {
+    "specimenCoverageRatio": 0.2687,
+    "interactionMad": 2.778
+  },
+  "gpuErrors": [],
+  "gateFailures": [],
+  "artifacts": {
+    "contactSheet": "screenshots/day-30-dissolve-contact-sheet.png",
+    "initial": "screenshots/day-30-dissolve-initial.png",
+    "drawer": "screenshots/day-30-dissolve-drawer.png"
+  },
+  "passed": true
+}
