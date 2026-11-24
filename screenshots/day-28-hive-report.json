@@ -1,0 +1,46 @@
+{
+  "day": 28,
+  "slug": "28-hive",
+  "expectedHeader": "Day 28 - Hive",
+  "domAudit": {
+    "headerText": "Day 28 - Hive",
+    "bodyBg": "rgb(33, 37, 41)",
+    "drawerCount": 30
+  },
+  "telemetry": {
+    "frameCount": 360,
+    "avgFrameMs": 8.34,
+    "p95FrameMs": 9.8,
+    "sceneState": {
+      "day": 28,
+      "slug": "28-hive",
+      "headerLabel": "Day 28 - Hive",
+      "frameCount": 360,
+      "cameraPos": [
+        0,
+        0.13999999999999954,
+        4.78
+      ],
+      "pointerWorld": [
+        0.35801814444378693,
+        -0.18264300982417267,
+        0.0015283933876508726
+      ],
+      "pointerSpeed": 0,
+      "pointerDwellSec": 1.9598,
+      "pointerImpulse": 0.0007
+    }
+  },
+  "metrics": {
+    "specimenCoverageRatio": 0.2565,
+    "interactionMad": 9.191
+  },
+  "gpuErrors": [],
+  "gateFailures": [],
+  "artifacts": {
+    "contactSheet": "screenshots/day-28-hive-contact-sheet.png",
+    "initial": "screenshots/day-28-hive-initial.png",
+    "drawer": "screenshots/day-28-hive-drawer.png"
+  },
+  "passed": true
+}

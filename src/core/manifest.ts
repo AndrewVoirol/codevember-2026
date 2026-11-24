@@ -340,12 +340,12 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
   createDay(
     28,
     'Hive',
-    'upcoming',
+    'complete',
     'tsl',
     'yellowOchre',
     'realgarAmber',
-    'Natural wild comb of rhombic dodecahedral beeswax cells backlit through varied amber honey fill levels',
-    'Pointer warms and ripples the uncapped honey menisci across hexagonal cells with Beer-Lambert depth'
+    'Suspended gnarled dark-walnut and charred-oak limb draped with a curved open-air giant honeybee (Apis dorsata) teardrop bivouac of 2,643 shingled articulated insects—each with sculpted head, velvety thorax, hinged 5-tergite banded abdomen, and veined translucent gossamer forewings—coupled on a 3D surface k-NN excitable-media graph driving crisp 65°–75° abdomen-flip defense waves, head-on wave annihilation, rotating spirals, and physical pendulum recoil',
+    'Hover or sweep close to the hanging bivouac to ignite traveling golden-ochre defense waves and spiral eddies; click directly on the cluster for a radial shock-shimmer with pendulum recoil; drag across the curtain to launch colliding fronts; drag empty space to orbit 360°; double-click or press Space to quiet active waves or trigger a twin opposing-pole collision wave'
   ),
   createDay(
     29,
