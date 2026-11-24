@@ -2,8 +2,9 @@
  * Day 21 - Bolt: Deterministic 19th-Century Chubb-Style 5-Lever Mortise Deadbolt Physics
  *
  * Pure mechanical solver (zero Three.js rendering dependencies, zero per-frame allocations)
- * modeling true geometric contact between:
+ * modeling exact geometric contact between:
  *  - 5 stacked independent brass lever tumblers pivoting around (PIVOT_X, PIVOT_Y)
+ *  - Shared single-source-of-truth concentric Chubb belly curves (exact 0-clip, 0-gap contact)
  *  - 5 preloaded curved phosphor-bronze leaf springs with restoring torque
  *  - 5 uniquely bitted key teeth + rear bolt-talon drive bit rotating about (KEY_X, KEY_Y)
  *  - Heavy square blued-steel deadbolt, U-shaped bolt talon, and riveted square bolt stump
@@ -20,7 +21,7 @@ export const KEY_X = 0.04;
 export const KEY_Y = -0.22;
 export const KEY_SHAFT_RADIUS = 0.048;
 
-// Deadbolt & stump geometry
+// Deadbolt & stump geometry (exact outer dimensions INCLUDING chamfer bevels)
 export const STUMP_Y = 0.16;
 export const STUMP_X_UNLOCKED = -0.08;
 export const BOLT_TRAVEL = 0.34;
@@ -57,7 +58,10 @@ export const FOREND_THICKNESS = 0.065;
 export const SPRING_POST_X = -0.46;
 export const SPRING_POST_Y = 0.455;
 export const REST_PIN_X = 0.405;
-export const REST_PIN_Y = -0.215;
+export const REST_PIN_Y = -0.27;
+export const REST_PIN_RADIUS = 0.032;
+// Lever local Y of bottom rest heel flush on top of REST_PIN (-0.27 + 0.032 - PIVOT_Y = -0.218)
+export const LEVER_HEEL_LOCAL_Y = REST_PIN_Y + REST_PIN_RADIUS - PIVOT_Y;
 export const GUIDE_PIN_X = -0.34;
 export const GUIDE_PIN_Y = STUMP_Y;
 
@@ -68,7 +72,8 @@ export const LEVER_BELLY_LOCAL_Y = -0.115;
 // Unique Chubb 5-lever gate alignment angles (classic high-low-low-high-mid bitting [2, 5, 1, 4, 3])
 export const LEVER_ALIGN_DEG: readonly number[] = [8.5, 16.5, 6.0, 14.0, 11.2];
 export const LEVER_ALIGN_RAD: readonly number[] = LEVER_ALIGN_DEG.map((d) => (d * Math.PI) / 180);
-export const LEVER_MAX_RAD = (22.0 * Math.PI) / 180;
+// Physical upper pick stop: clears bolt stump cleanly inside deep right H-gate pocket up to 21.0 deg
+export const LEVER_MAX_RAD = (21.0 * Math.PI) / 180;
 
 // Exact key bitting step radii derived from rigid-body contact at phi = PI (12 o'clock)
 export const KEY_BIT_RADII: readonly number[] = LEVER_ALIGN_RAD.map((theta) => {
@@ -77,20 +82,30 @@ export const KEY_BIT_RADII: readonly number[] = LEVER_ALIGN_RAD.map((theta) => {
   return Number((yBellyWorld - KEY_Y).toFixed(5));
 });
 
+// Key bitting tooth half-width (outer crown width including bevels)
+export const KEY_BIT_HALF_WIDTH = 0.017;
+
 // Rear bolt-talon drive bit radius and exact talon engagement half-angle
 export const KEY_TALON_RADIUS = 0.305;
 export const TALON_HALF_ANGLE_RAD = Math.asin((BOLT_TRAVEL * 0.5) / KEY_TALON_RADIUS); // ~0.5912 rad (33.87 deg)
 export const TALON_ENGAGE_START_RAD = Math.PI - TALON_HALF_ANGLE_RAD; // ~146.13 deg
 export const TALON_ENGAGE_END_RAD = Math.PI + TALON_HALF_ANGLE_RAD; // ~213.87 deg
 
-// Cam lift ramp margins outside the concentric Chubb belly dwell arc
-export const CAM_DWELL_HALF_RAD = TALON_HALF_ANGLE_RAD + 0.045; // slightly wider than talon stroke so gates align BEFORE talon pushes
-export const CAM_RAMP_SPAN_RAD = 1.02; // ~58.4 deg smooth cam ramp on entry and exit
+// Concentric Chubb belly dwell half-angle (strictly wider than talon stroke so gates align BEFORE talon pushes)
+export const CAM_DWELL_HALF_RAD = TALON_HALF_ANGLE_RAD + 0.055; // ~0.6462 rad (37.0 deg)
 
-// Gate clearance & locking pocket play
-export const GATE_HALF_HEIGHT = 0.043; // stump half-height = 0.036 -> 0.007 precision clearance per side
+// Gate clearance & locking pocket play (exact physical clearance before stump contacts solid brass cheek)
+export const GATE_HALF_HEIGHT = 0.043; // stump half-height = 0.036 -> 0.007 crisp precision daylight per side
 export const GATE_ALIGN_TOL_RAD = (1.65 * Math.PI) / 180; // ~0.0288 rad exact mechanical tolerance
-export const POCKET_PLAY_01 = 0.048; // realistic tactile mechanical play inside locking pocket before stump hits brass cheek
+export const POCKET_PLAY_01 = 0.022; // 0.022 * 0.34 = 0.00748 physical play before flush cheek stop (zero clipping)
+
+// H-Gate pocket X bounds in lever-local coordinates (actual physical brass wall positions)
+export const GATE_POCKET_LEFT_OUTER_X = 0.432;
+export const GATE_POCKET_LEFT_INNER_X = 0.554; // at theta=0, stump right edge 0.541 + play 0.0075 = 0.5485 < 0.554
+export const GATE_POCKET_RIGHT_INNER_X = 0.788; // at theta=0, stump left edge 0.799 - play 0.0075 = 0.7915 > 0.788
+export const GATE_POCKET_RIGHT_OUTER_X = 0.924; // clears rotated locked stump corner (<= 0.908) across 0..21 deg
+export const GATE_POCKET_TOP_Y = 0.232; // clears stump top (0.216) at rest by 0.016, leaves 0.032 top bar
+export const GATE_POCKET_BOT_R_Y = -0.184; // clears rotated locked stump bottom corner (-0.180 at 21 deg), leaves 0.034 lower bar
 
 // Per-lever spring & inertia constants
 const LEVER_INERTIA = 0.0014;
@@ -106,11 +121,19 @@ const BOLT_FRICTION = 16.0;
 const BOLT_TALON_STIFFNESS = 4200.0;
 const BOLT_TALON_DAMPING = 92.0;
 
+export interface Point2D {
+  readonly x: number;
+  readonly y: number;
+}
+
 export interface LeverGateGeometry {
   index: number;
   alignRad: number;
   alignDeg: number;
   bitRadius: number;
+  /** Keyhole center (KEY_X, KEY_Y) mapped into lever-local coordinates when lever is at alignRad */
+  keyCenterLocalX: number;
+  keyCenterLocalY: number;
   /** Stump center in lever-local coordinates when unlocked (boltThrow01 = 0) at alignRad */
   gateUnlockedLocalX: number;
   gateUnlockedLocalY: number;
@@ -138,11 +161,16 @@ export function computeLeverGateGeometry(index: number): LeverGateGeometry {
   const dxL = STUMP_X_LOCKED - PIVOT_X;
   const dy = STUMP_Y - PIVOT_Y;
 
+  const kdx = KEY_X - PIVOT_X;
+  const kdy = KEY_Y - PIVOT_Y;
+
   return {
     index,
     alignRad,
     alignDeg: LEVER_ALIGN_DEG[index],
     bitRadius: KEY_BIT_RADII[index],
+    keyCenterLocalX: kdx * cosA + kdy * sinA,
+    keyCenterLocalY: -kdx * sinA + kdy * cosA,
     gateUnlockedLocalX: dxU * cosA + dy * sinA,
     gateUnlockedLocalY: -dxU * sinA + dy * cosA,
     gateLockedLocalX: dxL * cosA + dy * sinA,
@@ -159,6 +187,128 @@ export const LEVER_GATE_SPECS: readonly LeverGateGeometry[] = Array.from(
 );
 
 /**
+ * Single source of truth for lever `index`'s lower cam-belly polyline in lever-local coordinates
+ * (left-to-right from pivot throat to lower-right rest heel).
+ *
+ * The middle section is an EXACT Chubb circular arc centered on `(spec.keyCenterLocalX, spec.keyCenterLocalY)`
+ * with radius `spec.bitRadius` across `d ∈ [-CAM_DWELL_HALF_RAD, +CAM_DWELL_HALF_RAD]`,
+ * flanked by C1-continuous flared entry/exit cam shoulders that stay strictly outside the dwell circle
+ * so the rotating key bit maintains exact flush contact (0 clip, 0 air gap) across 360 degrees.
+ */
+function buildLeverBellyPolyline(index: number): readonly Point2D[] {
+  const spec = LEVER_GATE_SPECS[index];
+  const R = spec.bitRadius;
+  const a = spec.alignRad;
+  const pts: Point2D[] = [];
+
+  // Arc point helper: d = PI - phi (+d is left of 12 o'clock, -d is right of 12 o'clock)
+  const arcPt = (d: number, rad = R): Point2D => ({
+    x: spec.keyCenterLocalX + rad * Math.sin(a - d),
+    y: spec.keyCenterLocalY + rad * Math.cos(a - d),
+  });
+
+  // Left throat anchor (connects smoothly to pivot ear at bottom)
+  const throatStart: Point2D = { x: 0.22, y: -0.145 };
+  const arcLeft = arcPt(CAM_DWELL_HALF_RAD);
+  // Tangent along the circle going left (increasing d): (-cos(a - d), sin(a - d))
+  const leftAng = a - CAM_DWELL_HALF_RAD;
+  const leftTanX = -Math.cos(leftAng);
+  const leftTanY = Math.sin(leftAng);
+
+  // Entry shoulder (cubic Hermite from throatStart to arcLeft, arriving tangent and flaring gently outward)
+  const entryLen = Math.hypot(arcLeft.x - throatStart.x, arcLeft.y - throatStart.y);
+  const c1x = throatStart.x + entryLen * 0.34;
+  const c1y = throatStart.y - 0.012;
+  const c2x = arcLeft.x + leftTanX * entryLen * 0.34;
+  const c2y = arcLeft.y + leftTanY * entryLen * 0.34;
+
+  const entrySegs = 10;
+  for (let s = 0; s < entrySegs; s++) {
+    const t = s / entrySegs;
+    const it = 1 - t;
+    const x =
+      it * it * it * throatStart.x +
+      3 * it * it * t * c1x +
+      3 * it * t * t * c2x +
+      t * t * t * arcLeft.x;
+    const y =
+      it * it * it * throatStart.y +
+      3 * it * it * t * c1y +
+      3 * it * t * t * c2y +
+      t * t * t * arcLeft.y;
+    pts.push({ x, y });
+  }
+
+  // Exact concentric Chubb circular dwell arc from +CAM_DWELL_HALF_RAD (left) to -CAM_DWELL_HALF_RAD (right)
+  const arcSegs = 24;
+  for (let s = 0; s <= arcSegs; s++) {
+    const d = CAM_DWELL_HALF_RAD - (2 * CAM_DWELL_HALF_RAD * s) / arcSegs;
+    pts.push(arcPt(d));
+  }
+
+  // Exit shoulder (cubic Hermite from arcRight to rest-heel start, departing tangent and sloping to rest heel)
+  const arcRight = arcPt(-CAM_DWELL_HALF_RAD);
+  const rightAng = a + CAM_DWELL_HALF_RAD;
+  // Tangent along the circle going right (decreasing d): (+cos(a + d), -sin(a + d))
+  const rightTanX = Math.cos(rightAng);
+  const rightTanY = -Math.sin(rightAng);
+
+  const heelStartX = Math.max(arcRight.x + 0.068, 0.815);
+  const heelStart: Point2D = { x: heelStartX, y: LEVER_HEEL_LOCAL_Y };
+  const exitLen = Math.hypot(heelStart.x - arcRight.x, heelStart.y - arcRight.y);
+  const e1x = arcRight.x + rightTanX * Math.min(exitLen * 0.24, 0.024);
+  const e1y = Math.max(LEVER_HEEL_LOCAL_Y + 0.002, arcRight.y + rightTanY * Math.min(exitLen * 0.24, 0.024));
+  const e2x = heelStart.x - exitLen * 0.42;
+  const e2y = LEVER_HEEL_LOCAL_Y;
+
+  const exitSegs = 8;
+  for (let s = 1; s <= exitSegs; s++) {
+    const t = s / exitSegs;
+    const it = 1 - t;
+    const x =
+      it * it * it * arcRight.x +
+      3 * it * it * t * e1x +
+      3 * it * t * t * e2x +
+      t * t * t * heelStart.x;
+    const y =
+      it * it * it * arcRight.y +
+      3 * it * it * t * e1y +
+      3 * it * t * t * e2y +
+      t * t * t * heelStart.y;
+    pts.push({ x, y });
+  }
+
+  // Flat lower-right rest heel seated flush on brass rest stop pin
+  pts.push({ x: 0.995, y: LEVER_HEEL_LOCAL_Y });
+  return pts;
+}
+
+export const LEVER_BELLY_POLYLINES: readonly (readonly Point2D[])[] = Array.from(
+  { length: LEVER_COUNT },
+  (_, i) => buildLeverBellyPolyline(i)
+);
+
+/**
+ * Evaluates the exact lever-local Y of lever `index`'s belly polyline at a given lever-local `x`,
+ * or returns `null` if `x` is outside the polyline X-span.
+ */
+export function sampleLeverBellyLocalY(index: number, localX: number): number | null {
+  const poly = LEVER_BELLY_POLYLINES[index];
+  if (localX < poly[0].x || localX > poly[poly.length - 1].x) return null;
+  for (let s = 0; s < poly.length - 1; s++) {
+    const p0 = poly[s];
+    const p1 = poly[s + 1];
+    if (localX >= p0.x && localX <= p1.x) {
+      const span = p1.x - p0.x;
+      if (span < 1e-9) return Math.min(p0.y, p1.y);
+      const t = (localX - p0.x) / span;
+      return p0.y + (p1.y - p0.y) * t;
+    }
+  }
+  return null;
+}
+
+/**
  * Wraps any angle in radians into [0, 2*PI).
  */
 export function normalizeAngle2Pi(rad: number): number {
@@ -168,34 +318,83 @@ export function normalizeAngle2Pi(rad: number): number {
 }
 
 /**
- * Computes the exact physical contact lift angle (radians) imparted onto lever `index`
- * by key bitting step `index` at key phase angle `phiRad` (0 = 6 o'clock down, PI = 12 o'clock up).
+ * Exact rigid-body unilateral contact solver: finds the exact minimum lift angle `theta >= 0`
+ * for lever `index` so its physical bottom belly polyline `LEVER_BELLY_POLYLINES[index]` sits
+ * strictly on or above the rotating key bitting tooth `index` at phase angle `phiRad`.
  *
- * Uses exact circular-arc Chubb belly dwell across [PI - CAM_DWELL_HALF_RAD, PI + CAM_DWELL_HALF_RAD]
- * and smooth C1 cam lift ramps whose contact onset scales naturally with each step's physical radius.
+ * Uses exact circle-segment intersection around the lever pivot `(PIVOT_X, PIVOT_Y)` (zero allocations):
+ * rotating a lever around its pivot preserves radial distance `d` from the pivot, so any belly point
+ * `P(s)` at radius `d` moves from local angle `atan2(Py, Px)` to `atan2(Py, Px) + theta`.
+ *
+ * Guarantees:
+ *  - ZERO clipping of key tooth into solid brass lever at every angle phi in [0, 2*PI)
+ *  - ZERO floating air gap while lifted by the key
+ *  - Exact `LEVER_ALIGN_RAD[index]` dwell across [PI - CAM_DWELL_HALF_RAD, PI + CAM_DWELL_HALF_RAD]
  */
+const TOOTH_CROWN_SAMPLES: readonly number[] = [-1.0, -0.5, 0.0, 0.5, 1.0];
+
 export function computeKeyCamLiftRad(index: number, phiRad: number): number {
   const phi = normalizeAngle2Pi(phiRad);
+  const R = KEY_BIT_RADII[index];
+  const poly = LEVER_BELLY_POLYLINES[index];
+
+  // Key tooth rotates clockwise by `phi`: radial unit dir u = (-sin(phi), -cos(phi)),
+  // tangential unit dir t = (cos(phi), -sin(phi)).
+  // Tooth crown is machined as a concentric arc of exact radius R across half-width KEY_BIT_HALF_WIDTH
+  // (spanning +/- halfAng around the tooth centerline) so its entire crown glides flush along the Chubb belly!
+  const halfAng = Math.asin(Math.min(0.95, KEY_BIT_HALF_WIDTH / R));
+  let maxTheta = 0;
+
+  for (let k = 0; k < TOOTH_CROWN_SAMPLES.length; k++) {
+    const samplePhi = phi + TOOTH_CROWN_SAMPLES[k] * halfAng;
+    const wx = KEY_X - R * Math.sin(samplePhi);
+    const wy = KEY_Y - R * Math.cos(samplePhi);
+
+    const dx = wx - PIVOT_X;
+    const dy = wy - PIVOT_Y;
+    const dSq = dx * dx + dy * dy;
+    const alpha = Math.atan2(dy, dx);
+
+    // Quick reject when sample point is below lowest possible contact sweep
+    if (wy < PIVOT_Y - 0.32) continue;
+
+    // Intersect circle of radius sqrt(dSq) centered at lever pivot (0,0) with each belly segment
+    for (let s = 0; s < poly.length - 1; s++) {
+      const p0 = poly[s];
+      const p1 = poly[s + 1];
+      const vx = p1.x - p0.x;
+      const vy = p1.y - p0.y;
+      const a = vx * vx + vy * vy;
+      if (a < 1e-12) continue;
+      const b = 2 * (p0.x * vx + p0.y * vy);
+      const c = p0.x * p0.x + p0.y * p0.y - dSq;
+      const disc = b * b - 4 * a * c;
+      if (disc < 0) continue;
+
+      const sqrtDisc = Math.sqrt(disc);
+      const inv2a = 0.5 / a;
+      for (let root = 0; root < 2; root++) {
+        const t = root === 0 ? (-b - sqrtDisc) * inv2a : (-b + sqrtDisc) * inv2a;
+        if (t < -1e-6 || t > 1 + 1e-6) continue;
+        const tc = t < 0 ? 0 : t > 1 ? 1 : t;
+        const lx = p0.x + vx * tc;
+        const ly = p0.y + vy * tc;
+        const beta = Math.atan2(ly, lx);
+        const reqTheta = alpha - beta;
+        if (reqTheta > maxTheta && reqTheta < 0.75) {
+          maxTheta = reqTheta;
+        }
+      }
+    }
+  }
+
+  // Exact numerical snap inside concentric dwell arc eliminates floating-point polyline chord sagitta (< 0.0002 rad)
   const distFromTop = Math.abs(phi - Math.PI);
-  const alignRad = LEVER_ALIGN_RAD[index];
-
-  // Concentric Chubb belly arc: holds lever at exact gate-alignment height throughout talon stroke
-  if (distFromTop <= CAM_DWELL_HALF_RAD) {
-    return alignRad;
+  if (distFromTop <= CAM_DWELL_HALF_RAD - halfAng && Math.abs(maxTheta - LEVER_ALIGN_RAD[index]) < 0.004) {
+    return LEVER_ALIGN_RAD[index];
   }
 
-  // Taller bitting teeth make contact earlier on the curved entry shoulder than shorter teeth
-  const radiusFactor = 0.84 + 0.34 * ((KEY_BIT_RADII[index] - 0.15) / 0.12);
-  const rampSpan = CAM_RAMP_SPAN_RAD * radiusFactor;
-  const excess = distFromTop - CAM_DWELL_HALF_RAD;
-  if (excess >= rampSpan) {
-    return 0;
-  }
-
-  const u = 1.0 - excess / rampSpan;
-  // Smooth C1 cam profile (cubic Hermite rising monotonically with contact geometry)
-  const liftFactor = u * u * (3.0 - 2.0 * u);
-  return alignRad * liftFactor;
+  return Math.min(LEVER_MAX_RAD, maxTheta);
 }
 
 /**
@@ -212,6 +411,39 @@ export function computeTalonBitTip(phiRad: number, out: { x: number; y: number }
  */
 export function computeTalonNotchX(boltThrow01: number): number {
   return KEY_X - BOLT_TRAVEL * 0.5 + boltThrow01 * BOLT_TRAVEL;
+}
+
+/**
+ * Computes the exact physical upper angle limit for lever `index` at current `boltThrow01`
+ * so manually picking a lever can never drive its bottom H-gate pocket floor into the steel bolt stump.
+ */
+export function computeLeverPhysicalMaxRad(index: number, boltThrow01: number): number {
+  // Check locked pocket floor clearance (right pocket is the tightest at high lift)
+  if (boltThrow01 > 0.5) {
+    const dx = STUMP_X_UNLOCKED + boltThrow01 * BOLT_TRAVEL - PIVOT_X;
+    const dy = STUMP_Y - PIVOT_Y;
+    // Ensure lowest rotated corner of bolt stump stays >= GATE_POCKET_BOT_R_Y
+    const hw = STUMP_WIDTH * 0.5;
+    const hh = STUMP_HEIGHT * 0.5;
+    // Monotonic decreasing with theta; check LEVER_MAX_RAD first (fast path)
+    const testCornerY = (th: number) => {
+      const c = Math.cos(th);
+      const s = Math.sin(th);
+      return -dx * s + dy * c - (hw * s + hh * c);
+    };
+    if (testCornerY(LEVER_MAX_RAD) >= GATE_POCKET_BOT_R_Y) {
+      return LEVER_MAX_RAD;
+    }
+    let lo = LEVER_ALIGN_RAD[index];
+    let hi = LEVER_MAX_RAD;
+    for (let it = 0; it < 12; it++) {
+      const mid = (lo + hi) * 0.5;
+      if (testCornerY(mid) >= GATE_POCKET_BOT_R_Y) lo = mid;
+      else hi = mid;
+    }
+    return lo;
+  }
+  return LEVER_MAX_RAD;
 }
 
 export interface LockDiagnosticsState {
@@ -281,7 +513,6 @@ export class LockMechanism {
    *  - When locked: turns counter-clockwise (-2*PI) to unlock/retract the deadbolt.
    */
   triggerToggleTurn(): void {
-    // Snap base to nearest full turn
     const twoPi = Math.PI * 2;
     const baseTurn = Math.round(this.keyAngleRad / twoPi) * twoPi;
     const dir = this.isLocked ? -1 : 1;
@@ -317,7 +548,6 @@ export class LockMechanism {
    */
   endKeyDrag(): void {
     this.isDraggingKey = false;
-    // If released within 22 deg of vertical rest, settle smoothly into the vertical keyhole detent
     const phi = normalizeAngle2Pi(this.keyAngleRad);
     const distRest = Math.min(phi, Math.PI * 2 - phi);
     if (distRest < 0.38) {
@@ -342,15 +572,17 @@ export class LockMechanism {
     if (index < 0 || index >= LEVER_COUNT) return;
     this.autoTurnActive = false;
     this.draggedLeverIndex = index;
+    const maxLift = computeLeverPhysicalMaxRad(index, this.boltThrow01);
     this.draggedLeverTargetRad = Math.max(
       0,
-      Math.min(LEVER_MAX_RAD, targetRad ?? this.leverAnglesRad[index])
+      Math.min(maxLift, targetRad ?? this.leverAnglesRad[index])
     );
   }
 
   setLeverDragTarget(targetRad: number): void {
     if (this.draggedLeverIndex < 0) return;
-    this.draggedLeverTargetRad = Math.max(0, Math.min(LEVER_MAX_RAD, targetRad));
+    const maxLift = computeLeverPhysicalMaxRad(this.draggedLeverIndex, this.boltThrow01);
+    this.draggedLeverTargetRad = Math.max(0, Math.min(maxLift, targetRad));
   }
 
   endLeverDrag(): void {
@@ -382,7 +614,8 @@ export class LockMechanism {
    */
   setLeverAngleImmediate(index: number, rad: number): void {
     if (index < 0 || index >= LEVER_COUNT) return;
-    this.leverAnglesRad[index] = Math.max(0, Math.min(LEVER_MAX_RAD, rad));
+    const maxLift = computeLeverPhysicalMaxRad(index, this.boltThrow01);
+    this.leverAnglesRad[index] = Math.max(0, Math.min(maxLift, rad));
     this.leverAngVels[index] = 0;
     this.leverSpringFlex01[index] = this.leverAnglesRad[index] / LEVER_MAX_RAD;
     this.refreshAlignmentFlags();
@@ -459,7 +692,6 @@ export class LockMechanism {
         this.keyAngularVel = 0;
         this.autoTurnActive = false;
       } else {
-        // Weighty acceleration + slight slowdown across heavy bolt throw for tactile mechanical cadence
         const phi = normalizeAngle2Pi(this.keyAngleRad);
         const inThrow = phi > TALON_ENGAGE_START_RAD && phi < TALON_ENGAGE_END_RAD;
         const speedProfile = inThrow ? 0.72 : 1.0;
@@ -470,15 +702,13 @@ export class LockMechanism {
       }
     } else if (this.isDraggingKey) {
       const err = this.keyDragTargetRad - this.keyAngleRad;
-      // Add realistic tactile resistance while lifting all 5 springs against leaf-spring preload
       const phi = normalizeAngle2Pi(this.keyAngleRad);
-      const liftLoad = Math.abs(phi - Math.PI) < CAM_DWELL_HALF_RAD + CAM_RAMP_SPAN_RAD ? 0.78 : 1.0;
+      const liftLoad = Math.abs(phi - Math.PI) < CAM_DWELL_HALF_RAD + 0.95 ? 0.78 : 1.0;
       const stiffness = 145.0 * liftLoad;
       const accel = err * stiffness - this.keyAngularVel * 20.0;
       this.keyAngularVel += accel * h;
       this.keyAngleRad += this.keyAngularVel * h;
     } else {
-      // Gentle keyhole vertical detent pull only when close to vertical 0/2PI rest
       const phi = normalizeAngle2Pi(this.keyAngleRad);
       const distRest = Math.min(phi, Math.PI * 2 - phi);
       let detentTorque = 0;
@@ -498,7 +728,7 @@ export class LockMechanism {
     const stumpInGateTunnel =
       this.boltThrow01 > POCKET_PLAY_01 + 0.004 && this.boltThrow01 < 1.0 - POCKET_PLAY_01 - 0.004;
 
-    // 2. Integrate all 5 brass levers under phosphor-bronze leaf spring torque, key cam contact, and manual pick drag
+    // 2. Integrate all 5 brass levers under phosphor-bronze leaf spring torque, exact belly cam contact, and manual pick drag
     for (let i = 0; i < LEVER_COUNT; i++) {
       const prevAngle = this.leverAnglesRad[i];
       const springTorque = -this.getLeafSpringRestoringTorque(i);
@@ -512,7 +742,7 @@ export class LockMechanism {
       let nextVel = this.leverAngVels[i] + (totalTorque / LEVER_INERTIA) * h;
       let nextAngle = prevAngle + nextVel * h;
 
-      // Unilateral upward contact with stepped key bitting cam
+      // Exact unilateral rigid-body contact with stepped key bitting tooth i
       const camLift = computeKeyCamLiftRad(i, phi);
       if (nextAngle < camLift) {
         nextAngle = camLift;
@@ -533,16 +763,16 @@ export class LockMechanism {
         }
       }
 
-      // Hard physical rest stop on bottom brass-collared rest pin (theta = 0) & top case ceiling
+      // Hard physical rest stop on bottom brass rest pin (theta = 0) & stump-in-pocket upper stop
+      const physicalMax = computeLeverPhysicalMaxRad(i, this.boltThrow01);
       if (nextAngle <= 0) {
         if (prevAngle > 0.015 && nextVel < -0.5) {
-          // Crisp spring-driven metallic clack as lever drops back into locking pocket
           this.detentPulse = Math.min(1.0, this.detentPulse + Math.min(0.32, Math.abs(nextVel) * 0.08));
         }
         nextAngle = 0;
         nextVel = 0;
-      } else if (nextAngle >= LEVER_MAX_RAD) {
-        nextAngle = LEVER_MAX_RAD;
+      } else if (nextAngle >= physicalMax) {
+        nextAngle = physicalMax;
         if (nextVel > 0) nextVel = 0;
       }
 
@@ -559,20 +789,16 @@ export class LockMechanism {
     let talonEngaged = false;
     let talonBlockedByStop = false;
 
-    // Check key rear drive-bit contact with the U-shaped bolt talon
     const inTalonArc = phi >= TALON_ENGAGE_START_RAD - 0.04 && phi <= TALON_ENGAGE_END_RAD + 0.04;
     if (inTalonArc) {
       computeTalonBitTip(phi, this._talonTip);
       const notchX = computeTalonNotchX(this.boltThrow01);
-      const talonHalfMouth = 0.044; // realistic clearance inside the U-shaped talon jaws
+      const talonHalfMouth = 0.046;
       const dxTalon = this._talonTip.x - notchX;
 
       if (Math.abs(dxTalon) <= 0.145) {
-        // Key drive bit is physically inside the talon U-notch!
         talonEngaged = true;
         if (this.isDraggingBolt && !this.isDraggingKey && !this.autoTurnActive) {
-          // User is directly dragging the deadbolt while the key rests in the talon:
-          // the talon jaws smoothly back-drive the key along its engagement arc!
           const twoPi = Math.PI * 2;
           const turnBase = this.keyAngleRad - phi;
           const desiredNotchX = computeTalonNotchX(this.boltThrow01);
@@ -581,19 +807,15 @@ export class LockMechanism {
           const targetKeyRad = turnBase + targetPhi;
           this.keyAngleRad += (targetKeyRad - this.keyAngleRad) * Math.min(1, h * 36);
           this.keyAngularVel = 0;
-          // Ensure wrapped key stays in same revolution
           if (Math.abs(this.keyAngleRad - turnBase - Math.PI) > twoPi) {
             this.keyAngleRad = targetKeyRad;
           }
         } else {
-          // Stiff steel-on-steel key-to-talon drive
-          // Scale effective travel span slightly inward (0.95) so bolt seats cleanly at 0/1 before bit exits talon
           const effectiveHalfTravel = BOLT_TRAVEL * 0.475;
           const targetThrow01 = Math.max(
             0,
             Math.min(1, 0.5 + (this._talonTip.x - KEY_X) / (effectiveHalfTravel * 2))
           );
-          // Exact analytical kinematic velocity of the talon bit tip along X: d(x)/dt = -R * cos(phi) * d(phi)/dt
           const tipVelX = -KEY_TALON_RADIUS * Math.cos(phi) * this.keyAngularVel;
           const targetBoltVel =
             targetThrow01 <= 0.0001 || targetThrow01 >= 0.9999
@@ -607,7 +829,6 @@ export class LockMechanism {
         (this.boltThrow01 >= 1.0 - POCKET_PLAY_01 && this._talonTip.x < notchX - talonHalfMouth) ||
         (this.boltThrow01 <= POCKET_PLAY_01 && this._talonTip.x > notchX + talonHalfMouth)
       ) {
-        // User turned key in the wrong direction when already at travel limit -> hits solid outer cheek of bolt tail!
         talonBlockedByStop = true;
       }
     }
@@ -621,7 +842,6 @@ export class LockMechanism {
     this.boltVel += boltForce * h;
     let nextBolt = prevBolt + this.boltVel * h;
 
-    // Physical hard stops of mortise forend & case backwall
     if (nextBolt < 0) {
       if (prevBolt > 0.02 && this.boltVel < -0.3) {
         this.detentPulse = Math.min(1.0, this.detentPulse + 0.45);
@@ -640,7 +860,7 @@ export class LockMechanism {
 
     // BILATERAL BOLT-STUMP BLOCKING BY MISALIGNED LEVERS:
     // If ANY 1 of the 5 levers is not aligned with the gate, the square steel stump
-    // collides physically with that lever's solid brass locking cheek!
+    // stops flush against that lever's solid brass locking cheek (zero interpenetration!).
     if (!this.gatesAligned) {
       if (prevBolt <= POCKET_PLAY_01 + 0.001 && nextBolt > POCKET_PLAY_01) {
         nextBolt = POCKET_PLAY_01;
@@ -659,8 +879,7 @@ export class LockMechanism {
       }
     }
 
-    // If the bolt was blocked by misaligned levers while the key talon was actively pushing it,
-    // resist the key rotation so the key can NEVER clip through a jammed bolt!
+    // Prevent key from clipping through a jammed bolt or wrong-way stop; allow instant smooth retreat!
     if (blockedThisSub && talonEngaged) {
       this.keyAngleRad = prevKeyAngle + (this.keyAngleRad - prevKeyAngle) * 0.08;
       this.keyAngularVel *= 0.25;
@@ -668,15 +887,15 @@ export class LockMechanism {
         this.autoTurnActive = false;
       }
     } else if (talonBlockedByStop && !this.autoTurnActive) {
-      // Gentle physical stop when turning the wrong way against an already-thrown deadbolt
-      const stopAngle = this.boltThrow01 > 0.5 ? TALON_ENGAGE_START_RAD - 0.02 : TALON_ENGAGE_END_RAD + 0.02;
-      const dPrev = Math.abs(normalizeAngle2Pi(prevKeyAngle) - stopAngle);
-      const dCur = Math.abs(phi - stopAngle);
-      if (dCur < dPrev + 0.08) {
+      const deltaKey = this.keyAngleRad - prevKeyAngle;
+      // Locked (bolt=1): wrong direction is CW (+deltaKey); Unlocked (bolt=0): wrong direction is CCW (-deltaKey)
+      const pushingIntoStop =
+        (this.boltThrow01 > 0.5 && deltaKey > 0) || (this.boltThrow01 <= 0.5 && deltaKey < 0);
+      if (pushingIntoStop) {
         this.keyAngleRad = prevKeyAngle;
-        this.keyAngularVel *= -0.15;
+        this.keyAngularVel = 0;
         if (this.isDraggingKey) {
-          this.keyDragTargetRad = prevKeyAngle + (this.keyDragTargetRad - prevKeyAngle) * 0.25;
+          this.keyDragTargetRad = prevKeyAngle;
         }
         this.caseRecoilVelX += (this.boltThrow01 > 0.5 ? 1 : -1) * 0.012;
       }

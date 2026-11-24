@@ -8,14 +8,14 @@
     "drawerCount": 30
   },
   "telemetry": {
-    "frameCount": 347,
-    "avgFrameMs": 8.27,
-    "p95FrameMs": 10.3,
+    "frameCount": 362,
+    "avgFrameMs": 8.33,
+    "p95FrameMs": 9,
     "sceneState": {
       "day": 21,
       "slug": "21-bolt",
       "headerLabel": "Day 21 - Bolt",
-      "frameCount": 347,
+      "frameCount": 362,
       "cameraPos": [
         -1.6361853860024023,
         3.5401911250552267,
@@ -27,13 +27,13 @@
         0.3880348870358037
       ],
       "pointerSpeed": 0,
-      "pointerDwellSec": 1.8797,
-      "pointerImpulse": 0.0009
+      "pointerDwellSec": 2.3504,
+      "pointerImpulse": 0.0008
     }
   },
   "metrics": {
-    "specimenCoverageRatio": 0.3403,
-    "interactionMad": 9.149
+    "specimenCoverageRatio": 0.3695,
+    "interactionMad": 9.442
   },
   "gpuErrors": [],
   "gateFailures": [],

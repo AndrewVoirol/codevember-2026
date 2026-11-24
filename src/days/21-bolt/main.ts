@@ -245,14 +245,23 @@ async function mountDay21Bolt(): Promise<void> {
     return true;
   }
 
-  function computeKeyScreenAngle(clientX: number, clientY: number): number {
+  const _keyAngleOut = { angle: 0, radiusPx: 0 };
+
+  function computeKeyScreenPolar(
+    clientX: number,
+    clientY: number,
+    out: { angle: number; radiusPx: number }
+  ): void {
     const rect = canvas.getBoundingClientRect();
     lockRoot.updateMatrixWorld();
     _keyWorldCenter.set(KEY_X, KEY_Y, 0.55).applyMatrix4(lockRoot.matrixWorld);
     _keyNdc.copy(_keyWorldCenter).project(stage.camera);
     const sx = rect.left + (_keyNdc.x * 0.5 + 0.5) * rect.width;
     const sy = rect.top + (-_keyNdc.y * 0.5 + 0.5) * rect.height;
-    return Math.atan2(clientY - sy, clientX - sx);
+    const dx = clientX - sx;
+    const dy = clientY - sy;
+    out.radiusPx = Math.hypot(dx, dy);
+    out.angle = Math.atan2(dy, dx);
   }
 
   function computeKeyViewSign(): number {
@@ -280,7 +289,8 @@ async function mountDay21Bolt(): Promise<void> {
     if (hit.kind === 'key') {
       stage.controls.enabled = false;
       lock.beginKeyDrag();
-      prevKeyPointerAngle = computeKeyScreenAngle(ev.clientX, ev.clientY);
+      computeKeyScreenPolar(ev.clientX, ev.clientY, _keyAngleOut);
+      prevKeyPointerAngle = _keyAngleOut.angle;
       keyScreenSign = computeKeyViewSign();
       canvas.style.cursor = 'grabbing';
       canvas.setPointerCapture(ev.pointerId);
@@ -328,11 +338,14 @@ async function mountDay21Bolt(): Promise<void> {
     }
 
     if (activeDrag === 'key') {
-      const curAngle = computeKeyScreenAngle(ev.clientX, ev.clientY);
+      computeKeyScreenPolar(ev.clientX, ev.clientY, _keyAngleOut);
+      const curAngle = _keyAngleOut.angle;
       const delta = wrapDeltaPi(curAngle - prevKeyPointerAngle);
       prevKeyPointerAngle = curAngle;
-      // Avoid tiny radius jump near exact keyhole pixel center by clamping extreme single-event delta
-      const clampedDelta = Math.max(-0.55, Math.min(0.55, delta)) * keyScreenSign;
+      // Smooth hub-proximity guard prevents erratic ±PI spin spikes when dragging straight across keyhole hub
+      if (_keyAngleOut.radiusPx < 9) return;
+      const hubWeight = Math.min(1, (_keyAngleOut.radiusPx - 9) / 14);
+      const clampedDelta = Math.max(-0.48, Math.min(0.48, delta)) * hubWeight * keyScreenSign;
       lock.applyKeyDragDelta(clampedDelta);
       return;
     }
@@ -376,10 +389,11 @@ async function mountDay21Bolt(): Promise<void> {
         const dist = Math.hypot(dx, dy);
         if (dist < 5) return;
 
-        // Pushing further outward when already fully locked (or predominantly vertical drag) orbits smoothly;
-        // pushing/pulling toward active travel slides or tests bolt-stump lever blocking!
-        const pushingPastLockStop = lock.boltThrow01 >= 0.99 && dx > 4;
-        const pushingPastUnlockStop = lock.boltThrow01 <= 0.01 && dx < -4;
+        // Evaluate push direction in lock-local X so bolt dragging works identically from front & rear 180° orbits!
+        const hasLocal = intersectLockLocalPlane(ev.clientX, ev.clientY, 0, _localHit);
+        const localDx = hasLocal ? _localHit.x - boltDragStartLocalX : dx * 0.004;
+        const pushingPastLockStop = lock.boltThrow01 >= 0.99 && localDx > 0.012;
+        const pushingPastUnlockStop = lock.boltThrow01 <= 0.01 && localDx < -0.012;
         const predominantlyVertical = Math.abs(dy) > Math.abs(dx) * 1.25;
         if (pushingPastLockStop || pushingPastUnlockStop || predominantlyVertical) {
           activeDrag = 'orbit-fallback';

@@ -90,13 +90,16 @@ export function createBoltStudioEnvironment(
   addSoftbox(12.5, 5.2, [0.8, 5.8, -5.6], [0, 0, 0], 0.92, 0.96, 1.0, 1.48);
 
   // 6. Rear-right cool-warm bounce (lights rear of charred oak and forend bevel during 360 orbits)
-  addSoftbox(8.0, 7.0, [5.4, 0.8, -5.8], [0, 0, 0], 0.95, 0.92, 0.88, 1.02);
+  addSoftbox(8.0, 7.0, [5.4, 0.8, -5.8], [0, 0, 0], 0.95, 0.92, 0.88, 1.08);
 
-  // 7. Warm workbench under-bounce (lifts key bow underside, lower lever bellies, and forend lower bevel)
-  addSoftbox(12.0, 12.0, [0, -6.2, 1.2], [0, 0, 0], 0.96, 0.91, 0.84, 0.42);
+  // 7. Rear-left cool calcite fill (illuminates rear oak bevels and left flank without dark collapse)
+  addSoftbox(8.5, 7.2, [-5.6, 1.8, -5.2], [0, 0, 0], 0.90, 0.94, 0.99, 0.96);
 
-  // Crisp yet museum-smooth 0.068 pre-blur for flat & beveled horological metalwork
-  const renderTarget = pmrem.fromScene(envScene, 0.068);
+  // 8. Warm workbench under-bounce (lifts key bow underside, lower lever bellies, and forend lower bevel)
+  addSoftbox(12.0, 12.0, [0, -6.2, 1.2], [0, 0, 0], 0.96, 0.91, 0.84, 0.48);
+
+  // Crisp yet museum-smooth 0.065 pre-blur for flat & beveled horological metalwork
+  const renderTarget = pmrem.fromScene(envScene, 0.065);
 
   for (const d of disposables) d.dispose();
   pmrem.dispose();

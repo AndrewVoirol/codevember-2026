@@ -10,21 +10,29 @@ import {
   FOREND_THICKNESS,
   FOREND_X,
   GATE_HALF_HEIGHT,
+  GATE_POCKET_BOT_R_Y,
+  GATE_POCKET_LEFT_INNER_X,
+  GATE_POCKET_LEFT_OUTER_X,
+  GATE_POCKET_RIGHT_INNER_X,
+  GATE_POCKET_RIGHT_OUTER_X,
+  GATE_POCKET_TOP_Y,
   GUIDE_PIN_X,
   GUIDE_PIN_Y,
+  KEY_BIT_HALF_WIDTH,
   KEY_BIT_RADII,
   KEY_SHAFT_RADIUS,
   KEY_TALON_RADIUS,
   KEY_X,
   KEY_Y,
-  LEVER_BELLY_LOCAL_X,
-  LEVER_BELLY_LOCAL_Y,
+  LEVER_BELLY_POLYLINES,
   LEVER_BEVEL,
   LEVER_COUNT,
   LEVER_GATE_SPECS,
+  LEVER_MAX_RAD,
   LEVER_THICKNESS,
   PIVOT_X,
   PIVOT_Y,
+  REST_PIN_RADIUS,
   REST_PIN_X,
   REST_PIN_Y,
   SPRING_POST_X,
@@ -38,6 +46,8 @@ import {
   getLeverZ,
 } from './lockMechanism';
 import type { BoltMaterials } from './materials';
+
+const CREASE_ANGLE_RAD = (34 * Math.PI) / 180;
 
 /**
  * Ensures 2D polygon points are counter-clockwise (required for outward normals on ExtrudeGeometry).
@@ -60,6 +70,135 @@ function ensureCW(pts: THREE.Vector2[]): THREE.Vector2[] {
 }
 
 /**
+ * Computes precision machined normals for extruded parts (before any final orientation rotation):
+ *  - All planar front/back extrusion cap faces (|nz| > 0.996) receive exact razor-flat (0, 0, ±1) normals
+ *    so bevel rings NEVER bleed curved Gouraud triangle-fan streaks across flat metal plates or wood faces!
+ *  - Non-cap faces (curved rims, rounded corners, bores, bevels) smoothly average normals across adjacent
+ *    non-cap faces within `creaseAngleRad` so curved edges gleam smoothly without polygonal faceting.
+ */
+function applyMachinedNormals(
+  rawGeo: THREE.BufferGeometry,
+  creaseAngleRad = CREASE_ANGLE_RAD
+): THREE.BufferGeometry {
+  const geo = rawGeo.index ? rawGeo.toNonIndexed() : rawGeo;
+  if (geo !== rawGeo) rawGeo.dispose();
+
+  const posAttr = geo.attributes.position as THREE.BufferAttribute;
+  const vertCount = posAttr.count;
+  const triCount = Math.floor(vertCount / 3);
+  const normals = new Float32Array(vertCount * 3);
+
+  const faceNx = new Float32Array(triCount);
+  const faceNy = new Float32Array(triCount);
+  const faceNz = new Float32Array(triCount);
+  const faceArea = new Float32Array(triCount);
+  const isCap = new Uint8Array(triCount); // 0 = bevel/wall, 1 = +Z cap, 2 = -Z cap
+
+  // Bucket non-cap vertices by quantized 3D position for fast crease-angle smoothing
+  const vertBuckets = new Map<string, number[]>();
+  const quantKey = (x: number, y: number, z: number) =>
+    `${Math.round(x * 1e4)},${Math.round(y * 1e4)},${Math.round(z * 1e4)}`;
+
+  for (let t = 0; t < triCount; t++) {
+    const i0 = t * 3;
+    const ax = posAttr.getX(i0);
+    const ay = posAttr.getY(i0);
+    const az = posAttr.getZ(i0);
+    const bx = posAttr.getX(i0 + 1);
+    const by = posAttr.getY(i0 + 1);
+    const bz = posAttr.getZ(i0 + 1);
+    const cx = posAttr.getX(i0 + 2);
+    const cy = posAttr.getY(i0 + 2);
+    const cz = posAttr.getZ(i0 + 2);
+
+    const abx = bx - ax;
+    const aby = by - ay;
+    const abz = bz - az;
+    const acx = cx - ax;
+    const acy = cy - ay;
+    const acz = cz - az;
+
+    const nx = aby * acz - abz * acy;
+    const ny = abz * acx - abx * acz;
+    const nz = abx * acy - aby * acx;
+    const len = Math.hypot(nx, ny, nz);
+    const invLen = len > 1e-12 ? 1 / len : 0;
+    const unx = nx * invLen;
+    const uny = ny * invLen;
+    const unz = nz * invLen;
+
+    faceNx[t] = unx;
+    faceNy[t] = uny;
+    faceNz[t] = unz;
+    faceArea[t] = len * 0.5;
+
+    if (Math.abs(unz) > 0.996) {
+      isCap[t] = unz > 0 ? 1 : 2;
+      const capZ = unz > 0 ? 1 : -1;
+      for (let k = 0; k < 3; k++) {
+        const off = (i0 + k) * 3;
+        normals[off] = 0;
+        normals[off + 1] = 0;
+        normals[off + 2] = capZ;
+      }
+    } else {
+      for (let k = 0; k < 3; k++) {
+        const vi = i0 + k;
+        const key = quantKey(posAttr.getX(vi), posAttr.getY(vi), posAttr.getZ(vi));
+        let bucket = vertBuckets.get(key);
+        if (!bucket) {
+          bucket = [];
+          vertBuckets.set(key, bucket);
+        }
+        bucket.push(t);
+      }
+    }
+  }
+
+  const cosThreshold = Math.cos(creaseAngleRad);
+  for (let t = 0; t < triCount; t++) {
+    if (isCap[t] !== 0) continue;
+    const fnx = faceNx[t];
+    const fny = faceNy[t];
+    const fnz = faceNz[t];
+    const i0 = t * 3;
+
+    for (let k = 0; k < 3; k++) {
+      const vi = i0 + k;
+      const key = quantKey(posAttr.getX(vi), posAttr.getY(vi), posAttr.getZ(vi));
+      const neighbors = vertBuckets.get(key)!;
+      let sx = 0;
+      let sy = 0;
+      let sz = 0;
+      for (let m = 0; m < neighbors.length; m++) {
+        const nt = neighbors[m];
+        const dot = fnx * faceNx[nt] + fny * faceNy[nt] + fnz * faceNz[nt];
+        if (dot >= cosThreshold) {
+          const w = Math.max(1e-8, faceArea[nt]);
+          sx += faceNx[nt] * w;
+          sy += faceNy[nt] * w;
+          sz += faceNz[nt] * w;
+        }
+      }
+      const sLen = Math.hypot(sx, sy, sz);
+      const off = vi * 3;
+      if (sLen > 1e-12) {
+        normals[off] = sx / sLen;
+        normals[off + 1] = sy / sLen;
+        normals[off + 2] = sz / sLen;
+      } else {
+        normals[off] = fnx;
+        normals[off + 1] = fny;
+        normals[off + 2] = fnz;
+      }
+    }
+  }
+
+  geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+  return geo;
+}
+
+/**
  * Builds a rounded rectangle point list in CCW order.
  */
 function makeRoundedRectPts(
@@ -68,7 +207,7 @@ function makeRoundedRectPts(
   maxX: number,
   maxY: number,
   radius: number,
-  segs = 5
+  segs = 6
 ): THREE.Vector2[] {
   const r = Math.min(radius, (maxX - minX) * 0.45, (maxY - minY) * 0.45);
   const pts: THREE.Vector2[] = [];
@@ -105,24 +244,157 @@ function makeCircleHole(cx: number, cy: number, radius: number, segs = 28): THRE
 }
 
 /**
- * Builds a watertight closed LatheGeometry along Y (ordered strictly bottom-to-top for outward normals),
- * optionally rotated to lie along Z.
+ * Computes an inward-offset version of a CCW open or closed 2D polygon by `inset` along averaged edge normals.
+ * Used to place the extruded bevel outer skin of precision components onto exact mechanical coordinates.
+ */
+function offsetClosedPolygonCCW(pts: THREE.Vector2[], offset: number): THREE.Vector2[] {
+  const n = pts.length;
+  const out: THREE.Vector2[] = [];
+  for (let i = 0; i < n; i++) {
+    const prev = pts[(i - 1 + n) % n];
+    const curr = pts[i];
+    const next = pts[(i + 1) % n];
+
+    const e1x = curr.x - prev.x;
+    const e1y = curr.y - prev.y;
+    const l1 = Math.max(1e-7, Math.hypot(e1x, e1y));
+    // Outward normal for CCW contour is (+dy, -dx)
+    const n1x = e1y / l1;
+    const n1y = -e1x / l1;
+
+    const e2x = next.x - curr.x;
+    const e2y = next.y - curr.y;
+    const l2 = Math.max(1e-7, Math.hypot(e2x, e2y));
+    const n2x = e2y / l2;
+    const n2y = -e2x / l2;
+
+    let bx = n1x + n2x;
+    let by = n1y + n2y;
+    const bLen = Math.hypot(bx, by);
+    if (bLen < 1e-5) {
+      out.push(new THREE.Vector2(curr.x + n1x * offset, curr.y + n1y * offset));
+    } else {
+      bx /= bLen;
+      by /= bLen;
+      const denom = Math.max(0.45, bx * n1x + by * n1y);
+      const scale = Math.min(2.2, 1 / denom) * offset;
+      out.push(new THREE.Vector2(curr.x + bx * scale, curr.y + by * scale));
+    }
+  }
+  return out;
+}
+
+/**
+ * Builds a watertight outward-wound extruded prism along Z from `zBack` to `zFront` with
+ * optional independent front (+Z) and back (-Z) bevels so flush-mated timber blocks have
+ * ZERO perimeter V-groove seams where their interior faces join!
+ */
+function buildOneSidedBevelPrism(
+  outerCCW: THREE.Vector2[],
+  zBack: number,
+  zFront: number,
+  backBevel: number,
+  frontBevel: number
+): THREE.BufferGeometry {
+  const cleanOuter = ensureCCW(outerCCW);
+  const n = cleanOuter.length;
+
+  interface Ring {
+    pts: THREE.Vector2[];
+    z: number;
+  }
+
+  const rings: Ring[] = [];
+  if (backBevel > 1e-5) {
+    rings.push({ pts: offsetClosedPolygonCCW(cleanOuter, -backBevel), z: zBack });
+    rings.push({ pts: cleanOuter, z: zBack + backBevel });
+  } else {
+    rings.push({ pts: cleanOuter, z: zBack });
+  }
+
+  if (frontBevel > 1e-5) {
+    rings.push({ pts: cleanOuter, z: zFront - frontBevel });
+    rings.push({ pts: offsetClosedPolygonCCW(cleanOuter, -frontBevel), z: zFront });
+  } else {
+    rings.push({ pts: cleanOuter, z: zFront });
+  }
+
+  const positions: number[] = [];
+  const pushTri = (
+    ax: number,
+    ay: number,
+    az: number,
+    bx: number,
+    by: number,
+    bz: number,
+    cx: number,
+    cy: number,
+    cz: number
+  ) => {
+    positions.push(ax, ay, az, bx, by, bz, cx, cy, cz);
+  };
+
+  // Side walls between consecutive rings (r -> r+1 in increasing Z, CCW contour -> outward normal)
+  for (let r = 0; r < rings.length - 1; r++) {
+    const r0 = rings[r];
+    const r1 = rings[r + 1];
+    for (let i = 0; i < n; i++) {
+      const j = (i + 1) % n;
+      const a0 = r0.pts[i];
+      const b0 = r0.pts[j];
+      const b1 = r1.pts[j];
+      const a1 = r1.pts[i];
+      // Outward CCW when viewed from outside: a0 -> b0 -> b1 and a0 -> b1 -> a1
+      pushTri(a0.x, a0.y, r0.z, b0.x, b0.y, r0.z, b1.x, b1.y, r1.z);
+      pushTri(a0.x, a0.y, r0.z, b1.x, b1.y, r1.z, a1.x, a1.y, r1.z);
+    }
+  }
+
+  // Front cap (+Z outward): triangulate last ring (CCW -> +Z normal)
+  const frontRing = rings[rings.length - 1];
+  const frontFaces = THREE.ShapeUtils.triangulateShape(frontRing.pts, []);
+  for (const [i0, i1, i2] of frontFaces) {
+    const p0 = frontRing.pts[i0];
+    const p1 = frontRing.pts[i1];
+    const p2 = frontRing.pts[i2];
+    pushTri(p0.x, p0.y, frontRing.z, p1.x, p1.y, frontRing.z, p2.x, p2.y, frontRing.z);
+  }
+
+  // Back cap (-Z outward): triangulate first ring, reversed winding (CW -> -Z normal)
+  const backRing = rings[0];
+  const backFaces = THREE.ShapeUtils.triangulateShape(backRing.pts, []);
+  for (const [i0, i1, i2] of backFaces) {
+    const p0 = backRing.pts[i0];
+    const p1 = backRing.pts[i1];
+    const p2 = backRing.pts[i2];
+    pushTri(p0.x, p0.y, backRing.z, p2.x, p2.y, backRing.z, p1.x, p1.y, backRing.z);
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.computeVertexNormals();
+  return applyMachinedNormals(geo, (28 * Math.PI) / 180);
+}
+
+/**
+ * Builds a watertight closed LatheGeometry along Z.
+ * Profile points `[z, r]` are given in strict CCW order around the positive-R cross-section
+ * (allowing both solid shafts and genuine hollow-bore pipe barrels with outward normals!).
  */
 function makeClosedLatheZ(
   profileZR: Array<[number, number]>,
-  radialSegments = 28
+  radialSegments = 32,
+  sortByZ = true
 ): THREE.BufferGeometry {
-  // LatheGeometry revolves around +Y with y strictly increasing from bottom to top for outward normals.
-  // After Lathe, rotateX(+PI/2) maps +Y -> +Z (and +Z -> -Y, preserving right-handed outward winding!).
   const pts: THREE.Vector2[] = [];
-  const sorted = [...profileZR].sort((a, b) => a[0] - b[0]);
-  if (sorted[0][1] > 1e-4) {
-    pts.push(new THREE.Vector2(0, sorted[0][0]));
+  const ordered = sortByZ ? [...profileZR].sort((a, b) => a[0] - b[0]) : profileZR;
+  if (ordered[0][1] > 1e-4) {
+    pts.push(new THREE.Vector2(0, ordered[0][0]));
   }
-  for (const [z, r] of sorted) {
+  for (const [z, r] of ordered) {
     pts.push(new THREE.Vector2(Math.max(0, r), z));
   }
-  const last = sorted[sorted.length - 1];
+  const last = ordered[ordered.length - 1];
   if (last[1] > 1e-4) {
     pts.push(new THREE.Vector2(0, last[0]));
   }
@@ -133,9 +405,8 @@ function makeClosedLatheZ(
 }
 
 /**
- * Creates a countersunk slotted flathead brass wood-screw oriented with its face pointing along +X
- * (or +Z when rotateToZ is true). Built from two outward-wound beveled D-caps flanking a crisp
- * recessed screwdriver slot + solid recessed floor disc.
+ * Creates a countersunk slotted flathead brass wood-screw seated cleanly inside a matching circular hole.
+ * Built from two outward-wound beveled D-caps flanking a genuine empty screwdriver slot + recessed floor disc.
  */
 function buildSlottedBrassScrew(
   radius: number,
@@ -148,47 +419,51 @@ function buildSlottedBrassScrew(
   const grp = new THREE.Group();
   grp.name = 'SlottedBrassScrew';
 
-  // Backing countersunk base disc behind the slot
-  const baseDepth = Math.max(0.008, headDepth - slotDepth);
+  // Backing countersunk base disc behind the slot (inset slightly in radius for clean bevel)
+  const bevel = 0.0018;
+  const baseR = Math.max(0.004, radius - bevel);
+  const baseDepth = Math.max(0.006, headDepth - slotDepth - bevel);
   const baseShape = new THREE.Shape();
-  baseShape.absarc(0, 0, radius, 0, Math.PI * 2, false);
-  const baseGeo = new THREE.ExtrudeGeometry(baseShape, {
+  baseShape.absarc(0, 0, baseR, 0, Math.PI * 2, false);
+  const baseRaw = new THREE.ExtrudeGeometry(baseShape, {
     depth: baseDepth,
     bevelEnabled: true,
-    bevelThickness: 0.002,
-    bevelSize: 0.002,
+    bevelThickness: bevel,
+    bevelSize: bevel,
     bevelSegments: 2,
-    curveSegments: 24,
+    curveSegments: 28,
   });
-  baseGeo.translate(0, 0, -headDepth);
+  baseRaw.translate(0, 0, -headDepth + bevel);
+  const baseGeo = applyMachinedNormals(baseRaw);
   disposables.push(baseGeo);
   const baseMesh = new THREE.Mesh(baseGeo, mat);
   baseMesh.castShadow = true;
   baseMesh.receiveShadow = true;
   grp.add(baseMesh);
 
-  // Two opposing D-lobes forming the genuine recessed screwdriver slot
-  const halfSlot = slotWidth * 0.5;
-  const theta0 = Math.asin(Math.min(0.85, halfSlot / radius));
+  // Two opposing D-lobes forming the genuine recessed screwdriver slot (clean empty channel!)
+  const halfSlot = slotWidth * 0.5 + bevel;
+  const theta0 = Math.asin(Math.min(0.85, halfSlot / baseR));
   for (const sign of [1, -1]) {
     const pts: THREE.Vector2[] = [];
-    const segs = 16;
+    const segs = 18;
     const startA = sign > 0 ? theta0 : Math.PI + theta0;
     const endA = sign > 0 ? Math.PI - theta0 : Math.PI * 2 - theta0;
     for (let s = 0; s <= segs; s++) {
       const a = startA + (endA - startA) * (s / segs);
-      pts.push(new THREE.Vector2(Math.cos(a) * radius, Math.sin(a) * radius));
+      pts.push(new THREE.Vector2(Math.cos(a) * baseR, Math.sin(a) * baseR));
     }
     const ccw = ensureCCW(pts);
     const lobeShape = new THREE.Shape(ccw);
-    const lobeGeo = new THREE.ExtrudeGeometry(lobeShape, {
-      depth: slotDepth,
+    const lobeRaw = new THREE.ExtrudeGeometry(lobeShape, {
+      depth: Math.max(0.003, slotDepth - bevel * 2),
       bevelEnabled: true,
-      bevelThickness: 0.0025,
-      bevelSize: 0.002,
+      bevelThickness: bevel,
+      bevelSize: bevel,
       bevelSegments: 2,
     });
-    lobeGeo.translate(0, 0, -slotDepth);
+    lobeRaw.translate(0, 0, -slotDepth + bevel);
+    const lobeGeo = applyMachinedNormals(lobeRaw);
     disposables.push(lobeGeo);
     const lobeMesh = new THREE.Mesh(lobeGeo, mat);
     lobeMesh.castShadow = true;
@@ -200,7 +475,7 @@ function buildSlottedBrassScrew(
 }
 
 // =============================================================================
-// 1. Oiled Charred-Oak Cutaway Specimen Slab
+// 1. Seamless Monolithic Oiled Charred-Oak Door-Stile Specimen with Mortise Rebate
 // =============================================================================
 
 export interface OakSpecimenAssembly {
@@ -208,69 +483,101 @@ export interface OakSpecimenAssembly {
   dispose: () => void;
 }
 
+// Exported spatial constants so unit tests can assert zero forend-to-oak overlap & flush seating
+export const OAK_OUTER_MIN_X = -1.14;
+export const OAK_OUTER_MAX_X = FOREND_X + FOREND_THICKNESS + 0.003; // +1.008 (exact flush match with brass forend front face!)
+export const OAK_OUTER_MIN_Y = -0.845;
+export const OAK_OUTER_MAX_Y = 0.865;
+export const OAK_Z_BACK = -0.340;
+export const OAK_Z_FRONT = 0.252;
+export const OAK_REBATE_X = FOREND_X - 0.002; // +0.938 (0.002 crisp reveal behind forend back x = 0.940)
+export const OAK_REBATE_MIN_Y = -0.768;
+export const OAK_REBATE_MAX_Y = 0.788;
+export const OAK_REBATE_Z_BACK = -0.250; // 0.004 crisp reveal behind forend rear face z = -0.246
+
 export function buildOakSpecimenBlock(materials: BoltMaterials): OakSpecimenAssembly {
   const group = new THREE.Group();
   group.name = 'CharredOakSpecimenBlock';
   const disposables: THREE.BufferGeometry[] = [];
 
-  const outerMinX = -1.14;
-  const outerMaxX = FOREND_X; // +0.94 (meets mortised brass forend cleanly)
-  const outerMinY = -0.80;
-  const outerMaxY = 0.82;
+  const pocketMinX = CASE_INNER_MIN_X - 0.044; // -0.844
+  const pocketMinY = CASE_INNER_MIN_Y - 0.039; // -0.604
+  const pocketMaxY = CASE_INNER_MAX_Y + 0.039; // +0.624
+  const caseBackZ = -0.224;
 
-  const pocketMinX = CASE_INNER_MIN_X - 0.045; // -0.845
-  const pocketMinY = CASE_INNER_MIN_Y - 0.04; // -0.605
-  const pocketMaxY = CASE_INNER_MAX_Y + 0.04; // +0.625
-
-  // 1A. Solid Rear Charred-Oak Backing Timber Slab (z: -0.355 .. -0.221, zero overlap with front C-frame)
-  const rearPts = makeRoundedRectPts(outerMinX, outerMinY, outerMaxX, outerMaxY, 0.036, 5);
-  const rearShape = new THREE.Shape(rearPts);
-  const rearGeo = new THREE.ExtrudeGeometry(rearShape, {
-    depth: 0.094,
-    bevelEnabled: true,
-    bevelThickness: 0.020,
-    bevelSize: 0.020,
-    bevelSegments: 3,
-  });
-  rearGeo.translate(0, 0, -0.335);
-  disposables.push(rearGeo);
-  const rearMesh = new THREE.Mesh(rearGeo, materials.charredOak);
-  rearMesh.name = 'OakRearBacking';
-  rearMesh.castShadow = true;
-  rearMesh.receiveShadow = true;
-  group.add(rearMesh);
-
-  // 1B. Sculpted Front C-Frame Oak Cutaway Surround (z: -0.220 .. +0.252)
-  // Leaves the mortise cavity and right brass forend cleanly exposed with generous chamfered oak bevels
-  const cPts = ensureCCW([
-    new THREE.Vector2(outerMinX + 0.03, outerMinY),
-    new THREE.Vector2(outerMaxX - 0.005, outerMinY),
-    new THREE.Vector2(outerMaxX - 0.005, pocketMinY),
-    new THREE.Vector2(pocketMinX + 0.025, pocketMinY),
-    new THREE.Vector2(pocketMinX, pocketMinY + 0.025),
-    new THREE.Vector2(pocketMinX, pocketMaxY - 0.025),
-    new THREE.Vector2(pocketMinX + 0.025, pocketMaxY),
-    new THREE.Vector2(outerMaxX - 0.005, pocketMaxY),
-    new THREE.Vector2(outerMaxX - 0.005, outerMaxY),
-    new THREE.Vector2(outerMinX + 0.03, outerMaxY),
-    new THREE.Vector2(outerMinX, outerMaxY - 0.03),
-    new THREE.Vector2(outerMinX, outerMinY + 0.03),
+  // 1A. Full-Height Rear Oak Door-Stile Backing (z: -0.340 .. -0.250)
+  // Chamfered ONLY on the exterior rear face (-Z); razor-flat at z = -0.250 so perimeter is 100% seamless!
+  const fullOuterPts = ensureCCW([
+    new THREE.Vector2(OAK_OUTER_MIN_X + 0.018, OAK_OUTER_MIN_Y),
+    new THREE.Vector2(OAK_OUTER_MAX_X, OAK_OUTER_MIN_Y),
+    new THREE.Vector2(OAK_OUTER_MAX_X, OAK_OUTER_MAX_Y),
+    new THREE.Vector2(OAK_OUTER_MIN_X + 0.018, OAK_OUTER_MAX_Y),
+    new THREE.Vector2(OAK_OUTER_MIN_X, OAK_OUTER_MAX_Y - 0.018),
+    new THREE.Vector2(OAK_OUTER_MIN_X, OAK_OUTER_MIN_Y + 0.018),
   ]);
-  const cShape = new THREE.Shape(cPts);
-  const cGeo = new THREE.ExtrudeGeometry(cShape, {
-    depth: 0.428,
-    bevelEnabled: true,
-    bevelThickness: 0.022,
-    bevelSize: 0.022,
-    bevelSegments: 3,
-  });
-  cGeo.translate(0, 0, -0.198);
-  disposables.push(cGeo);
-  const cMesh = new THREE.Mesh(cGeo, materials.charredOak);
-  cMesh.name = 'OakCutawayFrame';
-  cMesh.castShadow = true;
-  cMesh.receiveShadow = true;
-  group.add(cMesh);
+  const rearStileGeo = buildOneSidedBevelPrism(
+    fullOuterPts,
+    OAK_Z_BACK,
+    OAK_REBATE_Z_BACK,
+    0.016,
+    0
+  );
+  disposables.push(rearStileGeo);
+  const rearStileMesh = new THREE.Mesh(rearStileGeo, materials.charredOak);
+  rearStileMesh.name = 'OakRearStile';
+  rearStileMesh.castShadow = true;
+  rearStileMesh.receiveShadow = true;
+  group.add(rearStileMesh);
+
+  // 1B. Mid-Depth Mortise Floor & Forend Rebate Wall (z: -0.250 .. -0.224)
+  // Extends flush to OAK_OUTER_MAX_X above/below forend, stepped cleanly back to OAK_REBATE_X behind the forend!
+  const rebateBackPts = ensureCCW([
+    new THREE.Vector2(OAK_OUTER_MIN_X + 0.018, OAK_OUTER_MIN_Y),
+    new THREE.Vector2(OAK_OUTER_MAX_X, OAK_OUTER_MIN_Y),
+    new THREE.Vector2(OAK_OUTER_MAX_X, OAK_REBATE_MIN_Y),
+    new THREE.Vector2(OAK_REBATE_X, OAK_REBATE_MIN_Y),
+    new THREE.Vector2(OAK_REBATE_X, OAK_REBATE_MAX_Y),
+    new THREE.Vector2(OAK_OUTER_MAX_X, OAK_REBATE_MAX_Y),
+    new THREE.Vector2(OAK_OUTER_MAX_X, OAK_OUTER_MAX_Y),
+    new THREE.Vector2(OAK_OUTER_MIN_X + 0.018, OAK_OUTER_MAX_Y),
+    new THREE.Vector2(OAK_OUTER_MIN_X, OAK_OUTER_MAX_Y - 0.018),
+    new THREE.Vector2(OAK_OUTER_MIN_X, OAK_OUTER_MIN_Y + 0.018),
+  ]);
+  const rebateBackGeo = buildOneSidedBevelPrism(rebateBackPts, OAK_REBATE_Z_BACK, caseBackZ, 0, 0);
+  disposables.push(rebateBackGeo);
+  const rebateBackMesh = new THREE.Mesh(rebateBackGeo, materials.charredOak);
+  rebateBackMesh.name = 'OakMortiseFloor';
+  rebateBackMesh.castShadow = true;
+  rebateBackMesh.receiveShadow = true;
+  group.add(rebateBackMesh);
+
+  // 1C. Front Cutaway Surround with Chiseled Mortise Pocket & Flush Top/Bottom Forend Shoulders (z: -0.224 .. +0.252)
+  // Razor-flat at z = -0.224 (zero seam!) and crisply chamfered on exterior front cutaway face (+Z)!
+  const cFramePts = ensureCCW([
+    new THREE.Vector2(OAK_OUTER_MIN_X + 0.018, OAK_OUTER_MIN_Y),
+    new THREE.Vector2(OAK_OUTER_MAX_X, OAK_OUTER_MIN_Y),
+    new THREE.Vector2(OAK_OUTER_MAX_X, OAK_REBATE_MIN_Y),
+    new THREE.Vector2(OAK_REBATE_X, OAK_REBATE_MIN_Y),
+    new THREE.Vector2(OAK_REBATE_X, pocketMinY),
+    new THREE.Vector2(pocketMinX + 0.02, pocketMinY),
+    new THREE.Vector2(pocketMinX, pocketMinY + 0.02),
+    new THREE.Vector2(pocketMinX, pocketMaxY - 0.02),
+    new THREE.Vector2(pocketMinX + 0.02, pocketMaxY),
+    new THREE.Vector2(OAK_REBATE_X, pocketMaxY),
+    new THREE.Vector2(OAK_REBATE_X, OAK_REBATE_MAX_Y),
+    new THREE.Vector2(OAK_OUTER_MAX_X, OAK_REBATE_MAX_Y),
+    new THREE.Vector2(OAK_OUTER_MAX_X, OAK_OUTER_MAX_Y),
+    new THREE.Vector2(OAK_OUTER_MIN_X + 0.018, OAK_OUTER_MAX_Y),
+    new THREE.Vector2(OAK_OUTER_MIN_X, OAK_OUTER_MAX_Y - 0.018),
+    new THREE.Vector2(OAK_OUTER_MIN_X, OAK_OUTER_MIN_Y + 0.018),
+  ]);
+  const cFrameGeo = buildOneSidedBevelPrism(cFramePts, caseBackZ, OAK_Z_FRONT, 0, 0.015);
+  disposables.push(cFrameGeo);
+  const cFrameMesh = new THREE.Mesh(cFrameGeo, materials.charredOak);
+  cFrameMesh.name = 'OakCutawayFrame';
+  cFrameMesh.castShadow = true;
+  cFrameMesh.receiveShadow = true;
+  group.add(cFrameMesh);
 
   return {
     group,
@@ -281,7 +588,7 @@ export function buildOakSpecimenBlock(materials: BoltMaterials): OakSpecimenAsse
 }
 
 // =============================================================================
-// 2. Mortised Satin-Brass Forend Faceplate & Countersunk Slotted Screws
+// 2. Mortised Satin-Brass Forend Faceplate & Countersunk Slotted Wood-Screws
 // =============================================================================
 
 export interface ForendAssembly {
@@ -289,43 +596,64 @@ export interface ForendAssembly {
   dispose: () => void;
 }
 
+export const FOREND_BEVEL = 0.004;
+export const FOREND_MIN_Y = -0.764;
+export const FOREND_MAX_Y = 0.784;
+export const FOREND_HALF_Z = 0.246;
+export const FOREND_OUTER_FACE_X = FOREND_X + FOREND_THICKNESS + 0.003; // +1.008 (flush with oak!)
+export const FOREND_SLOT_HALF_Y = 0.174; // clears deadbolt head (+/- 0.164) by 0.010 top & bottom
+export const FOREND_SLOT_HALF_Z = BOLT_HEAD_Z_HALF + 0.01; // +/- 0.178 (clears deadbolt +/- 0.168 by 0.010)
+
 export function buildForendAssembly(materials: BoltMaterials): ForendAssembly {
   const group = new THREE.Group();
   group.name = 'ForendBrassAssembly';
   const disposables: THREE.BufferGeometry[] = [];
 
-  // Built in local XY (where local X -> world -Z, local Y -> world Y, extrude +Z -> world +X)
-  // Forend spans world Z in [-0.245, +0.245], world Y in [-0.76, +0.78]
-  const halfZ = 0.245;
-  const minY = -0.76;
-  const maxY = 0.78;
+  // Built in local XY (local +X -> world -Z, local +Y -> world +Y, extrude +Z -> world +X)
+  // Inset outer XY by FOREND_BEVEL so total beveled dimensions match FOREND_HALF_Z / FOREND_MIN_Y..MAX_Y exactly!
+  const halfZ = FOREND_HALF_Z - FOREND_BEVEL;
+  const minY = FOREND_MIN_Y + FOREND_BEVEL;
+  const maxY = FOREND_MAX_Y - FOREND_BEVEL;
 
-  const outerPts = makeRoundedRectPts(-halfZ, minY, halfZ, maxY, 0.038, 6);
+  const outerPts = makeRoundedRectPts(-halfZ, minY, halfZ, maxY, 0.022, 6);
   const plateShape = new THREE.Shape(outerPts);
 
-  // Precision rectangular through-slot matching the blued-steel deadbolt head (+0.008 clearance)
-  const slotHalfZ = BOLT_HEAD_Z_HALF + 0.01;
-  const slotMinY = STUMP_Y - 0.178;
-  const slotMaxY = STUMP_Y + 0.178;
+  // Precision rectangular through-slot expanded outward by FOREND_BEVEL so actual beveled opening
+  // equals exact FOREND_SLOT_HALF_Z x FOREND_SLOT_HALF_Y (0.010 uniform clearance around deadbolt!)
+  const slotHalfZ = FOREND_SLOT_HALF_Z + FOREND_BEVEL;
+  const slotMinY = STUMP_Y - FOREND_SLOT_HALF_Y - FOREND_BEVEL;
+  const slotMaxY = STUMP_Y + FOREND_SLOT_HALF_Y + FOREND_BEVEL;
   const slotHolePts = ensureCW([
     new THREE.Vector2(-slotHalfZ, slotMinY),
     new THREE.Vector2(slotHalfZ, slotMinY),
     new THREE.Vector2(slotHalfZ, slotMaxY),
     new THREE.Vector2(-slotHalfZ, slotMaxY),
   ]);
-  const slotHole = new THREE.Path(slotHolePts);
-  plateShape.holes.push(slotHole);
+  plateShape.holes.push(new THREE.Path(slotHolePts));
 
-  const plateGeo = new THREE.ExtrudeGeometry(plateShape, {
-    depth: FOREND_THICKNESS,
+  // Punch two real countersunk circular screw holes directly in the faceplate so screw slots are crisp & hollow!
+  const screwRadius = 0.054;
+  const screwPositions: Array<[number, number]> = [
+    [0.678, 0.54], // top screw rotated +31 deg
+    [-0.658, -0.80], // bottom screw rotated -46 deg
+  ];
+  for (const [sy] of screwPositions) {
+    plateShape.holes.push(makeCircleHole(0, sy, screwRadius + FOREND_BEVEL + 0.001, 28));
+  }
+
+  // Exact thickness from x = FOREND_X (0.940) to x = FOREND_OUTER_FACE_X (1.008) including 2 * FOREND_BEVEL
+  const coreDepth = FOREND_OUTER_FACE_X - FOREND_X - FOREND_BEVEL * 2;
+  const plateRaw = new THREE.ExtrudeGeometry(plateShape, {
+    depth: coreDepth,
     bevelEnabled: true,
-    bevelThickness: 0.008,
-    bevelSize: 0.008,
+    bevelThickness: FOREND_BEVEL,
+    bevelSize: FOREND_BEVEL,
     bevelSegments: 2,
   });
-  // Rotate +PI/2 around Y maps local +Z -> world +X, local +X -> world -Z
+  // Apply flat-cap machined normals BEFORE rotating Y so the brass forend front/back faces stay 100% planar!
+  const plateGeo = applyMachinedNormals(plateRaw);
   plateGeo.rotateY(Math.PI / 2);
-  plateGeo.translate(FOREND_X, 0, 0);
+  plateGeo.translate(FOREND_X + FOREND_BEVEL, 0, 0);
   disposables.push(plateGeo);
 
   const plateMesh = new THREE.Mesh(plateGeo, materials.forendBrass);
@@ -334,16 +662,20 @@ export function buildForendAssembly(materials: BoltMaterials): ForendAssembly {
   plateMesh.receiveShadow = true;
   group.add(plateMesh);
 
-  // Two countersunk slotted brass wood-screws seated cleanly top & bottom
-  const screwPositions: Array<[number, number]> = [
-    [0.675, 0.56], // top screw rotated +32 deg
-    [-0.655, -0.82], // bottom screw rotated -47 deg
-  ];
+  // Two countersunk slotted brass wood-screws seated flush inside their machined holes!
   for (const [sy, rotAngle] of screwPositions) {
-    const screw = buildSlottedBrassScrew(0.056, 0.024, 0.015, 0.013, materials.forendBrass, disposables);
+    const screw = buildSlottedBrassScrew(
+      screwRadius,
+      0.032,
+      0.015,
+      0.014,
+      materials.forendBrass,
+      disposables
+    );
     screw.rotation.y = Math.PI / 2;
     screw.rotation.x = rotAngle;
-    screw.position.set(FOREND_X + FOREND_THICKNESS + 0.011, sy, 0);
+    // Outer face of screw lobes sits cleanly at FOREND_OUTER_FACE_X + 0.0015 (flush countersunk!)
+    screw.position.set(FOREND_OUTER_FACE_X + 0.0015, sy, 0);
     group.add(screw);
   }
 
@@ -370,22 +702,31 @@ export function buildLockCaseAssembly(materials: BoltMaterials): LockCaseAssembl
   const disposables: THREE.BufferGeometry[] = [];
 
   const outerMinX = CASE_INNER_MIN_X - 0.04; // -0.84
-  const outerMaxX = FOREND_X; // +0.94
+  const outerMaxX = FOREND_X - 0.001; // +0.939 (cleanly meets forend backplate at 0.940, zero overlap!)
   const outerMinY = CASE_INNER_MIN_Y - 0.035; // -0.60
   const outerMaxY = CASE_INNER_MAX_Y + 0.035; // +0.62
 
-  // 3A. Gunmetal Lock Case Backplate (z: -0.22 .. -0.18)
+  // 3A. Gunmetal Lock Case Backplate (z: -0.224 .. -0.180)
+  const backBevel = 0.004;
   const backShape = new THREE.Shape(
-    makeRoundedRectPts(outerMinX, outerMinY, outerMaxX, outerMaxY, 0.02, 4)
+    makeRoundedRectPts(
+      outerMinX + backBevel,
+      outerMinY + backBevel,
+      outerMaxX - backBevel,
+      outerMaxY - backBevel,
+      0.018,
+      4
+    )
   );
-  const backGeo = new THREE.ExtrudeGeometry(backShape, {
+  const backRaw = new THREE.ExtrudeGeometry(backShape, {
     depth: 0.036,
     bevelEnabled: true,
-    bevelThickness: 0.004,
-    bevelSize: 0.004,
+    bevelThickness: backBevel,
+    bevelSize: backBevel,
     bevelSegments: 2,
   });
-  backGeo.translate(0, 0, -0.22);
+  backRaw.translate(0, 0, -0.220);
+  const backGeo = applyMachinedNormals(backRaw);
   disposables.push(backGeo);
   const backMesh = new THREE.Mesh(backGeo, materials.gunmetalCase);
   backMesh.name = 'LockCaseBackplate';
@@ -393,7 +734,7 @@ export function buildLockCaseAssembly(materials: BoltMaterials): LockCaseAssembl
   backMesh.receiveShadow = true;
   group.add(backMesh);
 
-  // 3B. Perimeter Steel Case Walls (top, bottom, rear left; z: -0.180 .. +0.188, cleanly abutted)
+  // 3B. Perimeter Steel Case Walls (top, bottom, rear left; z: -0.180 .. +0.188)
   const wallDepth = 0.360;
   const wallPts = ensureCCW([
     new THREE.Vector2(outerMinX, outerMinY),
@@ -405,14 +746,15 @@ export function buildLockCaseAssembly(materials: BoltMaterials): LockCaseAssembl
     new THREE.Vector2(outerMaxX, outerMaxY),
     new THREE.Vector2(outerMinX, outerMaxY),
   ]);
-  const wallGeo = new THREE.ExtrudeGeometry(new THREE.Shape(wallPts), {
+  const wallRaw = new THREE.ExtrudeGeometry(new THREE.Shape(wallPts), {
     depth: wallDepth,
     bevelEnabled: true,
     bevelThickness: 0.004,
     bevelSize: 0.004,
     bevelSegments: 2,
   });
-  wallGeo.translate(0, 0, -0.176);
+  wallRaw.translate(0, 0, -0.176);
+  const wallGeo = applyMachinedNormals(wallRaw);
   disposables.push(wallGeo);
   const wallMesh = new THREE.Mesh(wallGeo, materials.gunmetalCase);
   wallMesh.name = 'LockCaseWalls';
@@ -420,12 +762,13 @@ export function buildLockCaseAssembly(materials: BoltMaterials): LockCaseAssembl
   wallMesh.receiveShadow = true;
   group.add(wallMesh);
 
-  // Right inner throat walls strictly inside CASE_INNER_MIN_Y..CASE_INNER_MAX_Y (zero overlap with case walls)
-  const throatW = FOREND_X - CASE_INNER_MAX_X;
-  const throatCenterX = (CASE_INNER_MAX_X + FOREND_X) * 0.5;
-  const throatTopH = Math.max(0.02, CASE_INNER_MAX_Y - (STUMP_Y + 0.178));
+  // Right inner throat walls strictly inside CASE_INNER_MIN_Y..CASE_INNER_MAX_Y (clears deadbolt +/- 0.176)
+  const throatW = outerMaxX - CASE_INNER_MAX_X;
+  const throatCenterX = (CASE_INNER_MAX_X + outerMaxX) * 0.5;
+  const throatSlotHalfY = FOREND_SLOT_HALF_Y + 0.004;
+  const throatTopH = Math.max(0.02, CASE_INNER_MAX_Y - (STUMP_Y + throatSlotHalfY));
   const throatGeoTop = new THREE.BoxGeometry(throatW, throatTopH, wallDepth);
-  throatGeoTop.translate(throatCenterX, STUMP_Y + 0.178 + throatTopH * 0.5, 0.004);
+  throatGeoTop.translate(throatCenterX, STUMP_Y + throatSlotHalfY + throatTopH * 0.5, 0.004);
   disposables.push(throatGeoTop);
   const throatTop = new THREE.Mesh(throatGeoTop, materials.gunmetalCase);
   throatTop.name = 'CaseThroatTop';
@@ -433,7 +776,7 @@ export function buildLockCaseAssembly(materials: BoltMaterials): LockCaseAssembl
   throatTop.receiveShadow = true;
   group.add(throatTop);
 
-  const throatBotH = Math.max(0.02, STUMP_Y - 0.178 - CASE_INNER_MIN_Y);
+  const throatBotH = Math.max(0.02, STUMP_Y - throatSlotHalfY - CASE_INNER_MIN_Y);
   const throatGeoBot = new THREE.BoxGeometry(throatW, throatBotH, wallDepth);
   throatGeoBot.translate(throatCenterX, CASE_INNER_MIN_Y + throatBotH * 0.5, 0.004);
   disposables.push(throatGeoBot);
@@ -444,19 +787,26 @@ export function buildLockCaseAssembly(materials: BoltMaterials): LockCaseAssembl
   group.add(throatBot);
 
   // 3C. Skeletonized Museum-Cutaway Front Inspection Rim (z: +0.188 .. +0.220)
-  // Frames the outer steel case perimeter cleanly while keeping the entire lever pack,
-  // bolt stump, talon, pivot post, and phosphor-bronze springs 100% open to inspection!
-  const bezelOuter = makeRoundedRectPts(outerMinX, outerMinY, outerMaxX, outerMaxY, 0.02, 4);
+  // Integrates the lower keyhole mounting pedestal directly into the rim (zero coplanar bridge overlap!)
+  // and punches 4 real countersunk circular holes for the corner brass cover screws.
+  const rimBevel = 0.004;
+  const bezelOuter = makeRoundedRectPts(
+    outerMinX + rimBevel,
+    outerMinY + rimBevel,
+    outerMaxX - rimBevel,
+    outerMaxY - rimBevel,
+    0.018,
+    4
+  );
   const bezelShape = new THREE.Shape(bezelOuter);
 
-  // Wide museum-cutaway viewing window cutout (leaves subtle corner tabs & bottom keyhole bridge)
   const winHolePts = ensureCW([
     new THREE.Vector2(-0.74, -0.49),
     new THREE.Vector2(-0.18, -0.49),
-    new THREE.Vector2(-0.14, -0.43),
-    new THREE.Vector2(-0.14, -0.35),
-    new THREE.Vector2(0.22, -0.35),
-    new THREE.Vector2(0.22, -0.43),
+    new THREE.Vector2(-0.13, -0.42),
+    new THREE.Vector2(-0.08, -0.325),
+    new THREE.Vector2(0.16, -0.325),
+    new THREE.Vector2(0.21, -0.42),
     new THREE.Vector2(0.26, -0.49),
     new THREE.Vector2(0.84, -0.49),
     new THREE.Vector2(0.84, 0.51),
@@ -464,14 +814,26 @@ export function buildLockCaseAssembly(materials: BoltMaterials): LockCaseAssembl
   ]);
   bezelShape.holes.push(new THREE.Path(winHolePts));
 
-  const bezelGeo = new THREE.ExtrudeGeometry(bezelShape, {
+  const cornerCoords: Array<[number, number, number]> = [
+    [-0.785, 0.555, 0.42],
+    [-0.785, -0.535, -0.68],
+    [0.885, 0.555, 1.15],
+    [0.885, -0.535, -0.25],
+  ];
+  const cornerScrewR = 0.028;
+  for (const [cx, cy] of cornerCoords) {
+    bezelShape.holes.push(makeCircleHole(cx, cy, cornerScrewR + rimBevel + 0.001, 24));
+  }
+
+  const bezelRaw = new THREE.ExtrudeGeometry(bezelShape, {
     depth: 0.024,
     bevelEnabled: true,
-    bevelThickness: 0.004,
-    bevelSize: 0.004,
+    bevelThickness: rimBevel,
+    bevelSize: rimBevel,
     bevelSegments: 2,
   });
-  bezelGeo.translate(0, 0, 0.192);
+  bezelRaw.translate(0, 0, 0.192);
+  const bezelGeo = applyMachinedNormals(bezelRaw);
   disposables.push(bezelGeo);
   const bezelMesh = new THREE.Mesh(bezelGeo, materials.gunmetalCase);
   bezelMesh.name = 'CutawayFrontRim';
@@ -479,38 +841,51 @@ export function buildLockCaseAssembly(materials: BoltMaterials): LockCaseAssembl
   bezelMesh.receiveShadow = true;
   group.add(bezelMesh);
 
-  // 3D. Recessed Satin-Brass Keyhole Escutcheon Ring (mounted proud at z: +0.197..+0.237, zero z-fighting)
-  // Classic keyhole collar with warded downward slot
+  // 4 Corner Case Cover Screws seated flush inside their punched countersunk rim holes!
+  for (const [cx, cy, ang] of cornerCoords) {
+    const screw = buildSlottedBrassScrew(
+      cornerScrewR,
+      0.018,
+      0.0085,
+      0.008,
+      materials.forendBrass,
+      disposables
+    );
+    screw.rotation.z = ang;
+    screw.position.set(cx, cy, 0.221);
+    group.add(screw);
+  }
+
+  // 3D. Recessed Satin-Brass Keyhole Escutcheon Ring (mounted cleanly on pedestal at z: +0.200..+0.238)
   const escOuter: THREE.Vector2[] = [];
-  const escSegs = 32;
+  const escSegs = 40;
   for (let i = 0; i < escSegs; i++) {
     const a = (i / escSegs) * Math.PI * 2;
-    escOuter.push(new THREE.Vector2(Math.cos(a) * 0.118, Math.sin(a) * 0.118));
+    escOuter.push(new THREE.Vector2(Math.cos(a) * 0.114, Math.sin(a) * 0.114));
   }
   const escShape = new THREE.Shape(ensureCCW(escOuter));
-  // Keyhole ward aperture: round barrel bore + downward rectangular key-bit slot
   const khPts: THREE.Vector2[] = [];
-  const barrelR = KEY_SHAFT_RADIUS + 0.014;
-  const slotHalfW = 0.022;
+  const barrelR = KEY_SHAFT_RADIUS + 0.016;
+  const slotHalfW = 0.024;
   const slotAngle = Math.asin(slotHalfW / barrelR);
-  // Arc from bottom-right (-PI/2 + slotAngle) CCW around top to bottom-left (3PI/2 - slotAngle)
-  const khArcSegs = 22;
+  const khArcSegs = 26;
   for (let s = 0; s <= khArcSegs; s++) {
     const a = -Math.PI / 2 + slotAngle + (Math.PI * 2 - 2 * slotAngle) * (s / khArcSegs);
     khPts.push(new THREE.Vector2(Math.cos(a) * barrelR, Math.sin(a) * barrelR));
   }
-  khPts.push(new THREE.Vector2(-slotHalfW, -0.102));
-  khPts.push(new THREE.Vector2(slotHalfW, -0.102));
+  khPts.push(new THREE.Vector2(-slotHalfW, -0.100));
+  khPts.push(new THREE.Vector2(slotHalfW, -0.100));
   escShape.holes.push(new THREE.Path(ensureCW(khPts)));
 
-  const escGeo = new THREE.ExtrudeGeometry(escShape, {
-    depth: 0.030,
+  const escRaw = new THREE.ExtrudeGeometry(escShape, {
+    depth: 0.028,
     bevelEnabled: true,
     bevelThickness: 0.005,
     bevelSize: 0.005,
     bevelSegments: 2,
   });
-  escGeo.translate(KEY_X, KEY_Y, 0.202);
+  escRaw.translate(KEY_X, KEY_Y, 0.205);
+  const escGeo = applyMachinedNormals(escRaw);
   disposables.push(escGeo);
   const escMesh = new THREE.Mesh(escGeo, materials.forendBrass);
   escMesh.name = 'KeyholeEscutcheon';
@@ -518,33 +893,47 @@ export function buildLockCaseAssembly(materials: BoltMaterials): LockCaseAssembl
   escMesh.receiveShadow = true;
   group.add(escMesh);
 
-  // Small gunmetal mounting bridge tying brass keyhole escutcheon cleanly to lower cutaway pedestal
-  const bridgeGeo = new THREE.BoxGeometry(0.16, 0.075, 0.018);
-  bridgeGeo.translate(KEY_X, -0.365, 0.197);
-  disposables.push(bridgeGeo);
-  const bridgeMesh = new THREE.Mesh(bridgeGeo, materials.gunmetalCase);
-  bridgeMesh.name = 'KeyholeBridge';
-  bridgeMesh.castShadow = true;
-  bridgeMesh.receiveShadow = true;
-  group.add(bridgeMesh);
-
-  // 3E. Rear Bronze Bolt Wear-Rail (horizontal machined slide pad behind bolt tail)
-  const railGeo = new THREE.BoxGeometry(1.52, 0.14, 0.012);
-  railGeo.translate(0.06, STUMP_Y, -0.174);
+  // 3E. Beveled Rear Brass Bolt Wear-Rail + 2 Turned Steel Rivets (z: -0.180 .. -0.168)
+  const railShape = new THREE.Shape(makeRoundedRectPts(-0.695, STUMP_Y - 0.064, 0.815, STUMP_Y + 0.064, 0.016, 4));
+  const railRaw = new THREE.ExtrudeGeometry(railShape, {
+    depth: 0.008,
+    bevelEnabled: true,
+    bevelThickness: 0.002,
+    bevelSize: 0.002,
+    bevelSegments: 1,
+  });
+  railRaw.translate(0, 0, -0.178);
+  const railGeo = applyMachinedNormals(railRaw);
   disposables.push(railGeo);
   const railMesh = new THREE.Mesh(railGeo, materials.forendBrass);
   railMesh.name = 'RearWearRail';
   railMesh.receiveShadow = true;
   group.add(railMesh);
 
-  // 3F. Hardened Steel Lever Pivot Post + 4 Satin-Brass Inter-Lever Spacer Washers + Front Nut
+  for (const rx of [-0.625, 0.745]) {
+    const rPinGeo = makeClosedLatheZ(
+      [
+        [-0.174, 0.016],
+        [-0.169, 0.016],
+        [-0.166, 0.011],
+      ],
+      18
+    );
+    rPinGeo.translate(rx, STUMP_Y, 0);
+    disposables.push(rPinGeo);
+    const rPinMesh = new THREE.Mesh(rPinGeo, materials.hardenedSteel);
+    rPinMesh.name = 'WearRailRivet';
+    group.add(rPinMesh);
+  }
+
+  // 3F. Hardened Steel Lever Pivot Post + Rear Thrust Bushing + 4 Inter-Lever Brass Spacer Washers + Front Collar
   const pivotPinGeo = makeClosedLatheZ([
     [-0.182, 0.056],
-    [0.158, 0.056],
-    [0.162, 0.072],
-    [0.186, 0.072],
-    [0.194, 0.052],
-    [0.198, 0.036],
+    [0.164, 0.056],
+    [0.167, 0.074],
+    [0.188, 0.074],
+    [0.195, 0.054],
+    [0.199, 0.036],
   ]);
   pivotPinGeo.translate(PIVOT_X, PIVOT_Y, 0);
   disposables.push(pivotPinGeo);
@@ -554,25 +943,46 @@ export function buildLockCaseAssembly(materials: BoltMaterials): LockCaseAssembl
   pivotMesh.receiveShadow = true;
   group.add(pivotMesh);
 
-  // Rear thrust washer + 4 inter-lever brass spacer washers (visible in 3/4 parallax!)
   const washerOuterR = 0.098;
-  const washerInnerR = 0.057;
+  const washerInnerR = 0.0575;
   const washerShape = new THREE.Shape();
   washerShape.absarc(0, 0, washerOuterR, 0, Math.PI * 2, false);
-  washerShape.holes.push(makeCircleHole(0, 0, washerInnerR, 24));
+  washerShape.holes.push(makeCircleHole(0, 0, washerInnerR, 28));
 
+  // Rear solid brass thrust stand-off bushing supporting Lever 0 off the case backplate (z: -0.180 .. -0.054)
+  const rearBushingGeo = makeClosedLatheZ(
+    [
+      [-0.180, 0.057],
+      [-0.180, 0.098],
+      [-0.058, 0.098],
+      [-0.054, 0.092],
+      [-0.054, 0.057],
+    ],
+    28,
+    false
+  );
+  rearBushingGeo.translate(PIVOT_X, PIVOT_Y, 0);
+  disposables.push(rearBushingGeo);
+  const rearBushingMesh = new THREE.Mesh(rearBushingGeo, materials.forendBrass);
+  rearBushingMesh.name = 'PivotRearThrustBushing';
+  rearBushingMesh.castShadow = true;
+  rearBushingMesh.receiveShadow = true;
+  group.add(rearBushingMesh);
+
+  // 4 Precision Inter-Lever Brass Spacer Washers (exact 0.0018 daylight gap per side, zero overlap)
   for (let w = 0; w < LEVER_COUNT - 1; w++) {
     const zMid = (getLeverZ(w) + getLeverZ(w + 1)) * 0.5;
     const wThickness = 0.014;
-    const wGeo = new THREE.ExtrudeGeometry(washerShape, {
+    const wRaw = new THREE.ExtrudeGeometry(washerShape, {
       depth: wThickness,
       bevelEnabled: true,
       bevelThickness: 0.0012,
       bevelSize: 0.0012,
       bevelSegments: 1,
-      curveSegments: 24,
+      curveSegments: 28,
     });
-    wGeo.translate(PIVOT_X, PIVOT_Y, zMid - wThickness * 0.5);
+    wRaw.translate(PIVOT_X, PIVOT_Y, zMid - wThickness * 0.5);
+    const wGeo = applyMachinedNormals(wRaw);
     disposables.push(wGeo);
     const wMesh = new THREE.Mesh(wGeo, materials.forendBrass);
     wMesh.name = `LeverSpacerWasher_${w}`;
@@ -581,16 +991,17 @@ export function buildLockCaseAssembly(materials: BoltMaterials): LockCaseAssembl
     group.add(wMesh);
   }
 
-  // Front chamfered brass pivot retaining collar
-  const capWasherGeo = new THREE.ExtrudeGeometry(washerShape, {
-    depth: 0.012,
+  // Front chamfered brass pivot retaining collar seated flush against Lever 4 and Pivot Post flange (z: +0.150 .. +0.164)
+  const capWasherRaw = new THREE.ExtrudeGeometry(washerShape, {
+    depth: 0.010,
     bevelEnabled: true,
     bevelThickness: 0.002,
     bevelSize: 0.002,
     bevelSegments: 2,
-    curveSegments: 24,
+    curveSegments: 28,
   });
-  capWasherGeo.translate(PIVOT_X, PIVOT_Y, getLeverZ(LEVER_COUNT - 1) + LEVER_THICKNESS * 0.5 + 0.004);
+  capWasherRaw.translate(PIVOT_X, PIVOT_Y, getLeverZ(LEVER_COUNT - 1) + LEVER_THICKNESS * 0.5 + 0.004);
+  const capWasherGeo = applyMachinedNormals(capWasherRaw);
   disposables.push(capWasherGeo);
   const capWasherMesh = new THREE.Mesh(capWasherGeo, materials.forendBrass);
   capWasherMesh.name = 'PivotFrontWasher';
@@ -598,12 +1009,13 @@ export function buildLockCaseAssembly(materials: BoltMaterials): LockCaseAssembl
   capWasherMesh.receiveShadow = true;
   group.add(capWasherMesh);
 
-  // 3G. Hardened Steel Spring Abutment Post (anchors all 5 phosphor-bronze leaf springs!)
+  // 3G. Hardened Steel Spring Abutment Post (anchors all 5 phosphor-bronze leaf spring eyes!)
   const springPostGeo = makeClosedLatheZ([
     [-0.182, 0.044],
     [0.168, 0.044],
-    [0.178, 0.054],
-    [0.190, 0.046],
+    [0.178, 0.055],
+    [0.190, 0.047],
+    [0.194, 0.032],
   ]);
   springPostGeo.translate(SPRING_POST_X, SPRING_POST_Y, 0);
   disposables.push(springPostGeo);
@@ -613,11 +1025,13 @@ export function buildLockCaseAssembly(materials: BoltMaterials): LockCaseAssembl
   springPostMesh.receiveShadow = true;
   group.add(springPostMesh);
 
-  // 3H. Lever Bottom Rest Stop Pin with Satin-Brass Sleeve (outside key sweep circle)
+  // 3H. Lever Bottom Rest Stop Pin with Machined Satin-Brass Sleeve & Chamfered Tip
   const restPinGeo = makeClosedLatheZ([
-    [-0.182, 0.032],
-    [0.162, 0.032],
-    [0.172, 0.025],
+    [-0.182, REST_PIN_RADIUS],
+    [0.154, REST_PIN_RADIUS],
+    [0.160, REST_PIN_RADIUS + 0.005],
+    [0.172, REST_PIN_RADIUS + 0.005],
+    [0.178, REST_PIN_RADIUS - 0.007],
   ]);
   restPinGeo.translate(REST_PIN_X, REST_PIN_Y, 0);
   disposables.push(restPinGeo);
@@ -627,7 +1041,7 @@ export function buildLockCaseAssembly(materials: BoltMaterials): LockCaseAssembl
   restPinMesh.receiveShadow = true;
   group.add(restPinMesh);
 
-  // 3I. Hardened Bolt-Tail Guide Pin (rides inside the horizontal guide slot of the deadbolt tail)
+  // 3I. Hardened Bolt-Tail Guide Pin (rides cleanly inside the horizontal guide slot of the deadbolt tail)
   const guidePinGeo = makeClosedLatheZ([
     [-0.182, 0.030],
     [-0.068, 0.030],
@@ -642,11 +1056,11 @@ export function buildLockCaseAssembly(materials: BoltMaterials): LockCaseAssembl
   guidePinMesh.receiveShadow = true;
   group.add(guidePinMesh);
 
-  // 3J. Hardened Key Guide Drill-Pin (projects forward from backplate into hollow key pipe)
+  // 3J. Hardened Key Guide Drill-Pin (projects forward from backplate into the hollow bore of the pipe key!)
   const drillPinGeo = makeClosedLatheZ([
-    [-0.182, 0.026],
-    [0.025, 0.026],
-    [0.040, 0.018],
+    [-0.182, 0.025],
+    [0.026, 0.025],
+    [0.042, 0.017],
   ]);
   drillPinGeo.translate(KEY_X, KEY_Y, 0);
   disposables.push(drillPinGeo);
@@ -654,21 +1068,6 @@ export function buildLockCaseAssembly(materials: BoltMaterials): LockCaseAssembl
   drillPinMesh.name = 'KeyDrillPin';
   drillPinMesh.castShadow = true;
   group.add(drillPinMesh);
-
-  // 3K. 4 Corner Case Pillars with Slotted Brass Cover Screws
-  const cornerCoords: Array<[number, number, number]> = [
-    [-0.785, 0.555, 0.42],
-    [-0.785, -0.535, -0.68],
-    [0.885, 0.555, 1.15],
-    [0.885, -0.535, -0.25],
-  ];
-  for (let c = 0; c < cornerCoords.length; c++) {
-    const [cx, cy, ang] = cornerCoords[c];
-    const screw = buildSlottedBrassScrew(0.028, 0.014, 0.008, 0.007, materials.forendBrass, disposables);
-    screw.rotation.z = ang;
-    screw.position.set(cx, cy, 0.224);
-    group.add(screw);
-  }
 
   return {
     group,
@@ -679,7 +1078,7 @@ export function buildLockCaseAssembly(materials: BoltMaterials): LockCaseAssembl
 }
 
 // =============================================================================
-// 4. Heavy Square Blued-Steel Deadbolt, Slotted Tail, U-Talon & Hardened Stump
+// 4. Heavy Square Blued-Steel Deadbolt, Slotted Tail, Flared U-Talon & Hardened Stump
 // =============================================================================
 
 export interface DeadboltAssembly {
@@ -688,6 +1087,9 @@ export interface DeadboltAssembly {
   dispose: () => void;
 }
 
+export const BOLT_HEAD_HALF_Y = 0.164; // Exact outer half-height INCLUDING bevel (clears forend 0.174 by 0.010!)
+export const BOLT_TALON_JAW_BOTTOM_Y = 0.024; // Clears rotating KeyTalonDriveBit across full 360° with zero clip!
+
 export function buildDeadboltAssembly(materials: BoltMaterials): DeadboltAssembly {
   const group = new THREE.Group();
   group.name = 'DeadboltAssembly';
@@ -695,31 +1097,33 @@ export function buildDeadboltAssembly(materials: BoltMaterials): DeadboltAssembl
   const hitMeshes: THREE.Mesh[] = [];
 
   // 4A. Massive Chamfered Square Blued-Steel Deadbolt Head
-  // Local coords at boltThrow01 = 0 (unlocked): x in [+0.51, +1.045], y in [STUMP_Y - 0.168, STUMP_Y + 0.168]
-  const headMinX = 0.51;
-  const headMaxX = 1.045;
-  const headMinY = STUMP_Y - 0.164;
-  const headMaxY = STUMP_Y + 0.164;
-  const headDepth = BOLT_HEAD_Z_HALF * 2 - 0.024; // plus 2 * 0.012 bevel = exact BOLT_HEAD_Z_HALF * 2
+  // Inset shape by headBevel so outer beveled extents are EXACTLY [0.510, 1.022] x [STUMP_Y ± 0.164] x [±0.168]!
+  const headBevel = 0.012;
+  const headMinX = 0.510 + headBevel;
+  const headMaxX = 1.022 - headBevel; // At unlocked (0), nose protrudes 0.014 chamfer cleanly past forend 1.008; locked -> 1.362!
+  const headMinY = STUMP_Y - BOLT_HEAD_HALF_Y + headBevel;
+  const headMaxY = STUMP_Y + BOLT_HEAD_HALF_Y - headBevel;
+  const headDepth = BOLT_HEAD_Z_HALF * 2 - headBevel * 2;
 
   const headPts = ensureCCW([
-    new THREE.Vector2(headMinX, headMinY + 0.012),
-    new THREE.Vector2(headMinX + 0.012, headMinY),
-    new THREE.Vector2(headMaxX - 0.024, headMinY),
-    new THREE.Vector2(headMaxX, headMinY + 0.024),
-    new THREE.Vector2(headMaxX, headMaxY - 0.024),
-    new THREE.Vector2(headMaxX - 0.024, headMaxY),
-    new THREE.Vector2(headMinX + 0.012, headMaxY),
-    new THREE.Vector2(headMinX, headMaxY - 0.012),
+    new THREE.Vector2(headMinX, headMinY + 0.010),
+    new THREE.Vector2(headMinX + 0.010, headMinY),
+    new THREE.Vector2(headMaxX - 0.018, headMinY),
+    new THREE.Vector2(headMaxX, headMinY + 0.018),
+    new THREE.Vector2(headMaxX, headMaxY - 0.018),
+    new THREE.Vector2(headMaxX - 0.018, headMaxY),
+    new THREE.Vector2(headMinX + 0.010, headMaxY),
+    new THREE.Vector2(headMinX, headMaxY - 0.010),
   ]);
-  const headGeo = new THREE.ExtrudeGeometry(new THREE.Shape(headPts), {
+  const headRaw = new THREE.ExtrudeGeometry(new THREE.Shape(headPts), {
     depth: headDepth,
     bevelEnabled: true,
-    bevelThickness: 0.012,
-    bevelSize: 0.012,
+    bevelThickness: headBevel,
+    bevelSize: headBevel,
     bevelSegments: 2,
   });
-  headGeo.translate(0, 0, -headDepth * 0.5);
+  headRaw.translate(0, 0, -headDepth * 0.5);
+  const headGeo = applyMachinedNormals(headRaw);
   disposables.push(headGeo);
   const headMesh = new THREE.Mesh(headGeo, materials.bluedSteelBolt);
   headMesh.name = 'DeadboltHead';
@@ -728,75 +1132,87 @@ export function buildDeadboltAssembly(materials: BoltMaterials): DeadboltAssembl
   group.add(headMesh);
   hitMeshes.push(headMesh);
 
-  // Subtle hardened anti-saw steel roller inlays visible on the deadbolt front nose face
-  for (const dy of [-0.075, 0.075]) {
-    const rollerGeo = new THREE.CylinderGeometry(0.022, 0.022, 0.24, 18);
-    rollerGeo.rotateX(Math.PI / 2);
-    rollerGeo.translate(headMaxX - 0.008, STUMP_Y + dy, 0);
-    disposables.push(rollerGeo);
-    const rollerMesh = new THREE.Mesh(rollerGeo, materials.hardenedSteel);
-    rollerMesh.name = 'AntiSawRollerPin';
-    rollerMesh.castShadow = true;
-    group.add(rollerMesh);
+  // Two flush-machined hardened anti-saw steel drill-pin end plugs seated cleanly on the deadbolt nose face
+  const noseFaceX = headMaxX + headBevel;
+  for (const dy of [-0.072, 0.072]) {
+    const plugGeo = makeClosedLatheZ(
+      [
+        [-0.008, 0.023],
+        [0.001, 0.023],
+        [0.004, 0.018],
+      ],
+      22
+    );
+    plugGeo.rotateY(Math.PI / 2);
+    plugGeo.translate(noseFaceX, STUMP_Y + dy, 0);
+    disposables.push(plugGeo);
+    const plugMesh = new THREE.Mesh(plugGeo, materials.hardenedSteel);
+    plugMesh.name = 'AntiSawDrillPlug';
+    plugMesh.castShadow = true;
+    group.add(plugMesh);
   }
 
-  // 4B. Machined Blued-Steel Bolt Tail (Shank) with Horizontal Guide Slot & U-Shaped Bolt Talon
+  // 4B. Machined Blued-Steel Bolt Tail (Shank) with Horizontal Guide Slot & Flared U-Shaped Bolt Talon
   // Centered cleanly in Z behind Lever 0: [BOLT_TAIL_Z_BACK, BOLT_TAIL_Z_FRONT]
-  const tailDepth = BOLT_TAIL_Z_FRONT - BOLT_TAIL_Z_BACK - 0.008;
+  const tailBevel = 0.004;
+  const tailDepth = BOLT_TAIL_Z_FRONT - BOLT_TAIL_Z_BACK - tailBevel * 2;
   const tailZMid = (BOLT_TAIL_Z_BACK + BOLT_TAIL_Z_FRONT) * 0.5;
 
   // Bolt talon U-notch centered at x_talon_local = KEY_X - BOLT_TRAVEL * 0.5 = -0.13
+  // Flared entry mouth from y = +0.024..+0.048 clears the sweeping arc of KeyTalonDriveBit with 0 clipping!
   const talonCenterX = KEY_X - 0.17; // -0.13
-  const notchHalfW = 0.048;
-  const jawW = 0.082;
-  const spineMinY = STUMP_Y - 0.085; // +0.075
-  const spineMaxY = STUMP_Y + 0.085; // +0.245
-  const jawBottomY = -0.018;
-  const notchTopY = 0.102;
+  const notchHalfW = 0.046 + tailBevel; // actual beveled inner U-wall = 0.046
+  const mouthFlareW = 0.076 + tailBevel; // wide chamfered entry mouth clears R=0.308 arc at y=0.024
+  const jawW = 0.064;
+  const spineMinY = STUMP_Y - 0.084; // +0.076
+  const spineMaxY = STUMP_Y + 0.084; // +0.244
+  const jawBottomY = BOLT_TALON_JAW_BOTTOM_Y + tailBevel; // actual beveled bottom = +0.024
+  const flareTopY = 0.048;
+  const notchTopY = 0.104 + tailBevel; // actual beveled ceiling = +0.104 (clears bit tip +0.088 by 0.016!)
 
   const tailPts = ensureCCW([
     new THREE.Vector2(-0.765, spineMinY + 0.012),
     new THREE.Vector2(-0.753, spineMinY),
-    // Left talon jaw outer edge
-    new THREE.Vector2(talonCenterX - notchHalfW - jawW - 0.02, spineMinY),
-    new THREE.Vector2(talonCenterX - notchHalfW - jawW, jawBottomY + 0.018),
-    new THREE.Vector2(talonCenterX - notchHalfW - jawW + 0.018, jawBottomY),
-    new THREE.Vector2(talonCenterX - notchHalfW - 0.012, jawBottomY),
-    // U-notch left jaw inner wall
-    new THREE.Vector2(talonCenterX - notchHalfW, jawBottomY + 0.014),
-    new THREE.Vector2(talonCenterX - notchHalfW, notchTopY - 0.014),
-    new THREE.Vector2(talonCenterX - notchHalfW + 0.014, notchTopY),
-    // U-notch ceiling & right jaw inner wall
-    new THREE.Vector2(talonCenterX + notchHalfW - 0.014, notchTopY),
-    new THREE.Vector2(talonCenterX + notchHalfW, notchTopY - 0.014),
-    new THREE.Vector2(talonCenterX + notchHalfW, jawBottomY + 0.014),
-    // Right talon jaw bottom & outer edge
-    new THREE.Vector2(talonCenterX + notchHalfW + 0.012, jawBottomY),
-    new THREE.Vector2(talonCenterX + notchHalfW + jawW - 0.018, jawBottomY),
-    new THREE.Vector2(talonCenterX + notchHalfW + jawW, jawBottomY + 0.018),
-    new THREE.Vector2(talonCenterX + notchHalfW + jawW + 0.02, spineMinY),
-    // Meet bolt head shoulder
-    new THREE.Vector2(headMinX + 0.03, spineMinY),
-    new THREE.Vector2(headMinX + 0.03, spineMaxY),
+    // Left talon jaw outer cheek & bottom shoulder
+    new THREE.Vector2(talonCenterX - mouthFlareW - jawW - 0.018, spineMinY),
+    new THREE.Vector2(talonCenterX - mouthFlareW - jawW, jawBottomY + 0.016),
+    new THREE.Vector2(talonCenterX - mouthFlareW - jawW + 0.014, jawBottomY),
+    new THREE.Vector2(talonCenterX - mouthFlareW, jawBottomY),
+    // Flared left U-notch mouth rising into vertical left jaw face
+    new THREE.Vector2(talonCenterX - notchHalfW, flareTopY),
+    new THREE.Vector2(talonCenterX - notchHalfW, notchTopY - 0.012),
+    new THREE.Vector2(talonCenterX - notchHalfW + 0.012, notchTopY),
+    // U-notch ceiling & vertical right jaw face
+    new THREE.Vector2(talonCenterX + notchHalfW - 0.012, notchTopY),
+    new THREE.Vector2(talonCenterX + notchHalfW, notchTopY - 0.012),
+    new THREE.Vector2(talonCenterX + notchHalfW, flareTopY),
+    // Flared right U-notch mouth & right talon jaw outer cheek
+    new THREE.Vector2(talonCenterX + mouthFlareW, jawBottomY),
+    new THREE.Vector2(talonCenterX + mouthFlareW + jawW - 0.014, jawBottomY),
+    new THREE.Vector2(talonCenterX + mouthFlareW + jawW, jawBottomY + 0.016),
+    new THREE.Vector2(talonCenterX + mouthFlareW + jawW + 0.018, spineMinY),
+    // Meet bolt head shoulder cleanly inside headMinX
+    new THREE.Vector2(headMinX + 0.024, spineMinY),
+    new THREE.Vector2(headMinX + 0.024, spineMaxY),
     new THREE.Vector2(-0.753, spineMaxY),
     new THREE.Vector2(-0.765, spineMaxY - 0.012),
   ]);
 
   const tailShape = new THREE.Shape(tailPts);
 
-  // Horizontal guide slot riding over fixed steel guide pin (GUIDE_PIN_X = -0.34)
-  // At boltThrow=0 pin is at local -0.34; at boltThrow=1 pin is at local -0.68.
-  const slotPts = makeRoundedRectPts(-0.718, STUMP_Y - 0.034, -0.302, STUMP_Y + 0.034, 0.032, 6);
+  // Horizontal guide slot riding cleanly over fixed steel guide pin (GUIDE_PIN_X = -0.34, r = 0.030)
+  const slotPts = makeRoundedRectPts(-0.722, STUMP_Y - 0.037, -0.298, STUMP_Y + 0.037, 0.035, 6);
   tailShape.holes.push(new THREE.Path(ensureCW(slotPts)));
 
-  const tailGeo = new THREE.ExtrudeGeometry(tailShape, {
+  const tailRaw = new THREE.ExtrudeGeometry(tailShape, {
     depth: tailDepth,
     bevelEnabled: true,
-    bevelThickness: 0.004,
-    bevelSize: 0.004,
+    bevelThickness: tailBevel,
+    bevelSize: tailBevel,
     bevelSegments: 2,
   });
-  tailGeo.translate(0, 0, tailZMid - tailDepth * 0.5);
+  tailRaw.translate(0, 0, tailZMid - tailDepth * 0.5);
+  const tailGeo = applyMachinedNormals(tailRaw);
   disposables.push(tailGeo);
   const tailMesh = new THREE.Mesh(tailGeo, materials.bluedSteelBolt);
   tailMesh.name = 'DeadboltTailAndTalon';
@@ -805,24 +1221,28 @@ export function buildDeadboltAssembly(materials: BoltMaterials): DeadboltAssembl
   group.add(tailMesh);
   hitMeshes.push(tailMesh);
 
-  // 4C. Hardened Square Steel Bolt Stump (riveted to bolt tail, projecting through ALL 5 levers!)
-  const stumpDepth = STUMP_Z_FRONT - STUMP_Z_BACK - 0.008;
+  // 4C. Hardened Square Steel Bolt Stump (inset by stumpBevel so exact outer bounds == STUMP_WIDTH x STUMP_HEIGHT!)
+  const stumpBevel = 0.004;
+  const stumpDepth = STUMP_Z_FRONT - STUMP_Z_BACK - stumpBevel * 2;
+  const stumpHalfW = STUMP_WIDTH * 0.5 - stumpBevel;
+  const stumpHalfH = STUMP_HEIGHT * 0.5 - stumpBevel;
   const stumpPts = makeRoundedRectPts(
-    STUMP_X_UNLOCKED - STUMP_WIDTH * 0.5,
-    STUMP_Y - STUMP_HEIGHT * 0.5,
-    STUMP_X_UNLOCKED + STUMP_WIDTH * 0.5,
-    STUMP_Y + STUMP_HEIGHT * 0.5,
-    0.008,
+    STUMP_X_UNLOCKED - stumpHalfW,
+    STUMP_Y - stumpHalfH,
+    STUMP_X_UNLOCKED + stumpHalfW,
+    STUMP_Y + stumpHalfH,
+    0.006,
     3
   );
-  const stumpGeo = new THREE.ExtrudeGeometry(new THREE.Shape(stumpPts), {
+  const stumpRaw = new THREE.ExtrudeGeometry(new THREE.Shape(stumpPts), {
     depth: stumpDepth,
     bevelEnabled: true,
-    bevelThickness: 0.004,
-    bevelSize: 0.004,
+    bevelThickness: stumpBevel,
+    bevelSize: stumpBevel,
     bevelSegments: 2,
   });
-  stumpGeo.translate(0, 0, STUMP_Z_BACK + 0.004);
+  stumpRaw.translate(0, 0, STUMP_Z_BACK + stumpBevel);
+  const stumpGeo = applyMachinedNormals(stumpRaw);
   disposables.push(stumpGeo);
   const stumpMesh = new THREE.Mesh(stumpGeo, materials.hardenedSteel);
   stumpMesh.name = 'BoltStump';
@@ -834,8 +1254,8 @@ export function buildDeadboltAssembly(materials: BoltMaterials): DeadboltAssembl
   // Brass peened rivet boss on front face of hardened bolt stump
   const rivetGeo = makeClosedLatheZ([
     [STUMP_Z_FRONT - 0.002, 0.022],
-    [STUMP_Z_FRONT + 0.008, 0.020],
-    [STUMP_Z_FRONT + 0.013, 0.012],
+    [STUMP_Z_FRONT + 0.007, 0.020],
+    [STUMP_Z_FRONT + 0.012, 0.012],
   ]);
   rivetGeo.translate(STUMP_X_UNLOCKED, STUMP_Y, 0);
   disposables.push(rivetGeo);
@@ -855,7 +1275,7 @@ export function buildDeadboltAssembly(materials: BoltMaterials): DeadboltAssembl
 }
 
 // =============================================================================
-// 5. Five Stacked Precision Brass Lever Tumblers (with H-Gates & Anti-Pick Serrations)
+// 5. Five Stacked Precision Brass Lever Tumblers (Concentric Chubb Bellies & Multi-Tooth Anti-Pick)
 // =============================================================================
 
 export interface LeverPackAssembly {
@@ -865,119 +1285,136 @@ export interface LeverPackAssembly {
   dispose: () => void;
 }
 
+export const LEVER_TOP_CREST_LOCAL_Y = 0.264; // Exact outer beveled top surface of all 5 levers
+
 /**
  * Constructs one precision-machined Chubb brass lever plate in lever-local coordinates
  * (pivot bore centered at local (0, 0), plate thickness centered at Z = 0).
+ *
+ * Uses `LEVER_BELLY_POLYLINES[index]` directly as the lower contour (inset by LEVER_BEVEL so the
+ * extruded beveled brass skin sits at exact physics contact coordinates!) and mills an exact
+ * perpendicular-compensated sloped H-gate with multi-tooth anti-pick false serrations on both cheeks.
  */
 export function createLeverGeometry(index: number): THREE.BufferGeometry {
   const spec = LEVER_GATE_SPECS[index];
+  const belly = LEVER_BELLY_POLYLINES[index];
 
-  // Outer lever contour (CCW):
-  // - Rounded pivot ear around (0, 0) of radius 0.125
-  // - Sculpted upper spring-cam shoulder rising toward the gating head
-  // - Solid right locking cheek & rest heel sitting on REST_PIN
-  // - Concave Chubb circular-arc key belly directly above KEY_X
-  const outerPts: THREE.Vector2[] = [];
+  // Outer contour in CCW order, inset by LEVER_BEVEL along outward normals so actual beveled outer skin
+  // lands cleanly on nominal physics dimensions (top = +0.264, heel = LEVER_HEEL_LOCAL_Y, belly = exact arc!)
+  const nominalOuter: THREE.Vector2[] = [];
 
   // Left semicircular pivot ear: angle from +PI/2 (top) around PI (left) to -PI/2 (bottom)
-  const earR = 0.122;
-  const earSegs = 14;
+  const earR = 0.124;
+  const earSegs = 16;
   for (let s = 0; s <= earSegs; s++) {
     const a = Math.PI * 0.5 + Math.PI * (s / earSegs);
-    outerPts.push(new THREE.Vector2(Math.cos(a) * earR, Math.sin(a) * earR));
+    nominalOuter.push(new THREE.Vector2(Math.cos(a) * earR, Math.sin(a) * earR));
   }
 
-  // Bottom throat leading into concave Chubb key-belly cam arch
-  outerPts.push(new THREE.Vector2(0.24, -0.132));
-  outerPts.push(new THREE.Vector2(0.36, -0.158));
-
-  // Concave key belly arch peaking at (LEVER_BELLY_LOCAL_X = 0.62, LEVER_BELLY_LOCAL_Y = -0.115)
-  const bellySegs = 12;
-  for (let s = 0; s <= bellySegs; s++) {
-    const t = s / bellySegs; // 0..1 across x in [0.43, 0.81]
-    const bx = 0.43 + t * 0.38;
-    const u = (bx - LEVER_BELLY_LOCAL_X) / 0.19; // -1..+1
-    const by = LEVER_BELLY_LOCAL_Y - 0.044 * u * u;
-    outerPts.push(new THREE.Vector2(bx, by));
+  // Exact single-source-of-truth Chubb belly polyline (entry shoulder -> concentric dwell arc -> exit -> rest heel)
+  for (let i = 0; i < belly.length; i++) {
+    nominalOuter.push(new THREE.Vector2(belly[i].x, belly[i].y));
   }
 
-  // Lower-right rest heel seated cleanly on brass rest stop pin at local (0.985, -0.163)
-  outerPts.push(new THREE.Vector2(0.89, -0.163));
-  outerPts.push(new THREE.Vector2(0.995, -0.163));
-  outerPts.push(new THREE.Vector2(1.015, -0.142));
+  // Lower-right chamfered corner & right vertical locking cheek edge (clears bolt head +0.51 -> local +1.09!)
+  const lastBellyY = belly[belly.length - 1].y;
+  nominalOuter.push(new THREE.Vector2(1.018, lastBellyY + 0.022));
+  nominalOuter.push(new THREE.Vector2(1.018, LEVER_TOP_CREST_LOCAL_Y - 0.026));
+  nominalOuter.push(new THREE.Vector2(0.992, LEVER_TOP_CREST_LOCAL_Y));
 
-  // Right vertical locking cheek edge (clears bolt head at +0.51 -> local +1.09 by 0.075!)
-  outerPts.push(new THREE.Vector2(1.015, 0.236));
-  outerPts.push(new THREE.Vector2(0.988, 0.262));
-
-  // Sculpted upper spring-cam crest with subtle locksmith assembly step per lever (0..4)
-  // so all 5 stacked brass lever plates are visibly distinct even at rest
+  // Flat upper spring-cam crest (x in [0.42, 0.992]) with locksmith assembly step per lever (0..4)
   const shoulderStepX = 0.24 + index * 0.036;
-  outerPts.push(new THREE.Vector2(0.42, 0.262));
-  outerPts.push(new THREE.Vector2(shoulderStepX + 0.035, 0.232));
-  outerPts.push(new THREE.Vector2(shoulderStepX, 0.198));
-  outerPts.push(new THREE.Vector2(0.11, 0.152));
+  nominalOuter.push(new THREE.Vector2(0.42, LEVER_TOP_CREST_LOCAL_Y));
+  nominalOuter.push(new THREE.Vector2(shoulderStepX + 0.035, 0.234));
+  nominalOuter.push(new THREE.Vector2(shoulderStepX, 0.200));
+  nominalOuter.push(new THREE.Vector2(0.11, 0.154));
 
-  const shape = new THREE.Shape(ensureCCW(outerPts));
+  const insetOuter = offsetClosedPolygonCCW(ensureCCW(nominalOuter), -LEVER_BEVEL);
+  const shape = new THREE.Shape(ensureCCW(insetOuter));
 
-  // Hole 1: Precision circular pivot bore
-  shape.holes.push(makeCircleHole(0, 0, 0.058, 24));
+  // Hole 1: Precision circular pivot bore (expanded by LEVER_BEVEL so actual beveled bore = 0.058 > post 0.056)
+  shape.holes.push(makeCircleHole(0, 0, 0.058 + LEVER_BEVEL, 28));
 
-  // Hole 2: Authentic Chubb H-Gate aperture with exact sloped gate slot & anti-pick false serrations
-  const xLOut = 0.442;
-  const xLIn = 0.562;
-  const xRIn = 0.782;
-  const xROut = 0.896;
+  // Hole 2: Authentic Chubb H-Gate aperture with perpendicular-compensated sloped gate & multi-tooth anti-pick!
+  // Because ExtrudeGeometry bevelSize shrinks hole interiors inward by LEVER_BEVEL, expand every hole wall
+  // outward by LEVER_BEVEL so the rendered brass surfaces sit at exact GATE_POCKET_* coordinates!
+  const b = LEVER_BEVEL;
+  const xLOut = GATE_POCKET_LEFT_OUTER_X - b;
+  const xLIn = GATE_POCKET_LEFT_INNER_X + b;
+  const xRIn = GATE_POCKET_RIGHT_INNER_X - b;
+  const xROut = GATE_POCKET_RIGHT_OUTER_X + b;
 
-  // Interpolate exact tilted gate center Y at left & right gate bridge mouths
+  // Exact tilted gate centerline at left & right gate bridge mouths
   const spanX = Math.max(1e-4, spec.gateLockedLocalX - spec.gateUnlockedLocalX);
   const slopeY = (spec.gateLockedLocalY - spec.gateUnlockedLocalY) / spanX;
   const yGateL = spec.gateUnlockedLocalY + (xLIn - spec.gateUnlockedLocalX) * slopeY;
   const yGateR = spec.gateUnlockedLocalY + (xRIn - spec.gateUnlockedLocalX) * slopeY;
 
-  const yTopPocket = 0.224;
-  const yBotPocketL = Math.max(-0.088, Math.min(yGateL - GATE_HALF_HEIGHT - 0.014, 0.01));
-  const yBotPocketR = Math.max(-0.120, Math.min(yGateR - GATE_HALF_HEIGHT - 0.012, -0.02));
+  // Exact perpendicular gate half-height compensated by 1/cos(alignRad) + LEVER_BEVEL!
+  const vertGateHalfH = (GATE_HALF_HEIGHT + b) / Math.cos(spec.alignRad);
+  const gateTopL = yGateL + vertGateHalfH;
+  const gateBotL = yGateL - vertGateHalfH;
+  const gateTopR = yGateR + vertGateHalfH;
+  const gateBotR = yGateR - vertGateHalfH;
 
-  const gateTopL = yGateL + GATE_HALF_HEIGHT;
-  const gateBotL = yGateL - GATE_HALF_HEIGHT;
-  const gateTopR = yGateR + GATE_HALF_HEIGHT;
-  const gateBotR = yGateR - GATE_HALF_HEIGHT;
+  const yTopPocket = GATE_POCKET_TOP_Y + b;
+  const yBotPocketL = Math.max(-0.088, Math.min(gateBotL - 0.016, -0.015)) - b;
+  const yBotPocketR = GATE_POCKET_BOT_R_Y - b;
 
-  // Trace H-gate cavity perimeter in strict CCW first, then convert to CW hole cleanly
+  // Helper to append crisp multi-tooth Chubb anti-pick false serrations along a vertical cheek edge
+  // (goes strictly monotonically from yStart -> yEnd; notchDir = -1 bites left into right cheek, +1 bites right into left cheek)
+  const addAntiPickTeeth = (
+    pts: THREE.Vector2[],
+    xWall: number,
+    yStart: number,
+    yEnd: number,
+    notchDir: -1 | 1
+  ) => {
+    const dir = yEnd > yStart ? 1 : -1;
+    const span = Math.abs(yEnd - yStart);
+    const margin = 0.014;
+    const usable = span - margin * 2;
+    if (usable < 0.022) return;
+    const pitch = 0.032;
+    const toothCount = Math.min(3, Math.max(1, Math.floor(usable / pitch)));
+    const step = usable / toothCount;
+    const halfNotch = 0.0075;
+    const notchDepth = 0.016;
+    for (let t = 0; t < toothCount; t++) {
+      const yc = yStart + dir * (margin + step * (t + 0.5));
+      pts.push(new THREE.Vector2(xWall, yc - dir * halfNotch));
+      pts.push(new THREE.Vector2(xWall + notchDir * notchDepth, yc - dir * halfNotch));
+      pts.push(new THREE.Vector2(xWall + notchDir * notchDepth, yc + dir * halfNotch));
+      pts.push(new THREE.Vector2(xWall, yc + dir * halfNotch));
+    }
+  };
+
+  // Trace H-gate perimeter cleanly in CCW order, then convert to CW hole path
   const hPts: THREE.Vector2[] = [
     new THREE.Vector2(xLOut, yTopPocket),
     new THREE.Vector2(xLOut, yBotPocketL),
     new THREE.Vector2(xLIn, yBotPocketL),
-    new THREE.Vector2(xLIn, gateBotL),
-    new THREE.Vector2(xRIn, gateBotR),
-    new THREE.Vector2(xRIn, yBotPocketR),
-    new THREE.Vector2(xROut, yBotPocketR),
-    new THREE.Vector2(xROut, yTopPocket),
-    new THREE.Vector2(xRIn, yTopPocket),
   ];
 
-  // Add a crisp machined anti-pick false serration tooth on the upper right locking cheek if vertical margin allows
-  if (yTopPocket - gateTopR > 0.068) {
-    const midY = gateTopR + (yTopPocket - gateTopR) * 0.52;
-    hPts.push(new THREE.Vector2(xRIn, midY + 0.012));
-    hPts.push(new THREE.Vector2(xRIn - 0.020, midY + 0.012));
-    hPts.push(new THREE.Vector2(xRIn - 0.020, midY - 0.012));
-    hPts.push(new THREE.Vector2(xRIn, midY - 0.012));
-  }
+  // Lower-left cheek anti-pick serrations (yBotPocketL -> gateBotL)
+  addAntiPickTeeth(hPts, xLIn, yBotPocketL, gateBotL, 1);
+  hPts.push(new THREE.Vector2(xLIn, gateBotL));
+  hPts.push(new THREE.Vector2(xRIn, gateBotR));
 
+  // Lower-right cheek anti-pick serrations (gateBotR -> yBotPocketR)
+  addAntiPickTeeth(hPts, xRIn, gateBotR, yBotPocketR, -1);
+  hPts.push(new THREE.Vector2(xRIn, yBotPocketR));
+  hPts.push(new THREE.Vector2(xROut, yBotPocketR));
+  hPts.push(new THREE.Vector2(xROut, yTopPocket));
+  hPts.push(new THREE.Vector2(xRIn, yTopPocket));
+
+  // Upper-right cheek anti-pick serrations (yTopPocket -> gateTopR)
+  addAntiPickTeeth(hPts, xRIn, yTopPocket, gateTopR, -1);
   hPts.push(new THREE.Vector2(xRIn, gateTopR));
   hPts.push(new THREE.Vector2(xLIn, gateTopL));
 
-  // Add a matching anti-pick false serration tooth on the upper left locking cheek if vertical margin allows
-  if (yTopPocket - gateTopL > 0.068) {
-    const midY = gateTopL + (yTopPocket - gateTopL) * 0.52;
-    hPts.push(new THREE.Vector2(xLIn, midY - 0.012));
-    hPts.push(new THREE.Vector2(xLIn + 0.020, midY - 0.012));
-    hPts.push(new THREE.Vector2(xLIn + 0.020, midY + 0.012));
-    hPts.push(new THREE.Vector2(xLIn, midY + 0.012));
-  }
-
+  // Upper-left cheek anti-pick serrations (gateTopL -> yTopPocket)
+  addAntiPickTeeth(hPts, xLIn, gateTopL, yTopPocket, 1);
   hPts.push(new THREE.Vector2(xLIn, yTopPocket));
 
   const cwHole = ensureCW(hPts);
@@ -988,17 +1425,16 @@ export function createLeverGeometry(index: number): THREE.BufferGeometry {
   shape.holes.push(gateHolePath);
 
   const coreDepth = LEVER_THICKNESS - LEVER_BEVEL * 2;
-  const geo = new THREE.ExtrudeGeometry(shape, {
+  const rawGeo = new THREE.ExtrudeGeometry(shape, {
     depth: coreDepth,
     bevelEnabled: true,
     bevelThickness: LEVER_BEVEL,
     bevelSize: LEVER_BEVEL,
     bevelSegments: 2,
-    curveSegments: 20,
+    curveSegments: 24,
   });
-  geo.translate(0, 0, -coreDepth * 0.5);
-  geo.computeVertexNormals();
-  return geo;
+  rawGeo.translate(0, 0, -coreDepth * 0.5);
+  return applyMachinedNormals(rawGeo);
 }
 
 export function buildLeverPackAssembly(materials: BoltMaterials): LeverPackAssembly {
@@ -1043,12 +1479,82 @@ export function buildLeverPackAssembly(materials: BoltMaterials): LeverPackAssem
 // 6. Five Dynamically Flexing Curved Phosphor-Bronze Leaf Springs (Zero Per-Frame GC)
 // =============================================================================
 
-const SPRING_SEGMENTS = 22;
-const SPRING_HALF_THICK_Z = 0.0085;
-const SPRING_HALF_HEIGHT_N = 0.0085;
-// Contact point on top edge of lever in lever-local coordinates
-const SPRING_CONTACT_LOCAL_X = 0.56;
-const SPRING_CONTACT_LOCAL_Y = 0.264;
+const SPRING_SEGMENTS = 30;
+const SPRING_HALF_THICK_Z = 0.0082;
+const SPRING_HALF_HEIGHT_N = 0.0082;
+export const SPRING_COLLAR_OUTER_R = 0.062;
+export const SPRING_COLLAR_INNER_R = 0.045;
+
+export interface LeafSpringDiagnostics {
+  rootX: number;
+  rootY: number;
+  rootDistFromPost: number;
+  tipBottomX: number;
+  tipBottomY: number;
+  leverContactX: number;
+  leverContactY: number;
+  tipContactGap: number;
+  maxArcY: number;
+  minClearanceAboveLever: number;
+  arcLength: number;
+}
+
+/**
+ * Pure analytical spring curve evaluator shared by LeafSpringMesh and unit tests:
+ *  - Anchors tangentially off the outer bronze collar (r = 0.056 > steel post 0.044)
+ *  - Slides smoothly outward along the lever top flat crest as `leverAngleRad` increases (near-constant arc length!)
+ *  - Arrives strictly TANGENT to the rotated lever top shoulder with flush 0.000 contact
+ *  - Keeps the entire deflected arch cleanly below CASE_INNER_MAX_Y - 0.025
+ */
+export function evaluateLeafSpringCurve(
+  leverAngleRad: number,
+  outP0: { x: number; y: number },
+  outP1: { x: number; y: number },
+  outP2: { x: number; y: number },
+  outP3: { x: number; y: number },
+  outContact?: { x: number; y: number }
+): void {
+  const cosA = Math.cos(leverAngleRad);
+  const sinA = Math.sin(leverAngleRad);
+  const liftRatio = Math.max(0, Math.min(1, leverAngleRad / LEVER_MAX_RAD));
+
+  // Anchor smoothly off upper-right outer perimeter of bronze anchor collar (radius ~ 0.056 > post 0.044)
+  outP0.x = SPRING_POST_X + 0.018;
+  outP0.y = SPRING_POST_Y + 0.052;
+
+  // Sliding contact point glides smoothly rightward along lever top flat crest [0.54 .. 0.78]
+  // to preserve physical phosphor-bronze blade arc length (< 3% delta across full 0..21 deg lift!)
+  const contactLocalX = 0.54 + liftRatio * 0.245;
+  const contactLocalY = LEVER_TOP_CREST_LOCAL_Y;
+  const cx = PIVOT_X + contactLocalX * cosA - contactLocalY * sinA;
+  const cy = PIVOT_Y + contactLocalX * sinA + contactLocalY * cosA;
+  if (outContact) {
+    outContact.x = cx;
+    outContact.y = cy;
+  }
+
+  // Rotated lever unit normal (-sinA, cosA) and unit tangent (+cosA, +sinA)
+  const lnx = -sinA;
+  const lny = cosA;
+  const ltx = cosA;
+  const lty = sinA;
+
+  // Tip centerline offset along lever normal by exact end half-height so bottom face kisses flush (0 gap, 0 clip!)
+  const hEnd = SPRING_HALF_HEIGHT_N * 0.85;
+  outP3.x = cx + lnx * hEnd;
+  outP3.y = cy + lny * hEnd;
+
+  // Tangential arrival control point: strictly parallel to lever top edge with tiny upward clearance (+0.006 * N)
+  // so the blade sweeps cleanly ABOVE the lever crest for all t < 1 and lands flush tangent at t = 1!
+  const tanLead = 0.175 + liftRatio * 0.035;
+  outP2.x = outP3.x - ltx * tanLead + lnx * 0.006;
+  outP2.y = outP3.y - lty * tanLead + lny * 0.006;
+
+  // Gentle cantilever arch bowing smoothly upward with compression while staying well under CASE_INNER_MAX_Y (0.585)
+  const archTargetY = Math.min(CASE_INNER_MAX_Y - 0.032, outP0.y + 0.018 + liftRatio * 0.044);
+  outP1.x = outP0.x + 0.215 + liftRatio * 0.055;
+  outP1.y = archTargetY;
+}
 
 export class LeafSpringMesh {
   readonly index: number;
@@ -1061,16 +1567,17 @@ export class LeafSpringMesh {
   private readonly cy = new Float32Array(SPRING_SEGMENTS + 1);
   private readonly nx = new Float32Array(SPRING_SEGMENTS + 1);
   private readonly ny = new Float32Array(SPRING_SEGMENTS + 1);
+  private readonly _p0 = { x: 0, y: 0 };
+  private readonly _p1 = { x: 0, y: 0 };
+  private readonly _p2 = { x: 0, y: 0 };
+  private readonly _p3 = { x: 0, y: 0 };
+  private readonly _contact = { x: 0, y: 0 };
   private lastAngle = -999;
 
   constructor(index: number, material: THREE.Material) {
     this.index = index;
     this.geometry = new THREE.BufferGeometry();
 
-    // Closed watertight extruded rectangular spring blade:
-    //  - 4 longitudinal faces * SPRING_SEGMENTS * 2 tris = 8 * SPRING_SEGMENTS tris
-    //  - 2 end caps * 2 tris = 4 tris
-    // Use non-indexed hard-faceted strip (crisp beveled metallic ribbon shading & exact normals!)
     const totalTris = SPRING_SEGMENTS * 8 + 4;
     this.positions = new Float32Array(totalTris * 9);
     this.normals = new Float32Array(totalTris * 9);
@@ -1087,8 +1594,64 @@ export class LeafSpringMesh {
   }
 
   /**
-   * Recomputes the Euler-Bernoulli curved phosphor-bronze leaf spring in-place (zero allocations)
-   * anchored at the fixed steel spring abutment post and pressing tangentially onto lever `index`.
+   * Computes exact diagnostic clearance/contact metrics for unit tests without allocations.
+   */
+  inspectAtAngle(leverAngleRad: number): LeafSpringDiagnostics {
+    this.update(leverAngleRad);
+    const cosA = Math.cos(leverAngleRad);
+    const sinA = Math.sin(leverAngleRad);
+    const lnx = -sinA;
+    const lny = cosA;
+
+    const e = SPRING_SEGMENTS;
+    const hEnd = SPRING_HALF_HEIGHT_N * 0.85;
+    const tipBottomX = this.cx[e] - this.nx[e] * hEnd;
+    const tipBottomY = this.cy[e] - this.ny[e] * hEnd;
+    const tipContactGap = Math.hypot(tipBottomX - this._contact.x, tipBottomY - this._contact.y);
+
+    let maxArcY = -Infinity;
+    let minClearanceAboveLever = Infinity;
+    let arcLength = 0;
+
+    for (let s = 0; s <= SPRING_SEGMENTS; s++) {
+      const h = SPRING_HALF_HEIGHT_N * (1.12 - 0.27 * (s / SPRING_SEGMENTS));
+      const topY = this.cy[s] + this.ny[s] * h;
+      if (topY > maxArcY) maxArcY = topY;
+
+      const botX = this.cx[s] - this.nx[s] * h;
+      const botY = this.cy[s] - this.ny[s] * h;
+      // Signed height of spring bottom above lever's rotated top plane (only over lever top crest x >= 0.42)
+      const dx = botX - PIVOT_X;
+      const dy = botY - PIVOT_Y;
+      const localX = dx * cosA + dy * sinA;
+      if (localX >= 0.42 && localX <= 0.992) {
+        const signedAbove = (botX - this._contact.x) * lnx + (botY - this._contact.y) * lny;
+        if (signedAbove < minClearanceAboveLever) minClearanceAboveLever = signedAbove;
+      }
+
+      if (s > 0) {
+        arcLength += Math.hypot(this.cx[s] - this.cx[s - 1], this.cy[s] - this.cy[s - 1]);
+      }
+    }
+
+    return {
+      rootX: this._p0.x,
+      rootY: this._p0.y,
+      rootDistFromPost: Math.hypot(this._p0.x - SPRING_POST_X, this._p0.y - SPRING_POST_Y),
+      tipBottomX,
+      tipBottomY,
+      leverContactX: this._contact.x,
+      leverContactY: this._contact.y,
+      tipContactGap,
+      maxArcY,
+      minClearanceAboveLever,
+      arcLength,
+    };
+  }
+
+  /**
+   * Recomputes the curved phosphor-bronze leaf spring in-place (zero allocations)
+   * with smooth curved longitudinal normals and crisp hard side normals.
    */
   update(leverAngleRad: number): void {
     if (Math.abs(leverAngleRad - this.lastAngle) < 1e-5) return;
@@ -1098,25 +1661,24 @@ export class LeafSpringMesh {
     const zBack = zCenter - SPRING_HALF_THICK_Z;
     const zFront = zCenter + SPRING_HALF_THICK_Z;
 
-    // Anchor root wraps cleanly off the right flank of the fixed steel spring abutment post
-    const p0x = SPRING_POST_X + 0.022;
-    const p0y = SPRING_POST_Y + 0.036;
+    evaluateLeafSpringCurve(
+      leverAngleRad,
+      this._p0,
+      this._p1,
+      this._p2,
+      this._p3,
+      this._contact
+    );
 
-    // Sliding contact foot on top shoulder of lever `index`
-    const cosA = Math.cos(leverAngleRad);
-    const sinA = Math.sin(leverAngleRad);
-    const p3x = PIVOT_X + SPRING_CONTACT_LOCAL_X * cosA - SPRING_CONTACT_LOCAL_Y * sinA;
-    const p3y = PIVOT_Y + SPRING_CONTACT_LOCAL_X * sinA + SPRING_CONTACT_LOCAL_Y * cosA + SPRING_HALF_HEIGHT_N;
+    const p0x = this._p0.x;
+    const p0y = this._p0.y;
+    const p1x = this._p1.x;
+    const p1y = this._p1.y;
+    const p2x = this._p2.x;
+    const p2y = this._p2.y;
+    const p3x = this._p3.x;
+    const p3y = this._p3.y;
 
-    // Cubic cantilever deflection control points (bows gracefully upward as lever compresses spring!)
-    const liftRatio = Math.max(0, Math.min(1, leverAngleRad / 0.35));
-    const bowLift = 0.045 + liftRatio * 0.088;
-    const p1x = p0x + 0.22;
-    const p1y = p0y + bowLift;
-    const p2x = p3x - 0.16;
-    const p2y = p3y + 0.068 + liftRatio * 0.025;
-
-    // Sample centerline & unit 2D upward normals
     for (let s = 0; s <= SPRING_SEGMENTS; s++) {
       const t = s / SPRING_SEGMENTS;
       const it = 1 - t;
@@ -1131,78 +1693,39 @@ export class LeafSpringMesh {
       const tx = 3 * it * it * (p1x - p0x) + 6 * it * t * (p2x - p1x) + 3 * t * t * (p3x - p2x);
       const ty = 3 * it * it * (p1y - p0y) + 6 * it * t * (p2y - p1y) + 3 * t * t * (p3y - p2y);
       const len = Math.max(1e-5, Math.hypot(tx, ty));
-      // Rotate tangent (+tx, +ty) by +90 deg CCW -> (-ty, +tx) points UPWARD (+Y when tx > 0)
       this.nx[s] = -ty / len;
       this.ny[s] = tx / len;
     }
 
     let ptr = 0;
-    const writeQuad = (
-      ax: number,
-      ay: number,
-      az: number,
-      bx: number,
-      by: number,
-      bz: number,
-      cx: number,
-      cy: number,
-      cz: number,
-      dx: number,
-      dy: number,
-      dz: number,
-      fnx: number,
-      fny: number,
-      fnz: number
+    const writeQuadSmooth = (
+      ax: number, ay: number, az: number, nax: number, nay: number, naz: number,
+      bx: number, by: number, bz: number, nbx: number, nby: number, nbz: number,
+      cx: number, cy: number, cz: number, ncx: number, ncy: number, ncz: number,
+      dx: number, dy: number, dz: number, ndx: number, ndy: number, ndz: number
     ) => {
-      // Tri 1: a -> b -> c (outward CCW)
-      this.positions[ptr] = ax;
-      this.positions[ptr + 1] = ay;
-      this.positions[ptr + 2] = az;
-      this.positions[ptr + 3] = bx;
-      this.positions[ptr + 4] = by;
-      this.positions[ptr + 5] = bz;
-      this.positions[ptr + 6] = cx;
-      this.positions[ptr + 7] = cy;
-      this.positions[ptr + 8] = cz;
-
-      this.normals[ptr] = fnx;
-      this.normals[ptr + 1] = fny;
-      this.normals[ptr + 2] = fnz;
-      this.normals[ptr + 3] = fnx;
-      this.normals[ptr + 4] = fny;
-      this.normals[ptr + 5] = fnz;
-      this.normals[ptr + 6] = fnx;
-      this.normals[ptr + 7] = fny;
-      this.normals[ptr + 8] = fnz;
+      // Tri 1: a -> b -> c
+      this.positions[ptr] = ax; this.positions[ptr + 1] = ay; this.positions[ptr + 2] = az;
+      this.positions[ptr + 3] = bx; this.positions[ptr + 4] = by; this.positions[ptr + 5] = bz;
+      this.positions[ptr + 6] = cx; this.positions[ptr + 7] = cy; this.positions[ptr + 8] = cz;
+      this.normals[ptr] = nax; this.normals[ptr + 1] = nay; this.normals[ptr + 2] = naz;
+      this.normals[ptr + 3] = nbx; this.normals[ptr + 4] = nby; this.normals[ptr + 5] = nbz;
+      this.normals[ptr + 6] = ncx; this.normals[ptr + 7] = ncy; this.normals[ptr + 8] = ncz;
       ptr += 9;
 
       // Tri 2: a -> c -> d
-      this.positions[ptr] = ax;
-      this.positions[ptr + 1] = ay;
-      this.positions[ptr + 2] = az;
-      this.positions[ptr + 3] = cx;
-      this.positions[ptr + 4] = cy;
-      this.positions[ptr + 5] = cz;
-      this.positions[ptr + 6] = dx;
-      this.positions[ptr + 7] = dy;
-      this.positions[ptr + 8] = dz;
-
-      this.normals[ptr] = fnx;
-      this.normals[ptr + 1] = fny;
-      this.normals[ptr + 2] = fnz;
-      this.normals[ptr + 3] = fnx;
-      this.normals[ptr + 4] = fny;
-      this.normals[ptr + 5] = fnz;
-      this.normals[ptr + 6] = fnx;
-      this.normals[ptr + 7] = fny;
-      this.normals[ptr + 8] = fnz;
+      this.positions[ptr] = ax; this.positions[ptr + 1] = ay; this.positions[ptr + 2] = az;
+      this.positions[ptr + 3] = cx; this.positions[ptr + 4] = cy; this.positions[ptr + 5] = cz;
+      this.positions[ptr + 6] = dx; this.positions[ptr + 7] = dy; this.positions[ptr + 8] = dz;
+      this.normals[ptr] = nax; this.normals[ptr + 1] = nay; this.normals[ptr + 2] = naz;
+      this.normals[ptr + 3] = ncx; this.normals[ptr + 4] = ncy; this.normals[ptr + 5] = ncz;
+      this.normals[ptr + 6] = ndx; this.normals[ptr + 7] = ndy; this.normals[ptr + 8] = ndz;
       ptr += 9;
     };
 
     for (let s = 0; s < SPRING_SEGMENTS; s++) {
-      // Slight elegant taper from thick root to nimble contact foot
-      const h0 = SPRING_HALF_HEIGHT_N * (1.15 - 0.30 * (s / SPRING_SEGMENTS));
-      const h1 = SPRING_HALF_HEIGHT_N * (1.15 - 0.30 * ((s + 1) / SPRING_SEGMENTS));
+      const h0 = SPRING_HALF_HEIGHT_N * (1.12 - 0.27 * (s / SPRING_SEGMENTS));
+      const h1 = SPRING_HALF_HEIGHT_N * (1.12 - 0.27 * ((s + 1) / SPRING_SEGMENTS));
 
       const top0x = this.cx[s] + this.nx[s] * h0;
       const top0y = this.cy[s] + this.ny[s] * h0;
@@ -1214,58 +1737,52 @@ export class LeafSpringMesh {
       const bot1x = this.cx[s + 1] - this.nx[s + 1] * h1;
       const bot1y = this.cy[s + 1] - this.ny[s + 1] * h1;
 
-      const mnx = (this.nx[s] + this.nx[s + 1]) * 0.5;
-      const mny = (this.ny[s] + this.ny[s + 1]) * 0.5;
-      const mnLen = Math.max(1e-5, Math.hypot(mnx, mny));
-      const unx = mnx / mnLen;
-      const uny = mny / mnLen;
+      const n0x = this.nx[s];
+      const n0y = this.ny[s];
+      const n1x = this.nx[s + 1];
+      const n1y = this.ny[s + 1];
 
-      // Front face (+Z outward): bot0 -> bot1 -> top1 -> top0
-      writeQuad(
-        bot0x, bot0y, zFront,
-        bot1x, bot1y, zFront,
-        top1x, top1y, zFront,
-        top0x, top0y, zFront,
-        0, 0, 1
+      // Front face (+Z outward)
+      writeQuadSmooth(
+        bot0x, bot0y, zFront, 0, 0, 1,
+        bot1x, bot1y, zFront, 0, 0, 1,
+        top1x, top1y, zFront, 0, 0, 1,
+        top0x, top0y, zFront, 0, 0, 1
       );
-      // Back face (-Z outward): bot1 -> bot0 -> top0 -> top1
-      writeQuad(
-        bot1x, bot1y, zBack,
-        bot0x, bot0y, zBack,
-        top0x, top0y, zBack,
-        top1x, top1y, zBack,
-        0, 0, -1
+      // Back face (-Z outward)
+      writeQuadSmooth(
+        bot1x, bot1y, zBack, 0, 0, -1,
+        bot0x, bot0y, zBack, 0, 0, -1,
+        top0x, top0y, zBack, 0, 0, -1,
+        top1x, top1y, zBack, 0, 0, -1
       );
-      // Top face (+N outward): top0F -> top1F -> top1B -> top0B
-      writeQuad(
-        top0x, top0y, zFront,
-        top1x, top1y, zFront,
-        top1x, top1y, zBack,
-        top0x, top0y, zBack,
-        unx, uny, 0
+      // Top curved face (+N outward, smooth vertex normals along spring arc!)
+      writeQuadSmooth(
+        top0x, top0y, zFront, n0x, n0y, 0,
+        top1x, top1y, zFront, n1x, n1y, 0,
+        top1x, top1y, zBack, n1x, n1y, 0,
+        top0x, top0y, zBack, n0x, n0y, 0
       );
-      // Bottom face (-N outward): bot0B -> bot1B -> bot1F -> bot0F
-      writeQuad(
-        bot0x, bot0y, zBack,
-        bot1x, bot1y, zBack,
-        bot1x, bot1y, zFront,
-        bot0x, bot0y, zFront,
-        -unx, -uny, 0
+      // Bottom curved face (-N outward, smooth vertex normals along spring arc!)
+      writeQuadSmooth(
+        bot0x, bot0y, zBack, -n0x, -n0y, 0,
+        bot1x, bot1y, zBack, -n1x, -n1y, 0,
+        bot1x, bot1y, zFront, -n1x, -n1y, 0,
+        bot0x, bot0y, zFront, -n0x, -n0y, 0
       );
     }
 
     // Start cap (s = 0, facing -tangent)
-    const hStart = SPRING_HALF_HEIGHT_N * 1.15;
+    const hStart = SPRING_HALF_HEIGHT_N * 1.12;
     const t0x = this.cx[0] + this.nx[0] * hStart;
     const t0y = this.cy[0] + this.ny[0] * hStart;
     const b0x = this.cx[0] - this.nx[0] * hStart;
     const b0y = this.cy[0] - this.ny[0] * hStart;
-    writeQuad(
-      b0x, b0y, zBack,
-      b0x, b0y, zFront,
-      t0x, t0y, zFront,
-      t0x, t0y, zBack,
-      -this.ny[0], this.nx[0], 0
+    writeQuadSmooth(
+      b0x, b0y, zBack, -this.ny[0], this.nx[0], 0,
+      b0x, b0y, zFront, -this.ny[0], this.nx[0], 0,
+      t0x, t0y, zFront, -this.ny[0], this.nx[0], 0,
+      t0x, t0y, zBack, -this.ny[0], this.nx[0], 0
     );
 
     // End cap (s = SPRING_SEGMENTS, facing +tangent)
@@ -1275,12 +1792,11 @@ export class LeafSpringMesh {
     const tEy = this.cy[e] + this.ny[e] * hEnd;
     const bEx = this.cx[e] - this.nx[e] * hEnd;
     const bEy = this.cy[e] - this.ny[e] * hEnd;
-    writeQuad(
-      bEx, bEy, zFront,
-      bEx, bEy, zBack,
-      tEx, tEy, zBack,
-      tEx, tEy, zFront,
-      this.ny[e], -this.nx[e], 0
+    writeQuadSmooth(
+      bEx, bEy, zFront, this.ny[e], -this.nx[e], 0,
+      bEx, bEy, zBack, this.ny[e], -this.nx[e], 0,
+      tEx, tEy, zBack, this.ny[e], -this.nx[e], 0,
+      tEx, tEy, zFront, this.ny[e], -this.nx[e], 0
     );
 
     (this.geometry.attributes.position as THREE.BufferAttribute).needsUpdate = true;
@@ -1306,10 +1822,10 @@ export function buildSpringPackAssembly(materials: BoltMaterials): SpringPackAss
   const springs: LeafSpringMesh[] = [];
   const disposables: THREE.BufferGeometry[] = [];
 
-  // Curled bronze retaining anchor sleeves wrapped around the steel spring post
+  // Curled bronze retaining anchor eyes wrapped cleanly around the steel spring abutment post
   const collarShape = new THREE.Shape();
-  collarShape.absarc(0, 0, 0.062, 0, Math.PI * 2, false);
-  collarShape.holes.push(makeCircleHole(0, 0, 0.045, 20));
+  collarShape.absarc(0, 0, SPRING_COLLAR_OUTER_R, 0, Math.PI * 2, false);
+  collarShape.holes.push(makeCircleHole(0, 0, SPRING_COLLAR_INNER_R, 24));
 
   for (let i = 0; i < LEVER_COUNT; i++) {
     const spring = new LeafSpringMesh(i, materials.phosphorBronze);
@@ -1317,15 +1833,16 @@ export function buildSpringPackAssembly(materials: BoltMaterials): SpringPackAss
     group.add(spring.mesh);
 
     const cDepth = SPRING_HALF_THICK_Z * 2;
-    const cGeo = new THREE.ExtrudeGeometry(collarShape, {
+    const cRaw = new THREE.ExtrudeGeometry(collarShape, {
       depth: cDepth,
       bevelEnabled: true,
       bevelThickness: 0.001,
       bevelSize: 0.001,
       bevelSegments: 1,
-      curveSegments: 20,
+      curveSegments: 24,
     });
-    cGeo.translate(SPRING_POST_X, SPRING_POST_Y, getLeverZ(i) - cDepth * 0.5);
+    cRaw.translate(SPRING_POST_X, SPRING_POST_Y, getLeverZ(i) - cDepth * 0.5);
+    const cGeo = applyMachinedNormals(cRaw);
     disposables.push(cGeo);
     const cMesh = new THREE.Mesh(cGeo, materials.phosphorBronze);
     cMesh.name = `SpringAnchorEye_${i}`;
@@ -1349,7 +1866,7 @@ export function buildSpringPackAssembly(materials: BoltMaterials): SpringPackAss
 }
 
 // =============================================================================
-// 7. Ornate 19th-Century Victorian 5-Bitted Warded Mortise Key
+// 7. Ornate 19th-Century Victorian 5-Bitted Hollow-Pipe Warded Mortise Key
 // =============================================================================
 
 export interface KeyAssembly {
@@ -1365,24 +1882,32 @@ export function buildKeyAssembly(materials: BoltMaterials): KeyAssembly {
   const disposables: THREE.BufferGeometry[] = [];
   const hitMeshes: THREE.Mesh[] = [];
 
-  // 7A. Turned Hardened-Steel Pipe Barrel with Victorian Collar Mouldings (z: -0.17 .. +0.58)
+  // 7A. Genuine Hollow-Pipe Turned Hardened-Steel Barrel (bore r = 0.030 cleanly sleeves over KeyDrillPin r = 0.025!)
+  // Profile ordered strictly along interior bore -> rear lip -> exterior turned Victorian mouldings -> front neck!
   const shaftGeo = makeClosedLatheZ(
     [
-      [-0.170, 0.044],
+      [0.056, 0.0], // solid internal bore ceiling forward of drill pin
+      [0.056, 0.030], // hollow pipe inner wall (clears drill pin r=0.025 by 0.005!)
+      [-0.166, 0.030],
+      [-0.170, 0.034], // crisp chamfered rear pipe lip
+      [-0.170, 0.041],
+      [-0.165, 0.044], // outer pipe barrel
       [0.236, 0.044],
-      [0.246, 0.060],
+      [0.246, 0.060], // Victorian stepped ward collar
       [0.268, 0.068],
       [0.288, 0.068],
       [0.302, 0.052],
       [0.316, 0.045],
       [0.455, 0.045],
-      [0.478, 0.062],
+      [0.478, 0.062], // turned neck moulding ring
       [0.496, 0.066],
       [0.514, 0.052],
       [0.545, 0.048],
       [0.575, 0.064],
+      [0.575, 0.0],
     ],
-    28
+    36,
+    false
   );
   disposables.push(shaftGeo);
   const shaftMesh = new THREE.Mesh(shaftGeo, materials.hardenedSteel);
@@ -1394,19 +1919,22 @@ export function buildKeyAssembly(materials: BoltMaterials): KeyAssembly {
 
   // 7B. Precision 6-Step Key Bit extending radially downward (-Y at phi = 0)
   // Rear Talon Drive Step (z: -0.152 .. -0.082, aligned with bolt tail talon!)
-  const talonBitW = 0.036;
-  const talonBitDepth = 0.064;
+  const talonBevel = 0.003;
+  const talonBitW = 0.034 - talonBevel * 2;
+  const talonBitDepth = 0.064 - talonBevel * 2;
+  const talonR = KEY_TALON_RADIUS - talonBevel;
   const talonShape = new THREE.Shape(
-    makeRoundedRectPts(-talonBitW * 0.5, -KEY_TALON_RADIUS, talonBitW * 0.5, -0.032, 0.008, 3)
+    makeRoundedRectPts(-talonBitW * 0.5, -talonR, talonBitW * 0.5, -0.034, 0.007, 4)
   );
-  const talonGeo = new THREE.ExtrudeGeometry(talonShape, {
+  const talonRaw = new THREE.ExtrudeGeometry(talonShape, {
     depth: talonBitDepth,
     bevelEnabled: true,
-    bevelThickness: 0.003,
-    bevelSize: 0.003,
+    bevelThickness: talonBevel,
+    bevelSize: talonBevel,
     bevelSegments: 2,
   });
-  talonGeo.translate(0, 0, -0.118 - talonBitDepth * 0.5);
+  talonRaw.translate(0, 0, -0.118 - talonBitDepth * 0.5);
+  const talonGeo = applyMachinedNormals(talonRaw);
   disposables.push(talonGeo);
   const talonMesh = new THREE.Mesh(talonGeo, materials.hardenedSteel);
   talonMesh.name = 'KeyTalonDriveBit';
@@ -1415,22 +1943,32 @@ export function buildKeyAssembly(materials: BoltMaterials): KeyAssembly {
   group.add(talonMesh);
   hitMeshes.push(talonMesh);
 
-  // 5 Stepped Lever Bitting Teeth (exact KEY_BIT_RADII[0..4] aligned 1:1 with lever[0..4] Z-planes!)
-  const bitW = 0.034;
-  const stepZWidth = 0.024;
+  // 5 Stepped Lever Bitting Teeth with true concentric-arc crowns matching exact KEY_BIT_RADII[0..4]!
+  const bitBevel = 0.0022;
+  const bitHalfW = KEY_BIT_HALF_WIDTH - bitBevel;
+  const stepZCore = 0.024 - bitBevel * 2;
   for (let i = 0; i < LEVER_COUNT; i++) {
-    const rBit = KEY_BIT_RADII[i];
-    const stepShape = new THREE.Shape(
-      makeRoundedRectPts(-bitW * 0.5, -rBit, bitW * 0.5, -0.034, 0.006, 3)
-    );
-    const stepGeo = new THREE.ExtrudeGeometry(stepShape, {
-      depth: stepZWidth,
+    const rOuter = KEY_BIT_RADII[i] - bitBevel; // outer beveled crown sits at exact KEY_BIT_RADII[i]!
+    const halfAng = Math.asin(Math.min(0.92, bitHalfW / rOuter));
+    const toothPts: THREE.Vector2[] = [];
+    // Bottom concentric circular arc crown from left (-halfAng) to right (+halfAng) around -Y
+    const crownSegs = 8;
+    for (let s = 0; s <= crownSegs; s++) {
+      const a = -halfAng + (2 * halfAng * s) / crownSegs;
+      toothPts.push(new THREE.Vector2(Math.sin(a) * rOuter, -Math.cos(a) * rOuter));
+    }
+    toothPts.push(new THREE.Vector2(bitHalfW, -0.036));
+    toothPts.push(new THREE.Vector2(-bitHalfW, -0.036));
+
+    const stepRaw = new THREE.ExtrudeGeometry(new THREE.Shape(ensureCCW(toothPts)), {
+      depth: stepZCore,
       bevelEnabled: true,
-      bevelThickness: 0.0022,
-      bevelSize: 0.0022,
+      bevelThickness: bitBevel,
+      bevelSize: bitBevel,
       bevelSegments: 2,
     });
-    stepGeo.translate(0, 0, getLeverZ(i) - stepZWidth * 0.5);
+    stepRaw.translate(0, 0, getLeverZ(i) - stepZCore * 0.5);
+    const stepGeo = applyMachinedNormals(stepRaw);
     disposables.push(stepGeo);
     const stepMesh = new THREE.Mesh(stepGeo, materials.keyBrass);
     stepMesh.name = `KeyBittingStep_${i}`;
@@ -1441,8 +1979,8 @@ export function buildKeyAssembly(materials: BoltMaterials): KeyAssembly {
   }
 
   // Connecting warded key-bit bridge web along Z just below the shaft (narrower than brass steps -> zero z-fighting)
-  const webGeo = new THREE.BoxGeometry(0.022, 0.082, 0.285);
-  webGeo.translate(0, -0.072, 0.006);
+  const webGeo = new THREE.BoxGeometry(0.020, 0.078, 0.282);
+  webGeo.translate(0, -0.070, 0.006);
   disposables.push(webGeo);
   const webMesh = new THREE.Mesh(webGeo, materials.hardenedSteel);
   webMesh.name = 'KeyBitWeb';
@@ -1450,8 +1988,8 @@ export function buildKeyAssembly(materials: BoltMaterials): KeyAssembly {
   group.add(webMesh);
   hitMeshes.push(webMesh);
 
-  // 7C. Ornate Sculpted Victorian Satin-Brass Oval Bow (Handle)
-  // Built cleanly with architectural cubic Bezier curves in (u -> Z, v -> Y), extruded in X
+  // 7C. High-Resolution Sculpted Victorian Satin-Brass Oval Bow (Handle)
+  // Built cleanly with high curve resolution + crease-angle normals for liquid-smooth turned gold rims!
   const bowShape = new THREE.Shape();
   bowShape.moveTo(0.56, -0.068);
   bowShape.bezierCurveTo(0.61, -0.175, 0.72, -0.245, 0.825, -0.232);
@@ -1460,10 +1998,11 @@ export function buildKeyAssembly(materials: BoltMaterials): KeyAssembly {
   bowShape.bezierCurveTo(0.72, 0.245, 0.61, 0.175, 0.56, 0.068);
   bowShape.closePath();
 
-  // Large central oval thumb aperture inside the brass bow
+  // Large smooth central oval thumb aperture inside the brass bow
   const bowHolePts: THREE.Vector2[] = [];
-  for (let s = 0; s < 36; s++) {
-    const a = (s / 36) * Math.PI * 2;
+  const bowHoleSegs = 56;
+  for (let s = 0; s < bowHoleSegs; s++) {
+    const a = (s / bowHoleSegs) * Math.PI * 2;
     const u = 0.805 + Math.cos(a) * 0.132;
     const v = Math.sin(a) * 0.138;
     bowHolePts.push(new THREE.Vector2(u, v));
@@ -1471,22 +2010,23 @@ export function buildKeyAssembly(materials: BoltMaterials): KeyAssembly {
   bowShape.holes.push(new THREE.Path(ensureCW(bowHolePts)));
 
   // Flanking decorative upper & lower Victorian eyelet piercings near the bow shoulder
-  bowShape.holes.push(makeCircleHole(0.648, 0.092, 0.028, 16));
-  bowShape.holes.push(makeCircleHole(0.648, -0.092, 0.028, 16));
+  bowShape.holes.push(makeCircleHole(0.648, 0.092, 0.028, 24));
+  bowShape.holes.push(makeCircleHole(0.648, -0.092, 0.028, 24));
 
   const bowThickX = 0.038;
-  const bowGeo = new THREE.ExtrudeGeometry(bowShape, {
+  const bowRaw = new THREE.ExtrudeGeometry(bowShape, {
     depth: bowThickX,
     bevelEnabled: true,
     bevelThickness: 0.012,
     bevelSize: 0.011,
-    bevelSegments: 3,
-    curveSegments: 24,
+    bevelSegments: 4,
+    curveSegments: 42,
   });
-  // Center extrusion in Z, then rotate -PI/2 around Y so local +X(u) -> +Z, local +Z(thick) -> +X!
+  // Apply flat-cap machined normals BEFORE rotating Y so the bow front/back faces stay 100% planar
+  // while the curved Victorian oval bevels remain liquid-smooth!
+  const bowGeo = applyMachinedNormals(bowRaw, (42 * Math.PI) / 180);
   bowGeo.translate(0, 0, -bowThickX * 0.5);
   bowGeo.rotateY(-Math.PI / 2);
-  bowGeo.computeVertexNormals();
   disposables.push(bowGeo);
 
   const bowMesh = new THREE.Mesh(bowGeo, materials.keyBrass);
@@ -1497,11 +2037,14 @@ export function buildKeyAssembly(materials: BoltMaterials): KeyAssembly {
   hitMeshes.push(bowMesh);
 
   // Decorative brass collar band where the ornate bow joins the turned steel stem
-  const neckCollarGeo = makeClosedLatheZ([
-    [0.525, 0.056],
-    [0.552, 0.074],
-    [0.580, 0.068],
-  ]);
+  const neckCollarGeo = makeClosedLatheZ(
+    [
+      [0.525, 0.056],
+      [0.552, 0.074],
+      [0.580, 0.068],
+    ],
+    32
+  );
   disposables.push(neckCollarGeo);
   const neckCollarMesh = new THREE.Mesh(neckCollarGeo, materials.keyBrass);
   neckCollarMesh.name = 'KeyBowNeckCollar';
