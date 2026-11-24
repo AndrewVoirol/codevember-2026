@@ -290,12 +290,12 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
   createDay(
     23,
     'Magma',
-    'upcoming',
-    'wgsl',
+    'complete',
+    'tsl',
     'cinnabarVermilion',
     'rawUmber',
-    'Convecting pahoehoe basalt lava pillow with viscoplastic cooling crust cracking over incandescent fissures',
-    'Pointer shears the dark basalt crust apart, exposing white-hot/cinnabar blackbody magma that cools back to rock'
+    'Suspended heavy steel triaxial geology press clamping 12 interlocking stratified vesicular basalt and banded yellow-ochre tuff slabs above a quartz-windowed incandescent magma chamber, with a vertical hydraulic pressure piston, lateral ACME tectonic screw-clamps, stress-coupled vertical dikes and horizontal laccolith sills, and cooling glossy-obsidian pahoehoe lobes',
+    'Hold-click the chamber or drag vertically on the bottom hydraulic piston or rock core to pump magma pressure upward; drag the left or right lateral clamp screws inward or outward to switch continuously between extensional vertical dikes and compressional horizontal sills with overburden dome heave; drag empty space to orbit; double-click or press Space to release pressure and quench veins into dark obsidian'
   ),
   createDay(
     24,

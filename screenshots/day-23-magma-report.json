@@ -1,0 +1,46 @@
+{
+  "day": 23,
+  "slug": "23-magma",
+  "expectedHeader": "Day 23 - Magma",
+  "domAudit": {
+    "headerText": "Day 23 - Magma",
+    "bodyBg": "rgb(33, 37, 41)",
+    "drawerCount": 30
+  },
+  "telemetry": {
+    "frameCount": 351,
+    "avgFrameMs": 8.28,
+    "p95FrameMs": 10.3,
+    "sceneState": {
+      "day": 23,
+      "slug": "23-magma",
+      "headerLabel": "Day 23 - Magma",
+      "frameCount": 351,
+      "cameraPos": [
+        2.16,
+        1.3000000000000003,
+        4.739999999999999
+      ],
+      "pointerWorld": [
+        0.4156860116356258,
+        -0.43588045768031924,
+        -0.05700715739942819
+      ],
+      "pointerSpeed": 0,
+      "pointerDwellSec": 1.8706,
+      "pointerImpulse": 0.0009
+    }
+  },
+  "metrics": {
+    "specimenCoverageRatio": 0.3047,
+    "interactionMad": 2.273
+  },
+  "gpuErrors": [],
+  "gateFailures": [],
+  "artifacts": {
+    "contactSheet": "screenshots/day-23-magma-contact-sheet.png",
+    "initial": "screenshots/day-23-magma-initial.png",
+    "drawer": "screenshots/day-23-magma-drawer.png"
+  },
+  "passed": true
+}
