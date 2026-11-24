@@ -554,4 +554,114 @@ describe('Day 20 - Cocoon: Heat-Shrink Vacuum-Form Skin & Sculptural Core SDFs',
     core0.dispose();
     dispose();
   });
+
+  it('verifies organic parchment thickness variation, continuous deckle tear-edge attributes, silk tether integrity, and core detail attributes', () => {
+    const { mats, dispose } = makeDummyCoreMaterials();
+
+    // 1. Every mesh across all 3 sculptural cores exposes valid finite aCoreDetail [edgeBevel, creviceAO, axisFrac]
+    for (let coreIdx = 0; coreIdx < CORE_COUNT; coreIdx++) {
+      const built = buildCoreAssembly(coreIdx, mats);
+      built.group.traverse((obj) => {
+        if (!(obj instanceof THREE.Mesh)) return;
+        const det = obj.geometry.attributes.aCoreDetail as THREE.BufferAttribute | undefined;
+        expect(det, `core ${coreIdx}/${obj.name} has aCoreDetail`).toBeDefined();
+        expect(det!.itemSize).toBe(3);
+        expect(det!.count).toBe(obj.geometry.attributes.position.count);
+        for (let i = 0; i < det!.count; i++) {
+          const eb = det!.getX(i);
+          const ao = det!.getY(i);
+          const af = det!.getZ(i);
+          expect(Number.isFinite(eb) && eb >= 0 && eb <= 1).toBe(true);
+          expect(Number.isFinite(ao) && ao >= 0 && ao <= 1).toBe(true);
+          expect(Number.isFinite(af) && af >= 0 && af <= 1).toBe(true);
+        }
+      });
+      built.dispose();
+    }
+
+    // 2. Organic resting wall-thickness mottling & zero-initial tear/tether state
+    const core0 = buildCoreAssembly(0, mats);
+    const sim = new ShrinkFilmSimulation(core0.descriptor, DEFAULT_COCOON_CONFIG);
+    let minThick = Infinity;
+    let maxThick = -Infinity;
+    for (let i = 0; i < sim.baseVertexCount; i++) {
+      const th = sim.organicData[i * 4];
+      expect(Number.isFinite(th)).toBe(true);
+      if (th < minThick) minThick = th;
+      if (th > maxThick) maxThick = th;
+      expect(sim.organicData[i * 4 + 1]).toBe(0); // lipOpenness == 0 at rest
+      expect(sim.organicData[i * 4 + 3]).toBe(0); // edgeTaper == 0 at rest
+    }
+    expect(minThick).toBeGreaterThanOrEqual(0.19);
+    expect(maxThick).toBeLessThanOrEqual(1.0);
+    expect(maxThick - minThick).toBeGreaterThan(0.30);
+    expect(sim.activeTetherCount).toBe(0);
+    expect(sim.tetherGeometry.drawRange.count).toBe(0);
+
+    // 3. Heat & rupture front face, verify continuous deckle lip attributes & finite silk tethers
+    for (let f = 0; f < 90; f++) {
+      sim.applyHeatBeam(0.05, 0.08, 1.25, 0, 0.2, 4.9, 0.85, 2.8, 1 / 60);
+      sim.step(1 / 60);
+    }
+    expect(sim.triggerRuptureAtPoint(0.05, 0.08, 1.0, false)).toBe(true);
+
+    let peakTethers = sim.activeTetherCount;
+    for (let f = 0; f < 36; f++) {
+      sim.step(1 / 60);
+      if (sim.activeTetherCount > peakTethers) peakTethers = sim.activeTetherCount;
+    }
+
+    expect(peakTethers).toBeGreaterThan(0);
+
+    // Check tear-edge deckle attribute continuity: open lips > 0.3, 1-ring interior neighbors > 0, far rear == 0
+    let openLipCount = 0;
+    let ringInteriorFeatherCount = 0;
+    let farQuietCount = 0;
+    for (let i = 0; i < sim.activeVertexCount; i++) {
+      const i4 = i * 4;
+      const lipOpen = sim.organicData[i4 + 1];
+      const edgeTaper = sim.organicData[i4 + 3];
+      expect(Number.isFinite(lipOpen) && lipOpen >= 0 && lipOpen <= 1).toBe(true);
+      expect(Number.isFinite(edgeTaper) && edgeTaper >= 0 && edgeTaper <= 1).toBe(true);
+
+      if (sim.tearEdgeData[i] > 0.5 && lipOpen > 0.25) {
+        openLipCount++;
+      } else if (sim.tearEdgeData[i] < 0.5 && lipOpen > 0.10) {
+        ringInteriorFeatherCount++;
+      } else if (sim.pos[i * 3 + 2] < -0.8 && lipOpen === 0) {
+        farQuietCount++;
+      }
+    }
+    expect(openLipCount).toBeGreaterThanOrEqual(4);
+    expect(ringInteriorFeatherCount).toBeGreaterThanOrEqual(4);
+    expect(farQuietCount).toBeGreaterThan(50);
+
+    // Verify all active silk tether vertices are finite and drawRange stays within index bounds
+    const tPosAttr = sim.tetherGeometry.attributes.position as THREE.BufferAttribute;
+    const tStrainAttr = sim.tetherGeometry.attributes.aTetherStrain as THREE.BufferAttribute;
+    const tIdx = sim.tetherGeometry.index!;
+    expect(sim.tetherGeometry.drawRange.count).toBeLessThanOrEqual(tIdx.count);
+    for (let i = 0; i < tPosAttr.count; i++) {
+      expect(Number.isFinite(tPosAttr.getX(i))).toBe(true);
+      expect(Number.isFinite(tPosAttr.getY(i))).toBe(true);
+      expect(Number.isFinite(tPosAttr.getZ(i))).toBe(true);
+      const st = tStrainAttr.getX(i);
+      const al = tStrainAttr.getY(i);
+      expect(Number.isFinite(st) && st >= 0 && st <= 1).toBe(true);
+      expect(Number.isFinite(al) && al >= 0 && al <= 1).toBe(true);
+    }
+
+    // Verify reset clears silk tethers and deckle lip attributes completely
+    sim.reset(core0.descriptor, false);
+    expect(sim.activeTetherCount).toBe(0);
+    expect(sim.tetherGeometry.drawRange.count).toBe(0);
+    for (let i = 0; i < sim.baseVertexCount; i++) {
+      expect(sim.organicData[i * 4 + 1]).toBe(0);
+      expect(sim.organicData[i * 4 + 3]).toBe(0);
+    }
+
+    sim.dispose();
+    core0.dispose();
+    dispose();
+  });
 });

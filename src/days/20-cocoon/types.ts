@@ -108,8 +108,8 @@ export interface CocoonPhysicsConfig {
 
 export const DEFAULT_COCOON_CONFIG: CocoonPhysicsConfig = {
   subdivisions: 4,
-  looseRadius: 1.44,
-  looseElongationY: 1.11,
+  looseRadius: 1.46,
+  looseElongationY: 1.19,
   maxShrinkRatio: 0.58,
   skinClearance: 0.018,
   substeps: 3,
@@ -122,4 +122,5 @@ export interface Day20TelemetryState {
   tearFraction: number;
   coreIndex: number;
   vertexCount: number;
+  activeTetherCount: number;
 }

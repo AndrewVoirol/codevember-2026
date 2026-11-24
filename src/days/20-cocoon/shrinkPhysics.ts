@@ -69,8 +69,19 @@ function crinkleFbm3D(x: number, y: number, z: number): number {
   return v0 * 0.57 + v1 * 0.29 + v2 * 0.14;
 }
 
+function smoothFbm2Oct3D(x: number, y: number, z: number): number {
+  const c = 0.80901699;
+  const s = 0.58778525;
+  const v0 = valueNoise3D(x, y, z);
+  const x1 = (x * c - z * s) * 1.97 + 5.41;
+  const y1 = (y * c + x * s) * 1.97 + 2.83;
+  const z1 = (z * c + y * s) * 1.97 + 8.17;
+  const v1 = valueNoise3D(x1, y1, z1);
+  return v0 * 0.68 + v1 * 0.32;
+}
+
 // ============================================================================
-// Subdivided Outward-Wound Icosphere Topology Builder
+// Subdivided Outward-Wound Organic-Relaxed Icosphere Topology Builder
 // ============================================================================
 
 interface BaseMeshTopology {
@@ -158,7 +169,7 @@ function buildIcosphereTopology(subdivisions: number): BaseMeshTopology {
   const unitDirs = new Float32Array(rawVerts);
   const indices = new Uint32Array(tris);
 
-  // Enforce strict outward CCW winding on every triangle
+  // Enforce strict outward CCW winding on every triangle before organic relaxation
   for (let ti = 0; ti < triCount; ti++) {
     const i0 = indices[ti * 3];
     const i1 = indices[ti * 3 + 1];
@@ -186,6 +197,110 @@ function buildIcosphereTopology(subdivisions: number): BaseMeshTopology {
     if (dotOut < 0) {
       indices[ti * 3 + 1] = i2;
       indices[ti * 3 + 2] = i1;
+    }
+  }
+
+  // Deterministic organic tangential vertex jitter on S^2:
+  // Breaks the regular 60-degree geodesic icosphere lattice so neither shrink pleats nor
+  // tear paths ever fall onto rigid geometric grid lines, while strictly preserving outward
+  // CCW winding and well-conditioned triangle aspect ratios (zero slivers/inversions).
+  const vertTris: number[][] = Array.from({ length: vertexCount }, () => []);
+  for (let ti = 0; ti < triCount; ti++) {
+    vertTris[indices[ti * 3]].push(ti);
+    vertTris[indices[ti * 3 + 1]].push(ti);
+    vertTris[indices[ti * 3 + 2]].push(ti);
+  }
+
+  // Measure nominal angular edge length at this subdivision level
+  const refA = indices[0] * 3;
+  const refB = indices[1] * 3;
+  const hEdge = Math.hypot(
+    unitDirs[refB] - unitDirs[refA],
+    unitDirs[refB + 1] - unitDirs[refA + 1],
+    unitDirs[refB + 2] - unitDirs[refA + 2]
+  );
+  const minTriArea = 0.24 * hEdge * hEdge;
+
+  for (let v = 0; v < vertexCount; v++) {
+    const v3 = v * 3;
+    const ux = unitDirs[v3];
+    const uy = unitDirs[v3 + 1];
+    const uz = unitDirs[v3 + 2];
+
+    // Orthonormal tangent basis (t1, t2) on unit sphere at u
+    let rx = Math.abs(uy) < 0.85 ? 0 : 1;
+    let ry = Math.abs(uy) < 0.85 ? 1 : 0;
+    let rz = 0;
+    let t1x = uy * rz - uz * ry;
+    let t1y = uz * rx - ux * rz;
+    let t1z = ux * ry - uy * rx;
+    const t1Len = Math.hypot(t1x, t1y, t1z) + 1e-8;
+    t1x /= t1Len;
+    t1y /= t1Len;
+    t1z /= t1Len;
+    const t2x = uy * t1z - uz * t1y;
+    const t2y = uz * t1x - ux * t1z;
+    const t2z = ux * t1y - uy * t1x;
+
+    // Combine gentle organic domain swirl with per-vertex irregular jitter (±20% edge length)
+    const swirlA = smoothFbm2Oct3D(ux * 3.1 + 1.4, uy * 3.1 + 4.7, uz * 3.1 + 2.3) - 0.5;
+    const swirlB = smoothFbm2Oct3D(ux * 3.1 + 8.9, uy * 3.1 + 1.2, uz * 3.1 + 6.5) - 0.5;
+    const jA = hash3Int(v, 19, 37) - 0.5;
+    const jB = hash3Int(v, 61, 103) - 0.5;
+    let d1 = (swirlA * 0.22 + jA * 0.28) * hEdge;
+    let d2 = (swirlB * 0.22 + jB * 0.28) * hEdge;
+
+    const inc = vertTris[v];
+    for (let attempt = 0; attempt < 4; attempt++) {
+      let cx = ux + t1x * d1 + t2x * d2;
+      let cy = uy + t1y * d1 + t2y * d2;
+      let cz = uz + t1z * d1 + t2z * d2;
+      const cLen = Math.hypot(cx, cy, cz);
+      cx /= cLen;
+      cy /= cLen;
+      cz /= cLen;
+
+      unitDirs[v3] = cx;
+      unitDirs[v3 + 1] = cy;
+      unitDirs[v3 + 2] = cz;
+
+      let valid = true;
+      for (let k = 0; k < inc.length; k++) {
+        const ti = inc[k];
+        const i0 = indices[ti * 3] * 3;
+        const i1 = indices[ti * 3 + 1] * 3;
+        const i2 = indices[ti * 3 + 2] * 3;
+        const ax = unitDirs[i0];
+        const ay = unitDirs[i0 + 1];
+        const az = unitDirs[i0 + 2];
+        const e1x = unitDirs[i1] - ax;
+        const e1y = unitDirs[i1 + 1] - ay;
+        const e1z = unitDirs[i1 + 2] - az;
+        const e2x = unitDirs[i2] - ax;
+        const e2y = unitDirs[i2 + 1] - ay;
+        const e2z = unitDirs[i2 + 2] - az;
+        const nx = e1y * e2z - e1z * e2y;
+        const ny = e1z * e2x - e1x * e2z;
+        const nz = e1x * e2y - e1y * e2x;
+        const area = 0.5 * Math.hypot(nx, ny, nz);
+        const dotOut =
+          nx * (ax + unitDirs[i1] + unitDirs[i2]) +
+          ny * (ay + unitDirs[i1 + 1] + unitDirs[i2 + 1]) +
+          nz * (az + unitDirs[i1 + 2] + unitDirs[i2 + 2]);
+        if (dotOut <= 0.0005 || area < minTriArea) {
+          valid = false;
+          break;
+        }
+      }
+
+      if (valid) break;
+      d1 *= 0.45;
+      d2 *= 0.45;
+      if (attempt === 3) {
+        unitDirs[v3] = ux;
+        unitDirs[v3 + 1] = uy;
+        unitDirs[v3 + 2] = uz;
+      }
     }
   }
 
@@ -250,8 +365,13 @@ function buildIcosphereTopology(subdivisions: number): BaseMeshTopology {
 }
 
 // ============================================================================
-// Crack-Tip Propagation State
+// Crack-Tip Propagation State & Fibrous Silk Tether Pool Constants
 // ============================================================================
+
+const MAX_TETHERS = 72;
+const TETHER_SEGS = 6;
+const TETHER_VERTS_PER_STRAND = (TETHER_SEGS + 1) * 2;
+const TETHER_INDICES_PER_STRAND = TETHER_SEGS * 6;
 
 interface ActiveCrackTip {
   tipVertex: number;
@@ -262,6 +382,9 @@ interface ActiveCrackTip {
   dirZ: number;
   remainingSteps: number;
   cooldownSec: number;
+  meanderPhase: number;
+  meanderRate: number;
+  branchBudget: number;
 }
 
 interface IncidentTriInfo {
@@ -287,7 +410,26 @@ export class ShrinkFilmSimulation {
   readonly restDirAttr: THREE.BufferAttribute;
   readonly stateAttr: THREE.BufferAttribute;
   readonly tearEdgeAttr: THREE.BufferAttribute;
+  readonly organicAttr: THREE.BufferAttribute;
   readonly indexAttr: THREE.BufferAttribute;
+
+  // Delicate stretched fibrous silk strands spanning freshly opened tear gaps (zero-GC pre-allocated pool)
+  readonly tetherGeometry: THREE.BufferGeometry;
+  private readonly tetherPos: Float32Array;
+  private readonly tetherNorm: Float32Array;
+  private readonly tetherUv: Float32Array;
+  private readonly tetherStrain: Float32Array; // vec2: [strain 0..1, visibilityAlpha 0..1]
+  private readonly tetherPosAttr: THREE.BufferAttribute;
+  private readonly tetherNormAttr: THREE.BufferAttribute;
+  private readonly tetherStrainAttr: THREE.BufferAttribute;
+  private readonly tetherA = new Int32Array(MAX_TETHERS);
+  private readonly tetherB = new Int32Array(MAX_TETHERS);
+  private readonly tetherMaxSpan = new Float32Array(MAX_TETHERS);
+  private readonly tetherBreakProgress = new Float32Array(MAX_TETHERS);
+  private readonly tetherPhase = new Float32Array(MAX_TETHERS);
+  private readonly tetherActive = new Uint8Array(MAX_TETHERS); // 0=unused, 1=stretched, 2=snapping
+  private tetherCursor = 0;
+  activeTetherCount = 0;
 
   // Exposed typed arrays (backing GPU attributes directly — zero per-frame copy/alloc!)
   readonly pos: Float32Array;
@@ -295,6 +437,7 @@ export class ShrinkFilmSimulation {
   readonly restDirs: Float32Array;
   readonly stateData: Float32Array; // vec4: [shrink, tension, heat, contact]
   readonly tearEdgeData: Float32Array;
+  readonly organicData: Float32Array; // vec4: [wallThickness, lipOpenness, fiberPhase, edgeTaper]
   readonly indices: Uint32Array;
 
   // Internal simulation state
@@ -303,6 +446,8 @@ export class ShrinkFilmSimulation {
   readonly tension: Float32Array;
   readonly contact: Float32Array;
   readonly sdfDist: Float32Array;
+  readonly wallThickness: Float32Array;
+  readonly fiberPhase: Float32Array;
 
   private readonly prevPos: Float32Array;
   private readonly vel: Float32Array;
@@ -315,6 +460,11 @@ export class ShrinkFilmSimulation {
   private readonly flapRecoilEnergy: Float32Array;
   private readonly flapRecoilScratch: Float32Array;
   private readonly seamRecoilDir: Float32Array;
+  private readonly tearPairTwin: Int32Array;
+  private readonly lipOpenness: Float32Array;
+  private readonly lipOpenScratch: Float32Array;
+  private readonly edgeTaper: Float32Array;
+  private readonly edgeTaperScratch: Float32Array;
   private readonly suctionAccel: Float32Array;
   private readonly nearCoreMask: Uint8Array;
   private readonly surfaceMinGap: Float32Array;
@@ -381,6 +531,7 @@ export class ShrinkFilmSimulation {
     this.restDirs = new Float32Array(this.maxVertices * 3);
     this.stateData = new Float32Array(this.maxVertices * 4);
     this.tearEdgeData = new Float32Array(this.maxVertices);
+    this.organicData = new Float32Array(this.maxVertices * 4);
     this.indices = new Uint32Array(this.triCount * 3);
 
     this.shrink = new Float32Array(this.maxVertices);
@@ -391,11 +542,18 @@ export class ShrinkFilmSimulation {
     this.tensionCount = new Uint16Array(this.maxVertices);
     this.contact = new Float32Array(this.maxVertices);
     this.sdfDist = new Float32Array(this.maxVertices);
+    this.wallThickness = new Float32Array(this.maxVertices);
+    this.fiberPhase = new Float32Array(this.maxVertices);
     this.flapPeel = new Float32Array(this.maxVertices);
     this.flapPeelScratch = new Float32Array(this.maxVertices);
     this.flapRecoilEnergy = new Float32Array(this.maxVertices);
     this.flapRecoilScratch = new Float32Array(this.maxVertices);
     this.seamRecoilDir = new Float32Array(this.maxVertices * 3);
+    this.tearPairTwin = new Int32Array(this.maxVertices);
+    this.lipOpenness = new Float32Array(this.maxVertices);
+    this.lipOpenScratch = new Float32Array(this.maxVertices);
+    this.edgeTaper = new Float32Array(this.maxVertices);
+    this.edgeTaperScratch = new Float32Array(this.maxVertices);
     this.suctionAccel = new Float32Array(this.maxVertices * 3);
     this.nearCoreMask = new Uint8Array(this.maxVertices);
     this.surfaceMinGap = new Float32Array(this.maxVertices);
@@ -429,6 +587,8 @@ export class ShrinkFilmSimulation {
     this.stateAttr.setUsage(THREE.DynamicDrawUsage);
     this.tearEdgeAttr = new THREE.BufferAttribute(this.tearEdgeData, 1);
     this.tearEdgeAttr.setUsage(THREE.DynamicDrawUsage);
+    this.organicAttr = new THREE.BufferAttribute(this.organicData, 4);
+    this.organicAttr.setUsage(THREE.DynamicDrawUsage);
     this.indexAttr = new THREE.BufferAttribute(this.indices, 1);
     this.indexAttr.setUsage(THREE.DynamicDrawUsage);
 
@@ -437,10 +597,63 @@ export class ShrinkFilmSimulation {
     this.geometry.setAttribute('aRestDir', this.restDirAttr);
     this.geometry.setAttribute('aState', this.stateAttr);
     this.geometry.setAttribute('aTearEdge', this.tearEdgeAttr);
+    this.geometry.setAttribute('aOrganic', this.organicAttr);
     this.geometry.setIndex(this.indexAttr);
 
     // Pre-set generous fixed bounding sphere so frustum culling never clips curled flaps
     this.geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), 3.0);
+
+    // Pre-allocate fibrous silk tether strand pool (zero per-frame allocations)
+    const totalTetherVerts = MAX_TETHERS * TETHER_VERTS_PER_STRAND;
+    const totalTetherIndices = MAX_TETHERS * TETHER_INDICES_PER_STRAND;
+    this.tetherPos = new Float32Array(totalTetherVerts * 3);
+    this.tetherNorm = new Float32Array(totalTetherVerts * 3);
+    this.tetherUv = new Float32Array(totalTetherVerts * 2);
+    this.tetherStrain = new Float32Array(totalTetherVerts * 2);
+    const tetherIdx = new Uint16Array(totalTetherIndices);
+
+    for (let s = 0; s < MAX_TETHERS; s++) {
+      const vBase = s * TETHER_VERTS_PER_STRAND;
+      const iBase = s * TETHER_INDICES_PER_STRAND;
+      for (let k = 0; k <= TETHER_SEGS; k++) {
+        const u = k / TETHER_SEGS;
+        const v0 = vBase + k * 2;
+        this.tetherUv[v0 * 2] = u;
+        this.tetherUv[v0 * 2 + 1] = 0;
+        this.tetherUv[(v0 + 1) * 2] = u;
+        this.tetherUv[(v0 + 1) * 2 + 1] = 1;
+        this.tetherNorm[v0 * 3 + 2] = 1;
+        this.tetherNorm[(v0 + 1) * 3 + 2] = 1;
+      }
+      for (let k = 0; k < TETHER_SEGS; k++) {
+        const a = vBase + k * 2;
+        const b = a + 1;
+        const c = a + 2;
+        const d = a + 3;
+        const o = iBase + k * 6;
+        tetherIdx[o] = a;
+        tetherIdx[o + 1] = c;
+        tetherIdx[o + 2] = b;
+        tetherIdx[o + 3] = b;
+        tetherIdx[o + 4] = c;
+        tetherIdx[o + 5] = d;
+      }
+    }
+
+    this.tetherGeometry = new THREE.BufferGeometry();
+    this.tetherPosAttr = new THREE.BufferAttribute(this.tetherPos, 3);
+    this.tetherPosAttr.setUsage(THREE.DynamicDrawUsage);
+    this.tetherNormAttr = new THREE.BufferAttribute(this.tetherNorm, 3);
+    this.tetherNormAttr.setUsage(THREE.DynamicDrawUsage);
+    this.tetherStrainAttr = new THREE.BufferAttribute(this.tetherStrain, 2);
+    this.tetherStrainAttr.setUsage(THREE.DynamicDrawUsage);
+    this.tetherGeometry.setAttribute('position', this.tetherPosAttr);
+    this.tetherGeometry.setAttribute('normal', this.tetherNormAttr);
+    this.tetherGeometry.setAttribute('uv', new THREE.BufferAttribute(this.tetherUv, 2));
+    this.tetherGeometry.setAttribute('aTetherStrain', this.tetherStrainAttr);
+    this.tetherGeometry.setIndex(new THREE.BufferAttribute(tetherIdx, 1));
+    this.tetherGeometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), 3.0);
+    this.tetherGeometry.setDrawRange(0, 0);
 
     this.reset(initialCore, false);
   }
@@ -450,7 +663,7 @@ export class ShrinkFilmSimulation {
   }
 
   /**
-   * Resets/re-wraps a fresh loose crinkled translucent cocoon around `nextCore`.
+   * Resets/re-wraps a fresh organic silkworm-parchment cocoon around `nextCore`.
    */
   reset(nextCore: CoreAssemblyDescriptor, animateDrop = true): void {
     this.core = nextCore;
@@ -464,8 +677,22 @@ export class ShrinkFilmSimulation {
     this.tearFraction = 0;
     this.rewrapAnimProgress = animateDrop ? 0.0 : 1.0;
 
+    // Reset silk tether pool cleanly
+    this.tetherActive.fill(0);
+    this.tetherBreakProgress.fill(0);
+    this.tetherStrain.fill(0);
+    this.tetherPos.fill(0);
+    this.tetherCursor = 0;
+    this.activeTetherCount = 0;
+    this.tetherGeometry.setDrawRange(0, 0);
+    this.tetherPosAttr.needsUpdate = true;
+    this.tetherStrainAttr.needsUpdate = true;
+
     // Restore immutable triangle index topology
     this.indices.set(this.topo.indices);
+    this.tearPairTwin.fill(-1);
+    this.lipOpenness.fill(0);
+    this.edgeTaper.fill(0);
 
     const seedShift = (this.rewrapSeed * 3.71) % 37.0;
     const baseR = this.config.looseRadius;
@@ -478,13 +705,29 @@ export class ShrinkFilmSimulation {
       const uy = this.topo.unitDirs[i3 + 1];
       const uz = this.topo.unitDirs[i3 + 2];
 
-      // Multi-scale irrational-angle 3D organic parchment crinkle folds (C1 smooth, zero polar star harmonics)
-      const fMacro = crinkleFbm3D(ux * 2.3 + seedShift, uy * 2.2 + 1.7, uz * 2.3 + 4.3) - 0.5;
-      const fMeso = crinkleFbm3D(ux * 5.8 + 9.2 + seedShift, uy * 5.6 + 2.8, uz * 5.8 + 6.1) - 0.5;
-      // C1 soft-ridged fold creases mimicking loosely draped archival parchment/cellophane sleeve
-      const crease = 0.5 - Math.sqrt(fMacro * fMacro * 4.0 + 0.045);
-      const bagSwell = 1.0 + 0.048 * (1.0 - uy * uy) - 0.024 * uy;
-      const r = baseR * bagSwell * (1.0 + fMacro * 0.105 + fMeso * 0.052 + crease * 0.024);
+      // Smooth mesh-resolved organic silkworm-cocoon & botanical husk lofting (freq 1.4..2.6):
+      // Deliberately avoids Nyquist-aliased vertex noise so silhouettes stay silky-smooth & organic!
+      const wX = smoothFbm2Oct3D(ux * 1.45 + seedShift, uy * 1.45 + 2.1, uz * 1.45 + 5.7) - 0.5;
+      const wY = smoothFbm2Oct3D(ux * 1.45 + 6.4 + seedShift, uy * 1.45 + 1.3, uz * 1.45 + 3.2) - 0.5;
+      const wZ = smoothFbm2Oct3D(ux * 1.45 + 3.8 + seedShift, uy * 1.45 + 7.5, uz * 1.45 + 0.9) - 0.5;
+
+      // Domain-warped gentle silk-wrap sculptural contours + organic shallow folds
+      const qx = ux + wX * 0.34;
+      const qy = uy + wY * 0.34;
+      const qz = uz + wZ * 0.34;
+      const fMacro = smoothFbm2Oct3D(qx * 1.95 + seedShift, qy * 1.75 + 1.7, qz * 1.95 + 4.3) - 0.5;
+      const fFold = smoothFbm2Oct3D(qx * 2.75 + 9.2 + seedShift, qy * 2.15 + 2.8, qz * 2.75 + 6.1) - 0.5;
+
+      // Natural silkworm-cocoon ovoid profile: gentle mid-equatorial waisting + subtle asymmetric fullness
+      const cocoonWaist = 1.0 - 0.052 * Math.exp(-uy * uy * 5.6);
+      const botanicalTaper = 1.0 + 0.038 * uy - 0.022 * uy * uy + 0.018 * (ux * 0.7 - uz * 0.7);
+      // C1 soft organic drape crease (broad enough to resolve cleanly across 6-8 triangles)
+      const softRidge = 0.5 - Math.sqrt(fMacro * fMacro * 3.2 + 0.09);
+      const r =
+        baseR *
+        cocoonWaist *
+        botanicalTaper *
+        (1.0 + fMacro * 0.072 + fFold * 0.032 + softRidge * 0.022);
 
       const hx = ux * r;
       const hy = uy * r * elongY;
@@ -493,6 +736,16 @@ export class ShrinkFilmSimulation {
       this.looseHomePos[i3] = hx;
       this.looseHomePos[i3 + 1] = hy;
       this.looseHomePos[i3 + 2] = hz;
+
+      // Uneven organic wall thickness (luminous thin honey-kaolin windows vs denser silk veins)
+      const thickWarp = crinkleFbm3D(qx * 2.8 + 4.1 + seedShift, qy * 3.6 + 1.9, qz * 2.8 + 7.3);
+      const silkBand = Math.sin((qy * 5.2 + qx * 1.9 - qz * 1.4 + thickWarp * 2.4) * Math.PI) * 0.5 + 0.5;
+      const thickVal = Math.max(0.20, Math.min(1.0, thickWarp * 0.72 + silkBand * 0.28));
+      this.wallThickness[i] = thickVal;
+
+      // Per-vertex organic curl/stiffness phase for asymmetric natural flap peeling
+      const phaseVal = smoothFbm2Oct3D(ux * 3.4 + 12.1 + seedShift, uy * 3.4 + 5.3, uz * 3.4 + 8.7);
+      this.fiberPhase[i] = phaseVal;
 
       // Ensure initial loose sleeve strictly clears core SDF
       const px = hx * expandStart;
@@ -523,6 +776,12 @@ export class ShrinkFilmSimulation {
       this.seamRecoilDir[i3] = 0;
       this.seamRecoilDir[i3 + 1] = 0;
       this.seamRecoilDir[i3 + 2] = 0;
+
+      const i4 = i * 4;
+      this.organicData[i4] = thickVal;
+      this.organicData[i4 + 1] = 0;
+      this.organicData[i4 + 2] = phaseVal;
+      this.organicData[i4 + 3] = 0;
     }
 
     // Enforce core clearance at rest (vertices + continuous triangle surface)
@@ -567,6 +826,7 @@ export class ShrinkFilmSimulation {
     this.indexAttr.needsUpdate = true;
     this.restDirAttr.needsUpdate = true;
     this.tearEdgeAttr.needsUpdate = true;
+    this.organicAttr.needsUpdate = true;
   }
 
   /**
@@ -619,8 +879,10 @@ export class ShrinkFilmSimulation {
       this.heat[i] = nextHeat;
 
       // Monotonic irreversible thermoplastic rest-length shrinkage once above glass transition
+      // Thinner parchment pockets draw taut slightly ahead of dense silk veins -> natural non-geometric folds
       if (nextHeat > 0.05) {
-        const shrinkDelta = (nextHeat - 0.05) * Math.min(2.6, flux) * dt * 1.45;
+        const organicRate = 0.84 + 0.32 * (1.0 - this.wallThickness[i]);
+        const shrinkDelta = (nextHeat - 0.05) * Math.min(2.6, flux) * dt * 1.45 * organicRate;
         if (shrinkDelta > 0) {
           this.shrink[i] = Math.min(1.0, this.shrink[i] + shrinkDelta);
         }
@@ -724,10 +986,12 @@ export class ShrinkFilmSimulation {
       this.diffuseFlapPeelWeights();
       this.smoothTornLips(2);
       this.projectCoreSdf(false, 2);
+      this.updateSilkTethers(0.016);
       this.recomputeNormalsAndAttributes();
       this.indexAttr.needsUpdate = true;
       this.restDirAttr.needsUpdate = true;
       this.tearEdgeAttr.needsUpdate = true;
+      this.organicAttr.needsUpdate = true;
     }
     return opened;
   }
@@ -844,21 +1108,31 @@ export class ShrinkFilmSimulation {
           az += (hz - pz) * kHome;
         }
 
-        // Bounded damped elastic peel-back & outward curl on torn seam flaps:
-        // Tangential elastic retraction opens a wide curved parchment window onto the core,
-        // while radial lift stays strictly bounded (zero runaway rigid horn spikes!).
+        // Bounded asymmetric organic peel-back & dried-vellum curl on torn seam flaps:
+        // Variable stiffness (wallThickness) + organic wave phase (fiberPhase) make petals curl
+        // unevenly like real dried mulberry parchment/bark while keeping lift strictly bounded.
         if (peel > 0.02) {
+          const stiffMod = 0.72 + 0.56 * (1.0 - this.wallThickness[i]);
+          const curlWave =
+            0.74 +
+            0.40 *
+              Math.sin(
+                this.fiberPhase[i] * 6.28318 +
+                  this.restDirs[i3 + 1] * 3.8 +
+                  this.restDirs[i3] * 2.6
+              );
           const liftGap = Math.max(0, this.sdfDist[i] - clearance);
-          const radialBound = Math.max(0, 1.0 - liftGap / 0.24);
+          const maxRadialGap = 0.20 + 0.06 * curlWave;
+          const radialBound = Math.max(0, 1.0 - liftGap / maxRadialGap);
           const tangentBound = Math.max(0.18, 1.0 - liftGap / 0.42);
-          const recoilAmp = 0.36 + 0.64 * this.flapRecoilEnergy[i];
-          const baseForce = (2.1 + 2.4 * sh) * peel * recoilAmp;
+          const recoilAmp = 0.34 + 0.66 * this.flapRecoilEnergy[i];
+          const baseForce = (2.0 + 2.3 * sh) * peel * recoilAmp * stiffMod;
           const rLen = Math.hypot(px, py, pz) + 1e-5;
           const outX = px / rLen;
           const outY = py / rLen;
           const outZ = pz / rLen;
-          const radPull = 0.34 * radialBound * baseForce;
-          const tanPull = 1.18 * tangentBound * baseForce;
+          const radPull = 0.32 * curlWave * radialBound * baseForce;
+          const tanPull = (1.02 + 0.30 * curlWave) * tangentBound * baseForce;
           ax += outX * radPull + this.seamRecoilDir[i3] * tanPull;
           ay += outY * radPull + this.seamRecoilDir[i3 + 1] * tanPull;
           az += outZ * radPull + this.seamRecoilDir[i3 + 2] * tanPull;
@@ -910,10 +1184,10 @@ export class ShrinkFilmSimulation {
           this.pos[b3 + 2] -= cz;
         }
 
-        // Cross-edge bending constraint: enforces smooth parchment curvature across the shrink transition
-        // so partially-heated sleeves drape cleanly without accordion pie-crust scalloping!
+        // Cross-edge bending constraint: enforces smooth organic parchment curvature across the shrink transition
+        // so partially-heated sleeves drape cleanly without geometric accordion pie-crust spokes!
         if (iter === 0) {
-          const alphaBend = 0.0048 / dtSubSq;
+          const alphaBend = 0.0036 / dtSubSq;
           const bendCount = this.topo.bendCount;
           for (let bi = 0; bi < bendCount; bi++) {
             if (this.bendActive[bi] === 0) continue;
@@ -931,8 +1205,8 @@ export class ShrinkFilmSimulation {
             const sBend = 0.5 * (this.shrink[a] + this.shrink[b]);
             const targetLen = this.bendBaseRest[bi] * (1.0 - maxShrinkRatio * 0.52 * sBend);
             const diff = dist - targetLen;
-            // Resist inward accordion buckling strongly while permitting clean outward ridge draping
-            const localAlpha = diff < 0 ? alphaBend * 0.50 : alphaBend * (1.6 + sBend * 1.4);
+            // Resist inward radial accordion buckling strongly while permitting clean outward ridge draping
+            const localAlpha = diff < 0 ? alphaBend * 0.40 : alphaBend * (1.5 + sBend * 1.3);
             const corr = (diff / (2.0 + localAlpha)) / dist;
 
             const cx = dx * corr;
@@ -988,6 +1262,9 @@ export class ShrinkFilmSimulation {
     this.projectCoreSdf(false, 4);
     this.computeStrainAndTelemetry();
     this.recomputeNormalsAndAttributes();
+    if (this.splitCount > 0 || this.activeTetherCount > 0) {
+      this.updateSilkTethers(clampedDt);
+    }
   }
 
   private stepThermalDiffusion(dt: number): void {
@@ -1388,6 +1665,54 @@ export class ShrinkFilmSimulation {
       this.normals[c3 + 2] += nz;
     }
 
+    // Compute continuous torn-lip openness & organic seam taper for fragment-level deckle feathering
+    if (this.splitCount > 0) {
+      for (let i = 0; i < vCount; i++) {
+        this.lipOpenness[i] = 0;
+        this.edgeTaper[i] = 0;
+      }
+      for (let i = 0; i < vCount; i++) {
+        if (this.tearEdgeData[i] <= 0.5) continue;
+        const twin = this.tearPairTwin[i];
+        let openVal = 0.55;
+        if (twin >= 0 && twin < vCount) {
+          const i3 = i * 3;
+          const t3 = twin * 3;
+          const sep = Math.hypot(
+            this.pos[i3] - this.pos[t3],
+            this.pos[i3 + 1] - this.pos[t3 + 1],
+            this.pos[i3 + 2] - this.pos[t3 + 2]
+          );
+          openVal = Math.max(0.0, Math.min(1.0, (sep - 0.012) / 0.11));
+        }
+        this.lipOpenness[i] = openVal;
+        this.edgeTaper[i] = Math.min(1.0, 0.35 + openVal * 0.65);
+      }
+
+      // Propagate 1 ring inward so every triangle bordering an open lip carries consistent edge activation
+      for (let i = 0; i < vCount; i++) {
+        this.lipOpenScratch[i] = this.lipOpenness[i];
+        this.edgeTaperScratch[i] = this.edgeTaper[i];
+      }
+      for (let e = 0; e < this.activeEdgeCount; e++) {
+        if (this.edgeActive[e] === 0) continue;
+        const a = this.edgeA[e];
+        const b = this.edgeB[e];
+        const oa = this.lipOpenness[a] * 0.90;
+        const ob = this.lipOpenness[b] * 0.90;
+        if (oa > this.lipOpenScratch[b]) this.lipOpenScratch[b] = oa;
+        if (ob > this.lipOpenScratch[a]) this.lipOpenScratch[a] = ob;
+        const ta = this.edgeTaper[a] * 0.90;
+        const tb = this.edgeTaper[b] * 0.90;
+        if (ta > this.edgeTaperScratch[b]) this.edgeTaperScratch[b] = ta;
+        if (tb > this.edgeTaperScratch[a]) this.edgeTaperScratch[a] = tb;
+      }
+      for (let i = 0; i < vCount; i++) {
+        this.lipOpenness[i] = this.lipOpenScratch[i];
+        this.edgeTaper[i] = this.edgeTaperScratch[i];
+      }
+    }
+
     for (let i = 0; i < vCount; i++) {
       const i3 = i * 3;
       const len = Math.hypot(this.normals[i3], this.normals[i3 + 1], this.normals[i3 + 2]);
@@ -1407,11 +1732,17 @@ export class ShrinkFilmSimulation {
       this.stateData[i4 + 1] = this.tension[i];
       this.stateData[i4 + 2] = this.heat[i];
       this.stateData[i4 + 3] = this.contact[i];
+
+      this.organicData[i4] = this.wallThickness[i];
+      this.organicData[i4 + 1] = this.lipOpenness[i];
+      this.organicData[i4 + 2] = this.fiberPhase[i];
+      this.organicData[i4 + 3] = this.edgeTaper[i];
     }
 
     this.posAttr.needsUpdate = true;
     this.normalAttr.needsUpdate = true;
     this.stateAttr.needsUpdate = true;
+    this.organicAttr.needsUpdate = true;
   }
 
   // ==========================================================================
@@ -1504,9 +1835,15 @@ export class ShrinkFilmSimulation {
     this.contact[dst] = this.contact[src];
     this.sdfDist[dst] = this.sdfDist[src];
     this.surfaceMinGap[dst] = this.surfaceMinGap[src];
+    this.wallThickness[dst] = this.wallThickness[src];
+    this.fiberPhase[dst] = (this.fiberPhase[src] + 0.37) % 1.0;
     this.flapPeel[dst] = 1.0;
     this.flapRecoilEnergy[dst] = 1.0;
     this.tearEdgeData[dst] = 1.0;
+    this.tearPairTwin[dst] = src;
+    if (this.tearPairTwin[src] === -1) {
+      this.tearPairTwin[src] = dst;
+    }
 
     return dst;
   }
@@ -1683,8 +2020,216 @@ export class ShrinkFilmSimulation {
     this.pos[n3 + 1] += (dirBY * 0.012 + ny * 0.008);
     this.pos[n3 + 2] += (dirBZ * 0.012 + nz * 0.008);
 
+    // Spawn delicate gossamer stretched silk tether filaments across selected freshly split lips
+    // (slightly irregular diagonal pairing so fibers form an organic web, never a parallel harp!)
+    if (hash3Int(v, vNew, this.splitCount + 3) > 0.34) {
+      this.spawnSilkTether(v, vNew, 0.24 + 0.26 * hash3Int(v, vNew, this.splitCount + 7));
+    }
+    if (cutSpokes.length > 0 && hash3Int(vNew, cutSpokes[0], 13) > 0.68) {
+      this.spawnSilkTether(
+        vNew,
+        cutSpokes[0],
+        0.22 + 0.22 * hash3Int(cutSpokes[0], v, this.splitCount + 29)
+      );
+    }
+
     this.splitCount += 1;
     this.tearFraction = Math.min(1.0, this.splitCount / 64);
+  }
+
+  private spawnSilkTether(vertA: number, vertB: number, maxSpan: number): void {
+    const slot = this.tetherCursor % MAX_TETHERS;
+    this.tetherCursor++;
+    this.tetherA[slot] = vertA;
+    this.tetherB[slot] = vertB;
+    this.tetherMaxSpan[slot] = maxSpan;
+    this.tetherBreakProgress[slot] = 0;
+    this.tetherPhase[slot] = hash3Int(vertA, vertB, slot + 101);
+    this.tetherActive[slot] = 1;
+  }
+
+  /**
+   * Updates pre-allocated stretched silk fiber ribbons spanning freshly torn seam gaps.
+   * Filaments bow gently clear of the inner core SDF, thin under tensile strain, and snap
+   * cleanly with brief elastic recoil once stretched beyond their breaking length.
+   */
+  private updateSilkTethers(dtSec: number): void {
+    const clearance = this.config.skinClearance + 0.006;
+    const pos = this.pos;
+    const normals = this.normals;
+    const tPos = this.tetherPos;
+    const tNorm = this.tetherNorm;
+    const tStrain = this.tetherStrain;
+    let aliveCount = 0;
+    let highestSlot = -1;
+
+    for (let s = 0; s < MAX_TETHERS; s++) {
+      const state = this.tetherActive[s];
+      if (state === 0) continue;
+
+      const a = this.tetherA[s];
+      const b = this.tetherB[s];
+      if (a < 0 || b < 0 || a >= this.activeVertexCount || b >= this.activeVertexCount) {
+        this.tetherActive[s] = 0;
+        continue;
+      }
+
+      const a3 = a * 3;
+      const b3 = b * 3;
+      // Anchor each silk fiber slightly inward along the torn flap's recoil direction so ends
+      // emerge seamlessly out of the alpha-feathered deckle parchment (zero detached floating tabs!)
+      const ax = pos[a3] + this.seamRecoilDir[a3] * 0.036;
+      const ay = pos[a3 + 1] + this.seamRecoilDir[a3 + 1] * 0.036;
+      const az = pos[a3 + 2] + this.seamRecoilDir[a3 + 2] * 0.036;
+      let bx = pos[b3] + this.seamRecoilDir[b3] * 0.036;
+      let by = pos[b3 + 1] + this.seamRecoilDir[b3 + 1] * 0.036;
+      let bz = pos[b3 + 2] + this.seamRecoilDir[b3 + 2] * 0.036;
+
+      let dx = bx - ax;
+      let dy = by - ay;
+      let dz = bz - az;
+      let span = Math.hypot(dx, dy, dz);
+      const maxSpan = this.tetherMaxSpan[s];
+
+      let visAlpha = 0;
+      let strain = 0;
+
+      if (state === 1) {
+        if (span > maxSpan) {
+          this.tetherActive[s] = 2;
+          this.tetherBreakProgress[s] = 0.01;
+        }
+        strain = Math.max(0, Math.min(1, span / Math.max(1e-4, maxSpan)));
+        // Only reveal once lips actually part slightly (> 42 mm incl. inward tuck) and fade smoothly at break
+        const openFade = Math.max(0, Math.min(1, (span - 0.042) / 0.055));
+        const preSnapFade = 1.0 - Math.max(0, (strain - 0.82) / 0.18) * 0.55;
+        visAlpha = openFade * preSnapFade;
+      }
+
+      if (this.tetherActive[s] === 2) {
+        const nextP = this.tetherBreakProgress[s] + dtSec * 6.5;
+        if (nextP >= 1.0) {
+          this.tetherActive[s] = 0;
+          const vBase = s * TETHER_VERTS_PER_STRAND;
+          for (let k = 0; k < TETHER_VERTS_PER_STRAND; k++) {
+            const p3 = (vBase + k) * 3;
+            const s2 = (vBase + k) * 2;
+            tPos[p3] = 0;
+            tPos[p3 + 1] = 0;
+            tPos[p3 + 2] = 0;
+            tStrain[s2] = 0;
+            tStrain[s2 + 1] = 0;
+          }
+          continue;
+        }
+        this.tetherBreakProgress[s] = nextP;
+        // Free snapped wisp recoils back cleanly into the deckled lip while vanishing swiftly
+        const recoilFrac = 1.0 - nextP * 0.82;
+        bx = ax + dx * recoilFrac;
+        by = ay + dy * recoilFrac;
+        bz = az + dz * recoilFrac;
+        dx = bx - ax;
+        dy = by - ay;
+        dz = bz - az;
+        span = Math.hypot(dx, dy, dz);
+        strain = 1.0;
+        visAlpha = (1.0 - nextP) * (1.0 - nextP) * 0.52;
+      }
+
+      aliveCount++;
+      highestSlot = s;
+
+      // Average surface normal along the span for gentle outward bow & ribbon framing
+      let nx = normals[a3] + normals[b3];
+      let ny = normals[a3 + 1] + normals[b3 + 1];
+      let nz = normals[a3 + 2] + normals[b3 + 2];
+      const nLen = Math.hypot(nx, ny, nz);
+      if (nLen > 1e-5) {
+        nx /= nLen;
+        ny /= nLen;
+        nz /= nLen;
+      } else {
+        nx = 0;
+        ny = 1;
+        nz = 0;
+      }
+
+      // Compute ribbon side vector perpendicular to strand tangent & outward normal
+      const invSpan = span > 1e-5 ? 1.0 / span : 0;
+      const tx = dx * invSpan;
+      const ty = dy * invSpan;
+      const tz = dz * invSpan;
+      let sideX = ty * nz - tz * ny;
+      let sideY = tz * nx - tx * nz;
+      let sideZ = tx * ny - ty * nx;
+      let sideLen = Math.hypot(sideX, sideY, sideZ);
+      if (sideLen < 1e-5) {
+        sideX = 1;
+        sideY = 0;
+        sideZ = 0;
+        sideLen = 1;
+      }
+      sideX /= sideLen;
+      sideY /= sideLen;
+      sideZ /= sideLen;
+
+      // Subtle organic catenary / curl bow + guaranteed clearance above core SDF
+      const phase = this.tetherPhase[s];
+      let bowOut = 0.012 + 0.022 * (1.0 - strain) * (0.5 + 0.5 * Math.sin(phase * 12.56));
+      const midX = 0.5 * (ax + bx) + nx * bowOut;
+      const midY = 0.5 * (ay + by) + ny * bowOut;
+      const midZ = 0.5 * (az + bz) + nz * bowOut;
+      const dMid = evalCoreSdf(this.core, midX, midY, midZ);
+      if (dMid < clearance) {
+        bowOut += clearance - dMid + 0.008;
+      }
+      const lateralWave = (phase - 0.5) * 0.022 * (1.0 - strain * 0.7);
+      // Truly gossamer hair-thin spun silk strand width (0.9..1.7 mm half-width, thinning under stretch!)
+      const snapThin = this.tetherActive[s] === 2 ? 0.55 : 1.0;
+      const baseHalfW = (0.0009 + phase * 0.0008) * (1.0 - 0.38 * strain) * snapThin;
+
+      const vBase = s * TETHER_VERTS_PER_STRAND;
+      for (let k = 0; k <= TETHER_SEGS; k++) {
+        const u = k / TETHER_SEGS;
+        const arch = 4.0 * u * (1.0 - u);
+        // Gossamer filament profile: gently flared fibrous root -> ultra-fine taut silk thread at center
+        const taperW = baseHalfW * (0.48 + 0.72 * (1.0 - arch));
+        const px = ax + dx * u + nx * (bowOut * arch) + sideX * (lateralWave * arch);
+        const py = ay + dy * u + ny * (bowOut * arch) + sideY * (lateralWave * arch);
+        const pz = az + dz * u + nz * (bowOut * arch) + sideZ * (lateralWave * arch);
+
+        const v0 = vBase + k * 2;
+        const v1 = v0 + 1;
+        const p0 = v0 * 3;
+        const p1 = v1 * 3;
+        tPos[p0] = px - sideX * taperW;
+        tPos[p0 + 1] = py - sideY * taperW;
+        tPos[p0 + 2] = pz - sideZ * taperW;
+        tPos[p1] = px + sideX * taperW;
+        tPos[p1 + 1] = py + sideY * taperW;
+        tPos[p1 + 2] = pz + sideZ * taperW;
+
+        tNorm[p0] = nx;
+        tNorm[p0 + 1] = ny;
+        tNorm[p0 + 2] = nz;
+        tNorm[p1] = nx;
+        tNorm[p1 + 1] = ny;
+        tNorm[p1 + 2] = nz;
+
+        const st0 = v0 * 2;
+        const st1 = v1 * 2;
+        tStrain[st0] = strain;
+        tStrain[st0 + 1] = visAlpha;
+        tStrain[st1] = strain;
+        tStrain[st1 + 1] = visAlpha;
+      }
+    }
+
+    this.activeTetherCount = aliveCount;
+    this.tetherGeometry.setDrawRange(0, (highestSlot + 1) * TETHER_INDICES_PER_STRAND);
+    this.tetherPosAttr.needsUpdate = true;
+    this.tetherNormAttr.needsUpdate = true;
+    this.tetherStrainAttr.needsUpdate = true;
   }
 
   private initiatePunctureAtVertex(
@@ -1707,7 +2252,18 @@ export class ShrinkFilmSimulation {
       // Already on an existing open boundary -> propagate tear inward along best interior spoke!
       const startSpoke = ordered[0].prevVert;
       const endSpoke = ordered[ordered.length - 1].nextVert;
-      return this.splitOpenFanTip(v0, startSpoke, endSpoke, dirX, dirY, dirZ, steps);
+      return this.splitOpenFanTip(
+        v0,
+        startSpoke,
+        endSpoke,
+        dirX,
+        dirY,
+        dirZ,
+        steps,
+        this.fiberPhase[v0] * 6.28318,
+        0.55,
+        1
+      );
     }
 
     const deg = ordered.length;
@@ -1823,6 +2379,7 @@ export class ShrinkFilmSimulation {
     );
 
     const halfSteps = Math.max(3, Math.floor(steps * 0.5));
+    const seedPhase = this.fiberPhase[v0] * 6.28318;
     this.crackTips.push({
       tipVertex: wA,
       prevA: v0,
@@ -1832,6 +2389,9 @@ export class ShrinkFilmSimulation {
       dirZ,
       remainingSteps: halfSteps,
       cooldownSec: 0,
+      meanderPhase: seedPhase,
+      meanderRate: 0.58,
+      branchBudget: 1,
     });
     this.crackTips.push({
       tipVertex: wB,
@@ -1842,6 +2402,9 @@ export class ShrinkFilmSimulation {
       dirZ: -dirZ,
       remainingSteps: halfSteps,
       cooldownSec: 0,
+      meanderPhase: seedPhase + 2.35,
+      meanderRate: -0.64,
+      branchBudget: 1,
     });
 
     return true;
@@ -1854,7 +2417,10 @@ export class ShrinkFilmSimulation {
     dirX: number,
     dirY: number,
     dirZ: number,
-    remainingSteps: number
+    remainingSteps: number,
+    meanderPhase: number,
+    meanderRate: number,
+    branchBudget: number
   ): boolean {
     const fan = this.orderFanAroundVertex(w);
     if (!fan || fan.isClosed || fan.ordered.length < 2) return false;
@@ -1874,12 +2440,38 @@ export class ShrinkFilmSimulation {
     const wy = this.pos[w3 + 1];
     const wz = this.pos[w3 + 2];
 
+    // Organic curved meander: rotate propagation target in local surface tangent plane using
+    // smooth domain-warped fiber-grain flow + slow curvature meander (eliminates straight chords!)
+    const nx = this.normals[w3];
+    const ny = this.normals[w3 + 1];
+    const nz = this.normals[w3 + 2];
+    let perpX = ny * dirZ - nz * dirY;
+    let perpY = nz * dirX - nx * dirZ;
+    let perpZ = nx * dirY - ny * dirX;
+    const pLen = Math.hypot(perpX, perpY, perpZ) + 1e-6;
+    perpX /= pLen;
+    perpY /= pLen;
+    perpZ /= pLen;
+
+    const grainFlow =
+      crinkleFbm3D(
+        this.restDirs[w3] * 3.8 + 4.2,
+        this.restDirs[w3 + 1] * 3.8 + 1.9,
+        this.restDirs[w3 + 2] * 3.8 + 7.4
+      ) - 0.5;
+    const meanderAngle = grainFlow * 0.72 + Math.sin(meanderPhase) * 0.28;
+    const cosM = Math.cos(meanderAngle);
+    const sinM = Math.sin(meanderAngle);
+    const steerX = dirX * cosM + perpX * sinM;
+    const steerY = dirY * cosM + perpY * sinM;
+    const steerZ = dirZ * cosM + perpZ * sinM;
+
     // Interior spokes are ordered[k].prevVert for k = 1 .. ordered.length - 1
     let bestSplitIdx = -1;
     let bestScore = -Infinity;
-    let bestSpokeDirX = dirX;
-    let bestSpokeDirY = dirY;
-    let bestSpokeDirZ = dirZ;
+    let bestSpokeDirX = steerX;
+    let bestSpokeDirY = steerY;
+    let bestSpokeDirZ = steerZ;
 
     for (let k = 1; k < ordered.length; k++) {
       const u = ordered[k].prevVert;
@@ -1891,9 +2483,10 @@ export class ShrinkFilmSimulation {
       const ux = dx / len;
       const uy = dy / len;
       const uz = dz / len;
-      const align = ux * dirX + uy * dirY + uz * dirZ;
-      // Gently steer cracks toward high-tension taut regions while staying smooth
-      const score = align + this.tension[u] * 0.25;
+      const align = ux * steerX + uy * steerY + uz * steerZ;
+      // Steer cracks through thinner parchment pockets & high-tension spans around dense silk veins
+      const thinWeakness = 1.0 - this.wallThickness[u];
+      const score = align + this.tension[u] * 0.28 + thinWeakness * 0.36;
       if (score > bestScore) {
         bestScore = score;
         bestSplitIdx = k;
@@ -1954,10 +2547,10 @@ export class ShrinkFilmSimulation {
     );
 
     if (remainingSteps > 1) {
-      // Smoothly blend propagation direction along the surface tangent
-      const ndx = dirX * 0.55 + bestSpokeDirX * 0.45;
-      const ndy = dirY * 0.55 + bestSpokeDirY * 0.45;
-      const ndz = dirZ * 0.55 + bestSpokeDirZ * 0.45;
+      // Smoothly blend propagation direction along the organically curved surface tangent
+      const ndx = steerX * 0.48 + bestSpokeDirX * 0.52;
+      const ndy = steerY * 0.48 + bestSpokeDirY * 0.52;
+      const ndz = steerZ * 0.48 + bestSpokeDirZ * 0.52;
       const nLen = Math.hypot(ndx, ndy, ndz) + 1e-6;
 
       this.crackTips.push({
@@ -1969,7 +2562,60 @@ export class ShrinkFilmSimulation {
         dirZ: ndz / nLen,
         remainingSteps: remainingSteps - 1,
         cooldownSec: 0.018,
+        meanderPhase: meanderPhase + meanderRate,
+        meanderRate,
+        branchBudget,
       });
+
+      // Natural secondary Y-fork micro-branching along high-tension mid-seam tears:
+      // Angles ~55 deg into whichever side still has >= 2 open-fan triangles to create an organic split fork!
+      if (
+        branchBudget > 0 &&
+        remainingSteps >= 3 &&
+        remainingSteps <= 5 &&
+        this.crackTips.length < 6 &&
+        this.tension[w] > 0.18
+      ) {
+        const sectorATris = bestSplitIdx;
+        const sectorBTris = ordered.length - bestSplitIdx;
+        if (sectorBTris >= 2) {
+          const branchX = bestSpokeDirX * 0.52 + (bxSum / bLen) * 0.85;
+          const branchY = bestSpokeDirY * 0.52 + (bySum / bLen) * 0.85;
+          const branchZ = bestSpokeDirZ * 0.52 + (bzSum / bLen) * 0.85;
+          const bNorm = Math.hypot(branchX, branchY, branchZ) + 1e-6;
+          this.crackTips.push({
+            tipVertex: wNew,
+            prevA: nextSpoke,
+            prevB: endSpoke,
+            dirX: branchX / bNorm,
+            dirY: branchY / bNorm,
+            dirZ: branchZ / bNorm,
+            remainingSteps: 2,
+            cooldownSec: 0.042,
+            meanderPhase: meanderPhase + 1.4,
+            meanderRate: -meanderRate * 0.8,
+            branchBudget: 0,
+          });
+        } else if (sectorATris >= 2) {
+          const branchX = bestSpokeDirX * 0.52 + (axSum / aLen) * 0.85;
+          const branchY = bestSpokeDirY * 0.52 + (aySum / aLen) * 0.85;
+          const branchZ = bestSpokeDirZ * 0.52 + (azSum / aLen) * 0.85;
+          const aNorm = Math.hypot(branchX, branchY, branchZ) + 1e-6;
+          this.crackTips.push({
+            tipVertex: w,
+            prevA: startSpoke,
+            prevB: nextSpoke,
+            dirX: branchX / aNorm,
+            dirY: branchY / aNorm,
+            dirZ: branchZ / aNorm,
+            remainingSteps: 2,
+            cooldownSec: 0.042,
+            meanderPhase: meanderPhase - 1.4,
+            meanderRate: -meanderRate * 0.8,
+            branchBudget: 0,
+          });
+        }
+      }
     }
 
     return true;
@@ -1996,7 +2642,10 @@ export class ShrinkFilmSimulation {
         tip.dirX,
         tip.dirY,
         tip.dirZ,
-        tip.remainingSteps
+        tip.remainingSteps,
+        tip.meanderPhase,
+        tip.meanderRate,
+        tip.branchBudget
       );
       if (splitOk) {
         splitsDone++;
@@ -2108,5 +2757,6 @@ export class ShrinkFilmSimulation {
 
   dispose(): void {
     this.geometry.dispose();
+    this.tetherGeometry.dispose();
   }
 }

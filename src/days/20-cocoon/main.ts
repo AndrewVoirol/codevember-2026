@@ -123,6 +123,13 @@ export async function bootDay20Cocoon(): Promise<SpecimenStage> {
   filmFrontMesh.frustumCulled = false;
   specimenRoot.add(filmFrontMesh);
 
+  // Delicate stretched fibrous silk tether strands spanning freshly opened tear gaps
+  const silkTetherMesh = new THREE.Mesh(sim.tetherGeometry, materials.tetherMat);
+  silkTetherMesh.name = 'SilkTetherStrands';
+  silkTetherMesh.renderOrder = 4;
+  silkTetherMesh.frustumCulled = false;
+  specimenRoot.add(silkTetherMesh);
+
   // Cached raycast list per core (film front + back + active core so rays stop on exposed metal)
   const corePickLists: THREE.Object3D[][] = cores.map((c) => {
     const list: THREE.Object3D[] = [filmFrontMesh, filmBackMesh];
@@ -393,6 +400,7 @@ export async function bootDay20Cocoon(): Promise<SpecimenStage> {
       tearFraction: Number(sim.tearFraction.toFixed(4)),
       coreIndex: activeCoreIndex,
       vertexCount: sim.activeVertexCount,
+      activeTetherCount: sim.activeTetherCount,
     }),
   };
 

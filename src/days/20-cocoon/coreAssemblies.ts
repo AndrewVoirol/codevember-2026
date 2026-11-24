@@ -452,18 +452,45 @@ function buildPolygonalStackGeometry(
 ): THREE.BufferGeometry {
   const positions: number[] = [];
   const uvs: number[] = [];
+  const coreDetails: number[] = []; // vec3: [edgeBevel, creviceAO, axisFrac]
   const indices: number[] = [];
 
   const ringCount = rings.length;
   const stride = radialSegments + 1;
 
+  // Compute max radius and per-ring structural exposure (proud bevels vs. recessed collar grooves)
+  let maxR = 1e-4;
+  for (let j = 0; j < ringCount; j++) {
+    if (rings[j][1] > maxR) maxR = rings[j][1];
+  }
+
   for (let j = 0; j < ringCount; j++) {
     const [y, r] = rings[j];
     const vCoord = j / Math.max(1, ringCount - 1);
+    const rPrev = j > 0 ? rings[j - 1][1] : r * 0.72;
+    const rNext = j < ringCount - 1 ? rings[j + 1][1] : r * 0.72;
+    const avgNbr = 0.5 * (rPrev + rNext);
+    const protrusion = (r - avgNbr) / maxR;
+    const rNorm = r / maxR;
+
+    // Convex steps & chamfer shoulders read bright/burnished; recessed necks & base sockets get rich patina AO
+    const isShoulder = j === 1 || j === ringCount - 2;
+    const edgeBevel = Math.max(
+      0.08,
+      Math.min(1.0, 0.42 + protrusion * 2.6 + (isShoulder ? 0.28 : 0.0) + (rNorm - 0.6) * 0.35)
+    );
+    const baseRecess = j === 0 ? 0.30 : j === 1 ? 0.10 : 0.0;
+    const grooveRecess = protrusion < -0.02 ? Math.min(0.45, -protrusion * 2.4) : 0.0;
+    const creviceAO = Math.max(
+      0.14,
+      Math.min(1.0, 0.64 + rNorm * 0.34 - baseRecess - grooveRecess)
+    );
+
     for (let i = 0; i <= radialSegments; i++) {
       const phi = (i / radialSegments) * Math.PI * 2;
       positions.push(Math.cos(phi) * r, y, Math.sin(phi) * r);
       uvs.push(i / radialSegments, vCoord);
+      coreDetails.push(edgeBevel, creviceAO, vCoord);
     }
   }
 
@@ -485,6 +512,7 @@ function buildPolygonalStackGeometry(
   const [yBot, rBot] = rings[0];
   positions.push(0, yBot, 0);
   uvs.push(0.5, 0);
+  coreDetails.push(0.20, 0.28, 0.0);
   if (rBot > 1e-5) {
     for (let i = 0; i < radialSegments; i++) {
       indices.push(botCenterIdx, i, i + 1);
@@ -497,6 +525,7 @@ function buildPolygonalStackGeometry(
   const topRow = (ringCount - 1) * stride;
   positions.push(0, yTop, 0);
   uvs.push(0.5, 1);
+  coreDetails.push(0.92, 0.96, 1.0);
   if (rTop > 1e-5) {
     for (let i = 0; i < radialSegments; i++) {
       indices.push(topCenterIdx, topRow + i + 1, topRow + i);
@@ -506,6 +535,7 @@ function buildPolygonalStackGeometry(
   let geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
   geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geo.setAttribute('aCoreDetail', new THREE.Float32BufferAttribute(coreDetails, 3));
   geo.setIndex(indices);
 
   if (faceted) {
@@ -545,45 +575,86 @@ function buildChamferedRingGeometry(
     [cr, -wa],
   ];
 
+  // Structural bevel & crevice-AO profile for the 8 chamfer stations:
+  // Outer bevels shine burnished; inner bore recesses hold dark aged horological oil patina
+  const profileDetail: ReadonlyArray<readonly [number, number, number]> = [
+    [0.86, 0.94, 0.95], // outer rim bottom corner
+    [0.86, 0.94, 0.95], // outer rim top corner
+    [1.0, 1.0, 0.82],   // proud top-outer chamfer bevel
+    [0.52, 0.56, 0.36], // inner top chamfer
+    [0.16, 0.22, 0.12], // recessed inner bore top
+    [0.16, 0.22, 0.12], // recessed inner bore bottom
+    [0.52, 0.56, 0.36], // inner bottom chamfer
+    [1.0, 1.0, 0.82],   // proud bottom-outer chamfer bevel
+  ];
+
   const profCount = profile.length;
   const positions: number[] = [];
+  const normals: number[] = [];
   const uvs: number[] = [];
+  const coreDetails: number[] = [];
   const indices: number[] = [];
 
-  for (let i = 0; i <= majorSegments; i++) {
-    const u = i / majorSegments;
-    const phi = u * Math.PI * 2;
-    const c = Math.cos(phi);
-    const s = Math.sin(phi);
-    for (let k = 0; k <= profCount; k++) {
-      const [pr, pz] = profile[k % profCount];
-      const rad = majorRadius + pr;
-      positions.push(rad * c, rad * s, pz);
-      uvs.push(u * 4, k / profCount);
-    }
+  // Precompute exact outward cross-section face normals for each of the 8 chamfered bevel flats
+  // so every bevel edge stays razor-crisp while circumferential sweeps shade lathe-smooth!
+  const faceNormalsRZ: Array<readonly [number, number]> = [];
+  for (let k = 0; k < profCount; k++) {
+    const [r0, z0] = profile[k];
+    const [r1, z1] = profile[(k + 1) % profCount];
+    const dr = r1 - r0;
+    const dz = z1 - z0;
+    // Profile runs CCW in (eR, eZ); outward normal of segment (r0,z0)->(r1,z1) is (+dz, -dr)
+    const len = Math.hypot(dr, dz) + 1e-8;
+    faceNormalsRZ.push([dz / len, -dr / len]);
   }
 
-  const stride = profCount + 1;
-  for (let i = 0; i < majorSegments; i++) {
-    const r0 = i * stride;
-    const r1 = (i + 1) * stride;
-    for (let k = 0; k < profCount; k++) {
-      const p00 = r0 + k;
-      const p10 = r1 + k;
-      const p11 = r1 + k + 1;
-      const p01 = r0 + k + 1;
+  // Emit 8 circumferentially-smooth bevel strips (sharp creases between profile flats, zero 64-gon faceting!)
+  for (let k = 0; k < profCount; k++) {
+    const kNext = (k + 1) % profCount;
+    const [pr0, pz0] = profile[k];
+    const [pr1, pz1] = profile[kNext];
+    const [eb0, ao0, af0] = profileDetail[k];
+    const [eb1, ao1, af1] = profileDetail[kNext];
+    const [nr, nz] = faceNormalsRZ[k];
+    const v0 = k / profCount;
+    const v1 = (k + 1) / profCount;
+    const baseVert = positions.length / 3;
+
+    for (let i = 0; i <= majorSegments; i++) {
+      const u = i / majorSegments;
+      const phi = u * Math.PI * 2;
+      const c = Math.cos(phi);
+      const s = Math.sin(phi);
+
+      const rad0 = majorRadius + pr0;
+      positions.push(rad0 * c, rad0 * s, pz0);
+      normals.push(nr * c, nr * s, nz);
+      uvs.push(u * 4, v0);
+      coreDetails.push(eb0, ao0, af0);
+
+      const rad1 = majorRadius + pr1;
+      positions.push(rad1 * c, rad1 * s, pz1);
+      normals.push(nr * c, nr * s, nz);
+      uvs.push(u * 4, v1);
+      coreDetails.push(eb1, ao1, af1);
+    }
+
+    for (let i = 0; i < majorSegments; i++) {
+      const p00 = baseVert + i * 2;
+      const p01 = p00 + 1;
+      const p10 = p00 + 2;
+      const p11 = p00 + 3;
       indices.push(p00, p10, p11, p00, p11, p01);
     }
   }
 
-  const indexed = new THREE.BufferGeometry();
-  indexed.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  indexed.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
-  indexed.setIndex(indices);
-  const faceted = indexed.toNonIndexed();
-  indexed.dispose();
-  faceted.computeVertexNormals();
-  return faceted;
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geo.setAttribute('aCoreDetail', new THREE.Float32BufferAttribute(coreDetails, 3));
+  geo.setIndex(indices);
+  return geo;
 }
 
 /**
