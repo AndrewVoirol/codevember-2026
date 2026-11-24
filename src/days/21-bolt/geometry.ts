@@ -43,6 +43,8 @@ import {
   STUMP_Y,
   STUMP_Z_BACK,
   STUMP_Z_FRONT,
+  UPPER_RACK_SPEC,
+  buildInvoluteRackPolygon2D,
   getLeverZ,
 } from './lockMechanism';
 import type { BoltMaterials } from './materials';
@@ -52,7 +54,7 @@ const CREASE_ANGLE_RAD = (34 * Math.PI) / 180;
 /**
  * Ensures 2D polygon points are counter-clockwise (required for outward normals on ExtrudeGeometry).
  */
-function ensureCCW(pts: THREE.Vector2[]): THREE.Vector2[] {
+export function ensureCCW(pts: THREE.Vector2[]): THREE.Vector2[] {
   if (THREE.ShapeUtils.isClockWise(pts)) {
     return [...pts].reverse();
   }
@@ -62,7 +64,7 @@ function ensureCCW(pts: THREE.Vector2[]): THREE.Vector2[] {
 /**
  * Ensures 2D hole contour points are clockwise (required for outward normals on extruded holes).
  */
-function ensureCW(pts: THREE.Vector2[]): THREE.Vector2[] {
+export function ensureCW(pts: THREE.Vector2[]): THREE.Vector2[] {
   if (!THREE.ShapeUtils.isClockWise(pts)) {
     return [...pts].reverse();
   }
@@ -76,7 +78,7 @@ function ensureCW(pts: THREE.Vector2[]): THREE.Vector2[] {
  *  - Non-cap faces (curved rims, rounded corners, bores, bevels) smoothly average normals across adjacent
  *    non-cap faces within `creaseAngleRad` so curved edges gleam smoothly without polygonal faceting.
  */
-function applyMachinedNormals(
+export function applyMachinedNormals(
   rawGeo: THREE.BufferGeometry,
   creaseAngleRad = CREASE_ANGLE_RAD
 ): THREE.BufferGeometry {
@@ -229,7 +231,7 @@ function makeRoundedRectPts(
 /**
  * Builds a circular hole path in CW order.
  */
-function makeCircleHole(cx: number, cy: number, radius: number, segs = 28): THREE.Path {
+export function makeCircleHole(cx: number, cy: number, radius: number, segs = 28): THREE.Path {
   const pts: THREE.Vector2[] = [];
   for (let i = 0; i < segs; i++) {
     const a = (i / segs) * Math.PI * 2;
@@ -247,7 +249,7 @@ function makeCircleHole(cx: number, cy: number, radius: number, segs = 28): THRE
  * Computes an inward-offset version of a CCW open or closed 2D polygon by `inset` along averaged edge normals.
  * Used to place the extruded bevel outer skin of precision components onto exact mechanical coordinates.
  */
-function offsetClosedPolygonCCW(pts: THREE.Vector2[], offset: number): THREE.Vector2[] {
+export function offsetClosedPolygonCCW(pts: THREE.Vector2[], offset: number): THREE.Vector2[] {
   const n = pts.length;
   const out: THREE.Vector2[] = [];
   for (let i = 0; i < n; i++) {
@@ -381,7 +383,7 @@ function buildOneSidedBevelPrism(
  * Profile points `[z, r]` are given in strict CCW order around the positive-R cross-section
  * (allowing both solid shafts and genuine hollow-bore pipe barrels with outward normals!).
  */
-function makeClosedLatheZ(
+export function makeClosedLatheZ(
   profileZR: Array<[number, number]>,
   radialSegments = 32,
   sortByZ = true
@@ -408,7 +410,7 @@ function makeClosedLatheZ(
  * Creates a countersunk slotted flathead brass wood-screw seated cleanly inside a matching circular hole.
  * Built from two outward-wound beveled D-caps flanking a genuine empty screwdriver slot + recessed floor disc.
  */
-function buildSlottedBrassScrew(
+export function buildSlottedBrassScrew(
   radius: number,
   headDepth: number,
   slotWidth: number,
@@ -802,13 +804,13 @@ export function buildLockCaseAssembly(materials: BoltMaterials): LockCaseAssembl
 
   const winHolePts = ensureCW([
     new THREE.Vector2(-0.74, -0.49),
-    new THREE.Vector2(-0.18, -0.49),
-    new THREE.Vector2(-0.13, -0.42),
-    new THREE.Vector2(-0.08, -0.325),
-    new THREE.Vector2(0.16, -0.325),
-    new THREE.Vector2(0.21, -0.42),
-    new THREE.Vector2(0.26, -0.49),
-    new THREE.Vector2(0.84, -0.49),
+    new THREE.Vector2(-0.125, -0.49),
+    new THREE.Vector2(-0.095, -0.415),
+    new THREE.Vector2(-0.075, -0.325),
+    new THREE.Vector2(0.155, -0.325),
+    new THREE.Vector2(0.172, -0.42),
+    new THREE.Vector2(0.185, -0.528),
+    new THREE.Vector2(0.84, -0.528),
     new THREE.Vector2(0.84, 0.51),
     new THREE.Vector2(-0.74, 0.51),
   ]);
@@ -1264,6 +1266,50 @@ export function buildDeadboltAssembly(materials: BoltMaterials): DeadboltAssembl
   rivetMesh.castShadow = true;
   group.add(rivetMesh);
   hitMeshes.push(rivetMesh);
+
+  // 4D. Precision-Milled Tempered Phosphor-Bronze Upper Drive Rack riveted onto Deadbolt Tail Spine
+  // Exact 20-deg involute teeth shared with UPPER_RACK_SPEC so RackThrowPinion_U1A meshes with zero clip!
+  const rackBevel = 0.0012;
+  const rackRawPts = buildInvoluteRackPolygon2D(UPPER_RACK_SPEC).map(
+    (p) => new THREE.Vector2(p.x, p.y)
+  );
+  const rackInset = offsetClosedPolygonCCW(ensureCCW(rackRawPts), -rackBevel);
+  const rackDepth = UPPER_RACK_SPEC.zFront - UPPER_RACK_SPEC.zBack - rackBevel * 2;
+  const rackRawGeo = new THREE.ExtrudeGeometry(new THREE.Shape(ensureCCW(rackInset)), {
+    depth: rackDepth,
+    bevelEnabled: true,
+    bevelThickness: rackBevel,
+    bevelSize: rackBevel,
+    bevelSegments: 2,
+  });
+  rackRawGeo.translate(0, 0, UPPER_RACK_SPEC.zBack + rackBevel);
+  const rackGeo = applyMachinedNormals(rackRawGeo);
+  disposables.push(rackGeo);
+  const rackMesh = new THREE.Mesh(rackGeo, materials.machinedBronzeRack);
+  rackMesh.name = 'DeadboltUpperRack';
+  rackMesh.castShadow = true;
+  rackMesh.receiveShadow = true;
+  group.add(rackMesh);
+  hitMeshes.push(rackMesh);
+
+  // Three turned steel locating pins visibly riveting the phosphor-bronze rack bar to the blued-steel bolt spine
+  for (const pinX of [0.055, 0.255, 0.455]) {
+    const pinGeo = makeClosedLatheZ(
+      [
+        [UPPER_RACK_SPEC.zFront - 0.002, 0.014],
+        [UPPER_RACK_SPEC.zFront + 0.005, 0.014],
+        [UPPER_RACK_SPEC.zFront + 0.009, 0.009],
+      ],
+      20
+    );
+    pinGeo.translate(pinX, 0.285, 0);
+    disposables.push(pinGeo);
+    const pinMesh = new THREE.Mesh(pinGeo, materials.hardenedSteel);
+    pinMesh.name = 'RackDovetailPin';
+    pinMesh.castShadow = true;
+    group.add(pinMesh);
+    hitMeshes.push(pinMesh);
+  }
 
   return {
     group,

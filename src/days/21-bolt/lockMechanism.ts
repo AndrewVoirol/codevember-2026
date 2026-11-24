@@ -455,6 +455,567 @@ export interface LockDiagnosticsState {
   boltBlocked: boolean;
   bindingLeverIndex: number;
   autoTurning: boolean;
+  gearAnglesRad: {
+    upperPinionU1: number;
+    upperDetentU2: number;
+    upperPawl: number;
+    curtainB1: number;
+    curtainIdlerB2: number;
+    curtainCompoundB3: number;
+    keyHomeWheelB4: number;
+    lowerPawl: number;
+  };
+}
+
+// =============================================================================
+// Horological Geared Deadbolt Drive Train & Positive Detent Escapement Specs
+// Single source of truth shared between physics, 3D involute geometry & Vitest!
+// =============================================================================
+
+export interface SpurGearSpec {
+  readonly name: string;
+  readonly cx: number;
+  readonly cy: number;
+  readonly module: number;
+  readonly teeth: number;
+  readonly pitchRadius: number;
+  readonly baseRadius: number;
+  readonly tipRadius: number;
+  readonly rootRadius: number;
+  readonly zBack: number;
+  readonly zFront: number;
+}
+
+export interface RackSpec {
+  readonly module: number;
+  readonly pitch: number;
+  readonly toothCount: number;
+  readonly firstToothLocalX: number;
+  readonly pitchLineY: number;
+  readonly tipY: number;
+  readonly rootY: number;
+  readonly barBaseY: number;
+  readonly barMinLocalX: number;
+  readonly barMaxLocalX: number;
+  readonly zBack: number;
+  readonly zFront: number;
+}
+
+export interface DetentCamSpec {
+  readonly cx: number;
+  readonly cy: number;
+  readonly outerRadius: number;
+  readonly rootRadius: number;
+  readonly notchHalfWidthRad: number;
+  readonly notchLocalAngles: readonly number[];
+  readonly rippleCount: number;
+  readonly rippleAmp: number;
+  readonly pivotX: number;
+  readonly pivotY: number;
+  readonly pawlArmLength: number;
+  readonly beakRadius: number;
+  readonly pawlSign: 1 | -1;
+  readonly springPinX: number;
+  readonly springPinY: number;
+  readonly zBack: number;
+  readonly zFront: number;
+}
+
+export const GEAR_PRESSURE_ANGLE_RAD = (20 * Math.PI) / 180;
+export const GEAR_ADDENDUM_FACTOR = 0.85;
+export const GEAR_DEDENDUM_FACTOR = 1.15;
+export const GEAR_TOOTH_THICKNESS_RATIO = 0.46; // crisp running backlash -> zero flank clipping
+
+function makeSpurGearSpec(
+  name: string,
+  cx: number,
+  cy: number,
+  module: number,
+  teeth: number,
+  zBack: number,
+  zFront: number
+): SpurGearSpec {
+  const pitchRadius = (module * teeth) * 0.5;
+  return {
+    name,
+    cx,
+    cy,
+    module,
+    teeth,
+    pitchRadius,
+    baseRadius: pitchRadius * Math.cos(GEAR_PRESSURE_ANGLE_RAD),
+    tipRadius: pitchRadius + GEAR_ADDENDUM_FACTOR * module,
+    rootRadius: pitchRadius - GEAR_DEDENDUM_FACTOR * module,
+    zBack,
+    zFront,
+  };
+}
+
+// --- TRAIN A (Upper-Right): Deadbolt Upper Rack -> U1A/U1B -> U2A/U2B Detent Wheel + Upper Detent Pawl ---
+export const UPPER_RACK_MODULE = 0.014;
+export const UPPER_RACK_PITCH = Math.PI * UPPER_RACK_MODULE;
+export const UPPER_RACK_SPEC: RackSpec = {
+  module: UPPER_RACK_MODULE,
+  pitch: UPPER_RACK_PITCH,
+  toothCount: 12,
+  firstToothLocalX: 0.008,
+  pitchLineY: 0.348,
+  tipY: 0.348 + GEAR_ADDENDUM_FACTOR * UPPER_RACK_MODULE,
+  rootY: 0.348 - GEAR_DEDENDUM_FACTOR * UPPER_RACK_MODULE,
+  barBaseY: 0.240,
+  barMinLocalX: -0.014,
+  barMaxLocalX: 0.518,
+  zBack: -0.156,
+  zFront: -0.114,
+};
+
+const U1_TEETH_RACK = 12;
+const U1_RACK_PITCH_R = (UPPER_RACK_MODULE * U1_TEETH_RACK) * 0.5; // 0.084
+export const ARBOR_U1_X = 0.425;
+export const ARBOR_U1_Y = UPPER_RACK_SPEC.pitchLineY + U1_RACK_PITCH_R; // 0.432
+
+export const UPPER_STAGE_MODULE = 0.0115;
+const U1B_TEETH = 16;
+const U2A_TEETH = 18;
+const U12_DIST = (UPPER_STAGE_MODULE * (U1B_TEETH + U2A_TEETH)) * 0.5; // 0.1955
+export const UPPER_U12_ANGLE_RAD = 0.095;
+export const ARBOR_U2_X = ARBOR_U1_X + U12_DIST * Math.cos(UPPER_U12_ANGLE_RAD);
+export const ARBOR_U2_Y = ARBOR_U1_Y + U12_DIST * Math.sin(UPPER_U12_ANGLE_RAD);
+
+export const GEAR_U1A_PINION = makeSpurGearSpec(
+  'RackThrowPinion_U1A',
+  ARBOR_U1_X,
+  ARBOR_U1_Y,
+  UPPER_RACK_MODULE,
+  U1_TEETH_RACK,
+  -0.156,
+  -0.114
+);
+
+export const GEAR_U1B_SPUR = makeSpurGearSpec(
+  'CompoundThrowSpur_U1B',
+  ARBOR_U1_X,
+  ARBOR_U1_Y,
+  UPPER_STAGE_MODULE,
+  U1B_TEETH,
+  -0.106,
+  -0.068
+);
+
+export const GEAR_U2A_DRIVEN = makeSpurGearSpec(
+  'DetentDrivenWheel_U2A',
+  ARBOR_U2_X,
+  ARBOR_U2_Y,
+  UPPER_STAGE_MODULE,
+  U2A_TEETH,
+  -0.106,
+  -0.068
+);
+
+// --- TRAIN B (Lower-Right & Key Hub): B1 Curtain -> B2 Bridge Idler -> B3f/B3r Compound -> B4 Key-Home Wheel ---
+// Exact compound gear ratio: (24/20)*(20/18)*(15/20) = (4/3)*(3/4) = 1.000000 (exact 1:1 opposite rotation with key!)
+export const CURTAIN_STAGE_MODULE = 0.0105;
+const B1_TEETH = 24;
+const B2_TEETH = 20;
+const B3F_TEETH = 18;
+const B12_DIST = (CURTAIN_STAGE_MODULE * (B1_TEETH + B2_TEETH)) * 0.5; // 0.231
+export const LOWER_B12_ANGLE_RAD = -0.74;
+export const ARBOR_B2_X = KEY_X + B12_DIST * Math.cos(LOWER_B12_ANGLE_RAD);
+export const ARBOR_B2_Y = KEY_Y + B12_DIST * Math.sin(LOWER_B12_ANGLE_RAD);
+
+const B23_DIST = (CURTAIN_STAGE_MODULE * (B2_TEETH + B3F_TEETH)) * 0.5; // 0.1995
+export const LOWER_B23_ANGLE_RAD = -0.30;
+export const ARBOR_B3_X = ARBOR_B2_X + B23_DIST * Math.cos(LOWER_B23_ANGLE_RAD);
+export const ARBOR_B3_Y = ARBOR_B2_Y + B23_DIST * Math.sin(LOWER_B23_ANGLE_RAD);
+
+export const KEYHOME_STAGE_MODULE = 0.0135;
+const B3R_TEETH = 15;
+const B4A_TEETH = 20;
+const B34_DIST = (KEYHOME_STAGE_MODULE * (B3R_TEETH + B4A_TEETH)) * 0.5; // 0.23625
+export const LOWER_B34_ANGLE_RAD = 0.52;
+export const ARBOR_B4_X = ARBOR_B3_X + B34_DIST * Math.cos(LOWER_B34_ANGLE_RAD);
+export const ARBOR_B4_Y = ARBOR_B3_Y + B34_DIST * Math.sin(LOWER_B34_ANGLE_RAD);
+
+export const GEAR_B1_CURTAIN = makeSpurGearSpec(
+  'KeyholeCurtainGear_B1',
+  KEY_X,
+  KEY_Y,
+  CURTAIN_STAGE_MODULE,
+  B1_TEETH,
+  0.156,
+  0.180
+);
+
+export const GEAR_B2_IDLER = makeSpurGearSpec(
+  'CurtainTransferIdler_B2',
+  ARBOR_B2_X,
+  ARBOR_B2_Y,
+  CURTAIN_STAGE_MODULE,
+  B2_TEETH,
+  0.156,
+  0.180
+);
+
+export const GEAR_B3F_STEP = makeSpurGearSpec(
+  'CurtainStepGear_B3F',
+  ARBOR_B3_X,
+  ARBOR_B3_Y,
+  CURTAIN_STAGE_MODULE,
+  B3F_TEETH,
+  0.156,
+  0.180
+);
+
+export const GEAR_B3R_PINION = makeSpurGearSpec(
+  'CompoundDrivePinion_B3R',
+  ARBOR_B3_X,
+  ARBOR_B3_Y,
+  KEYHOME_STAGE_MODULE,
+  B3R_TEETH,
+  0.048,
+  0.104
+);
+
+export const GEAR_B4A_KEYHOME = makeSpurGearSpec(
+  'SpokedKeyHomeWheel_B4A',
+  ARBOR_B4_X,
+  ARBOR_B4_Y,
+  KEYHOME_STAGE_MODULE,
+  B4A_TEETH,
+  0.048,
+  0.104
+);
+
+/**
+ * Computes exact Three.js right-handed CCW rotation angles for an externally meshed driven gear
+ * so tooth-center of driver meets exact valley-center of driven gear along line-of-centers `beta`.
+ */
+export function computeMeshedGearAngle(
+  driverAngleRad: number,
+  driverTeeth: number,
+  drivenTeeth: number,
+  lineOfCentersRad: number
+): number {
+  return (
+    lineOfCentersRad +
+    Math.PI -
+    Math.PI / drivenTeeth -
+    (driverTeeth / drivenTeeth) * (driverAngleRad - lineOfCentersRad)
+  );
+}
+
+/**
+ * Exact right-handed CCW angle of Pinion U1A meshing cleanly on top of DeadboltUpperRack at `boltThrow01`.
+ */
+export function computeUpperPinionAngleRad(boltThrow01: number): number {
+  const boltX = boltThrow01 * BOLT_TRAVEL;
+  return (
+    -Math.PI * 0.5 +
+    Math.PI / GEAR_U1A_PINION.teeth +
+    (boltX + UPPER_RACK_SPEC.firstToothLocalX - GEAR_U1A_PINION.cx) / GEAR_U1A_PINION.pitchRadius
+  );
+}
+
+export function computeUpperDetentWheelAngleRad(boltThrow01: number): number {
+  const u1 = computeUpperPinionAngleRad(boltThrow01);
+  return computeMeshedGearAngle(
+    u1,
+    GEAR_U1B_SPUR.teeth,
+    GEAR_U2A_DRIVEN.teeth,
+    UPPER_U12_ANGLE_RAD
+  );
+}
+
+export function computeLowerTrainAnglesRad(keyAngleRad: number): {
+  b1: number;
+  b2: number;
+  b3: number;
+  b4: number;
+} {
+  // Key rotates clockwise (+keyAngleRad) -> right-handed Three.js rotation.z = -keyAngleRad
+  const b1 = -keyAngleRad;
+  const b2 = computeMeshedGearAngle(b1, GEAR_B1_CURTAIN.teeth, GEAR_B2_IDLER.teeth, LOWER_B12_ANGLE_RAD);
+  const b3 = computeMeshedGearAngle(b2, GEAR_B2_IDLER.teeth, GEAR_B3F_STEP.teeth, LOWER_B23_ANGLE_RAD);
+  const b4 = computeMeshedGearAngle(b3, GEAR_B3R_PINION.teeth, GEAR_B4A_KEYHOME.teeth, LOWER_B34_ANGLE_RAD);
+  return { b1, b2, b3, b4 };
+}
+
+function wrapAnglePi(a: number): number {
+  let x = a % (Math.PI * 2);
+  if (x > Math.PI) x -= Math.PI * 2;
+  if (x < -Math.PI) x += Math.PI * 2;
+  return x;
+}
+
+/**
+ * Computes exact seated world contact angle (from cam center toward beak center) at a given cam radius `rc`.
+ */
+function computePawlSeatedContactWorldAngle(
+  cx: number,
+  cy: number,
+  pivotX: number,
+  pivotY: number,
+  armLength: number,
+  rc: number,
+  sign: 1 | -1
+): number {
+  const dx = pivotX - cx;
+  const dy = pivotY - cy;
+  const d = Math.hypot(dx, dy);
+  const cosGammaC = Math.max(-1, Math.min(1, (d * d + rc * rc - armLength * armLength) / (2 * d * rc)));
+  return Math.atan2(dy, dx) + sign * Math.acos(cosGammaC);
+}
+
+// Compute exact V-notch local angles so the pawls drop DEAD-FLUSH at unlocked(0), locked(1), and keyHome(0)!
+const UPPER_PAWL_PIVOT_X = 0.788;
+const UPPER_PAWL_PIVOT_Y = 0.402;
+const UPPER_PAWL_ARM_LEN = 0.128;
+const UPPER_CAM_OUTER_R = 0.094;
+const UPPER_CAM_ROOT_R = 0.074;
+const PAWL_BEAK_R = 0.010;
+
+const UPPER_SEATED_WORLD_ANG = computePawlSeatedContactWorldAngle(
+  ARBOR_U2_X,
+  ARBOR_U2_Y,
+  UPPER_PAWL_PIVOT_X,
+  UPPER_PAWL_PIVOT_Y,
+  UPPER_PAWL_ARM_LEN,
+  UPPER_CAM_ROOT_R + PAWL_BEAK_R,
+  1
+);
+
+export const UPPER_DETENT_CAM_SPEC: DetentCamSpec = {
+  cx: ARBOR_U2_X,
+  cy: ARBOR_U2_Y,
+  outerRadius: UPPER_CAM_OUTER_R,
+  rootRadius: UPPER_CAM_ROOT_R,
+  notchHalfWidthRad: 0.25,
+  notchLocalAngles: [
+    wrapAnglePi(UPPER_SEATED_WORLD_ANG - computeUpperDetentWheelAngleRad(0)),
+    wrapAnglePi(UPPER_SEATED_WORLD_ANG - computeUpperDetentWheelAngleRad(1)),
+  ],
+  rippleCount: 18,
+  rippleAmp: 0.0022,
+  pivotX: UPPER_PAWL_PIVOT_X,
+  pivotY: UPPER_PAWL_PIVOT_Y,
+  pawlArmLength: UPPER_PAWL_ARM_LEN,
+  beakRadius: PAWL_BEAK_R,
+  pawlSign: 1,
+  springPinX: 0.818,
+  springPinY: 0.518,
+  zBack: 0.018,
+  zFront: 0.088,
+};
+
+const LOWER_PAWL_PIVOT_X = 0.774;
+const LOWER_PAWL_PIVOT_Y = -0.365;
+const LOWER_PAWL_ARM_LEN = 0.128;
+const LOWER_CAM_OUTER_R = 0.094;
+const LOWER_CAM_ROOT_R = 0.074;
+
+const LOWER_SEATED_WORLD_ANG = computePawlSeatedContactWorldAngle(
+  ARBOR_B4_X,
+  ARBOR_B4_Y,
+  LOWER_PAWL_PIVOT_X,
+  LOWER_PAWL_PIVOT_Y,
+  LOWER_PAWL_ARM_LEN,
+  LOWER_CAM_ROOT_R + PAWL_BEAK_R,
+  1
+);
+
+export const LOWER_KEYHOME_CAM_SPEC: DetentCamSpec = {
+  cx: ARBOR_B4_X,
+  cy: ARBOR_B4_Y,
+  outerRadius: LOWER_CAM_OUTER_R,
+  rootRadius: LOWER_CAM_ROOT_R,
+  notchHalfWidthRad: 0.28,
+  notchLocalAngles: [
+    wrapAnglePi(LOWER_SEATED_WORLD_ANG - computeLowerTrainAnglesRad(0).b4),
+  ],
+  rippleCount: 0,
+  rippleAmp: 0,
+  pivotX: LOWER_PAWL_PIVOT_X,
+  pivotY: LOWER_PAWL_PIVOT_Y,
+  pawlArmLength: LOWER_PAWL_ARM_LEN,
+  beakRadius: PAWL_BEAK_R,
+  pawlSign: 1,
+  springPinX: 0.806,
+  springPinY: -0.248,
+  zBack: 0.114,
+  zFront: 0.160,
+};
+
+/**
+ * Evaluates the exact physical outer radius of a detent cam at wheel-local angle `localAngleRad`.
+ * Shared identically by the 3D cam mesh builder and the real-time pawl contact solver (0 clip, 0 gap!).
+ */
+export function evalDetentCamRadius(spec: DetentCamSpec, localAngleRad: number): number {
+  let minDist = Infinity;
+  for (let i = 0; i < spec.notchLocalAngles.length; i++) {
+    const d = Math.abs(wrapAnglePi(localAngleRad - spec.notchLocalAngles[i]));
+    if (d < minDist) minDist = d;
+  }
+  const hw = spec.notchHalfWidthRad;
+  if (minDist < hw) {
+    const u = minDist / hw;
+    // Smooth V-cradle profile matching rounded beak radius cleanly at bottom & tangent at shoulders
+    const s = u * u * (3 - 2 * u);
+    return spec.rootRadius + (spec.outerRadius - spec.rootRadius) * s;
+  }
+  if (spec.rippleCount > 0 && spec.rippleAmp > 0) {
+    // Feather ripples gently out near V-notch shoulders for crisp V-entry lips
+    const shoulderFade = Math.min(1, (minDist - hw) / 0.14);
+    const wave = 0.5 - 0.5 * Math.cos(localAngleRad * spec.rippleCount);
+    return spec.outerRadius - spec.rippleAmp * wave * shoulderFade;
+  }
+  return spec.outerRadius;
+}
+
+export interface PawlContactSolution {
+  pawlWorldAngleRad: number;
+  beakWorldX: number;
+  beakWorldY: number;
+  contactWorldAngleRad: number;
+  camRadiusAtContact: number;
+  lift01: number;
+}
+
+/**
+ * Analytical circle-cam contact solver: computes exact pawl rotation angle and beak center
+ * so the rounded steel pawl beak rides strictly flush along the detent cam perimeter & drops into V-notches!
+ */
+export function solveDetentPawlContact(
+  spec: DetentCamSpec,
+  camWorldAngleRad: number,
+  out: PawlContactSolution
+): void {
+  const dx = spec.pivotX - spec.cx;
+  const dy = spec.pivotY - spec.cy;
+  const d = Math.hypot(dx, dy);
+  const angCtoP = Math.atan2(dy, dx);
+  const angPtoC = Math.atan2(-dy, -dx);
+
+  let rc = spec.outerRadius + spec.beakRadius;
+  let contactWorldAngle = angCtoP;
+  let camR = spec.outerRadius;
+
+  for (let iter = 0; iter < 6; iter++) {
+    const cosGammaC = Math.max(
+      -1,
+      Math.min(1, (d * d + rc * rc - spec.pawlArmLength * spec.pawlArmLength) / (2 * d * rc))
+    );
+    contactWorldAngle = angCtoP + spec.pawlSign * Math.acos(cosGammaC);
+    const localAng = contactWorldAngle - camWorldAngleRad;
+    camR = evalDetentCamRadius(spec, localAng);
+    rc = camR + spec.beakRadius;
+  }
+
+  const cosGammaP = Math.max(
+    -1,
+    Math.min(1, (d * d + spec.pawlArmLength * spec.pawlArmLength - rc * rc) / (2 * d * spec.pawlArmLength))
+  );
+  const pawlWorldAngle = angPtoC - spec.pawlSign * Math.acos(cosGammaP);
+
+  out.pawlWorldAngleRad = pawlWorldAngle;
+  out.beakWorldX = spec.pivotX + Math.cos(pawlWorldAngle) * spec.pawlArmLength;
+  out.beakWorldY = spec.pivotY + Math.sin(pawlWorldAngle) * spec.pawlArmLength;
+  out.contactWorldAngleRad = contactWorldAngle;
+  out.camRadiusAtContact = camR;
+  out.lift01 = Math.max(
+    0,
+    Math.min(1, (camR - spec.rootRadius) / Math.max(1e-5, spec.outerRadius - spec.rootRadius))
+  );
+}
+
+/**
+ * Generates exact CCW 2D involute spur-gear outer contour points in gear-local XY (center at (0, 0),
+ * tooth #0 centered on +X at angle 0). Shared directly by 3D geometry & Vitest tooth-overlap proofs!
+ */
+export function buildInvoluteGearPolygon2D(spec: SpurGearSpec, flankSegs = 4): Point2D[] {
+  const Z = spec.teeth;
+  const rb = spec.baseRadius;
+  const ra = spec.tipRadius;
+  const rf = spec.rootRadius;
+  const step = (Math.PI * 2) / Z;
+
+  const invAlphaP = Math.tan(GEAR_PRESSURE_ANGLE_RAD) - GEAR_PRESSURE_ANGLE_RAD;
+  const halfPitchAng = (GEAR_TOOTH_THICKNESS_RATIO * Math.PI) / Z;
+  const psiBase = halfPitchAng + invAlphaP;
+
+  const rStart = Math.max(rb, rf);
+  const tStart = rStart > rb ? Math.sqrt(Math.max(0, (rStart / rb) * (rStart / rb) - 1)) : 0;
+  const tMax = Math.sqrt(Math.max(0, (ra / rb) * (ra / rb) - 1));
+  const phiStart = tStart - Math.atan(tStart);
+  const rootFlankHalfAng = psiBase - phiStart;
+
+  const pts: Point2D[] = [];
+  for (let k = 0; k < Z; k++) {
+    const centerA = k * step;
+
+    // Root valley leading into right (lower) flank of tooth k
+    const aRootRight = centerA - rootFlankHalfAng;
+    const prevValleyMid = centerA - step * 0.5;
+    pts.push({ x: Math.cos(prevValleyMid) * rf, y: Math.sin(prevValleyMid) * rf });
+    if (rf < rb - 1e-6) {
+      pts.push({ x: Math.cos(aRootRight) * rf, y: Math.sin(aRootRight) * rf });
+    }
+
+    // Right involute flank ascending from rStart -> ra
+    for (let s = 0; s <= flankSegs; s++) {
+      const t = tStart + (tMax - tStart) * (s / flankSegs);
+      const r = rb * Math.sqrt(1 + t * t);
+      const phi = t - Math.atan(t);
+      const a = centerA - (psiBase - phi);
+      pts.push({ x: Math.cos(a) * r, y: Math.sin(a) * r });
+    }
+
+    // Left involute flank descending from ra -> rStart
+    for (let s = flankSegs; s >= 0; s--) {
+      const t = tStart + (tMax - tStart) * (s / flankSegs);
+      const r = rb * Math.sqrt(1 + t * t);
+      const phi = t - Math.atan(t);
+      const a = centerA + (psiBase - phi);
+      pts.push({ x: Math.cos(a) * r, y: Math.sin(a) * r });
+    }
+
+    // Root fillet down from rb to rf on left (upper) flank of tooth k
+    if (rf < rb - 1e-6) {
+      const aRootLeft = centerA + rootFlankHalfAng;
+      pts.push({ x: Math.cos(aRootLeft) * rf, y: Math.sin(aRootLeft) * rf });
+    }
+  }
+  return pts;
+}
+
+/**
+ * Generates exact CCW 2D involute linear rack outer contour in bolt-local XY (teeth pointing +Y).
+ * Shared directly by DeadboltUpperRack 3D mesh & Vitest rack-to-pinion zero-clip proofs!
+ */
+export function buildInvoluteRackPolygon2D(spec: RackSpec): Point2D[] {
+  const tanAlpha = Math.tan(GEAR_PRESSURE_ANGLE_RAD);
+  const hwPitch = 0.5 * GEAR_TOOTH_THICKNESS_RATIO * spec.pitch;
+  const ha = spec.tipY - spec.pitchLineY;
+  const hf = spec.pitchLineY - spec.rootY;
+  const hwTip = Math.max(0.001, hwPitch - ha * tanAlpha);
+  const hwRoot = Math.min(spec.pitch * 0.48, hwPitch + hf * tanAlpha);
+
+  const pts: Point2D[] = [
+    { x: spec.barMinLocalX, y: spec.barBaseY },
+    { x: spec.barMaxLocalX, y: spec.barBaseY },
+    { x: spec.barMaxLocalX, y: spec.rootY },
+  ];
+
+  // Traverse teeth right-to-left along top (+Y) to maintain strict CCW winding
+  for (let k = spec.toothCount - 1; k >= 0; k--) {
+    const cx = spec.firstToothLocalX + k * spec.pitch;
+    pts.push({ x: cx + hwRoot, y: spec.rootY });
+    pts.push({ x: cx + hwTip, y: spec.tipY });
+    pts.push({ x: cx - hwTip, y: spec.tipY });
+    pts.push({ x: cx - hwRoot, y: spec.rootY });
+  }
+
+  pts.push({ x: spec.barMinLocalX, y: spec.rootY });
+  return pts;
 }
 
 export class LockMechanism {
@@ -476,6 +1037,18 @@ export class LockMechanism {
   caseRecoilX = 0;
   caseRecoilVelX = 0;
 
+  // Coupled horological gear-train & detent-pawl kinematic states (zero allocations)
+  upperPinionAngleRad = 0;
+  upperDetentAngleRad = 0;
+  upperPawlAngleRad = 0;
+  upperPawlLift01 = 0;
+  curtainB1AngleRad = 0;
+  curtainB2AngleRad = 0;
+  curtainB3AngleRad = 0;
+  keyHomeB4AngleRad = 0;
+  lowerPawlAngleRad = 0;
+  lowerPawlLift01 = 0;
+
   // Interactive control states
   private isDraggingKey = false;
   private keyDragTargetRad = 0;
@@ -490,13 +1063,70 @@ export class LockMechanism {
   private autoTurnActive = false;
   private autoTurnTargetRad = 0;
 
-  // Scratch object (zero per-frame allocations)
+  // Scratch objects (strictly zero per-frame allocations)
   private readonly _talonTip = { x: 0, y: 0 };
+  private readonly _upperPawlSol: PawlContactSolution = {
+    pawlWorldAngleRad: 0,
+    beakWorldX: 0,
+    beakWorldY: 0,
+    contactWorldAngleRad: 0,
+    camRadiusAtContact: UPPER_DETENT_CAM_SPEC.rootRadius,
+    lift01: 0,
+  };
+  private readonly _lowerPawlSol: PawlContactSolution = {
+    pawlWorldAngleRad: 0,
+    beakWorldX: 0,
+    beakWorldY: 0,
+    contactWorldAngleRad: 0,
+    camRadiusAtContact: LOWER_KEYHOME_CAM_SPEC.rootRadius,
+    lift01: 0,
+  };
 
   constructor(initiallyLocked = true) {
     this.boltThrow01 = initiallyLocked ? 1.0 : 0.0;
     this.boltDragTarget01 = this.boltThrow01;
     this.refreshAlignmentFlags();
+    this.syncGearTrainStates();
+  }
+
+  /**
+   * Synchronizes all coupled gear-train angles & spring-loaded detent-pawl contact poses
+   * from the exact physical bolt position and key rotation (strictly zero allocations).
+   */
+  syncGearTrainStates(): void {
+    this.upperPinionAngleRad = computeUpperPinionAngleRad(this.boltThrow01);
+    this.upperDetentAngleRad = computeMeshedGearAngle(
+      this.upperPinionAngleRad,
+      GEAR_U1B_SPUR.teeth,
+      GEAR_U2A_DRIVEN.teeth,
+      UPPER_U12_ANGLE_RAD
+    );
+    solveDetentPawlContact(UPPER_DETENT_CAM_SPEC, this.upperDetentAngleRad, this._upperPawlSol);
+    this.upperPawlAngleRad = this._upperPawlSol.pawlWorldAngleRad;
+    this.upperPawlLift01 = this._upperPawlSol.lift01;
+
+    this.curtainB1AngleRad = -this.keyAngleRad;
+    this.curtainB2AngleRad = computeMeshedGearAngle(
+      this.curtainB1AngleRad,
+      GEAR_B1_CURTAIN.teeth,
+      GEAR_B2_IDLER.teeth,
+      LOWER_B12_ANGLE_RAD
+    );
+    this.curtainB3AngleRad = computeMeshedGearAngle(
+      this.curtainB2AngleRad,
+      GEAR_B2_IDLER.teeth,
+      GEAR_B3F_STEP.teeth,
+      LOWER_B23_ANGLE_RAD
+    );
+    this.keyHomeB4AngleRad = computeMeshedGearAngle(
+      this.curtainB3AngleRad,
+      GEAR_B3R_PINION.teeth,
+      GEAR_B4A_KEYHOME.teeth,
+      LOWER_B34_ANGLE_RAD
+    );
+    solveDetentPawlContact(LOWER_KEYHOME_CAM_SPEC, this.keyHomeB4AngleRad, this._lowerPawlSol);
+    this.lowerPawlAngleRad = this._lowerPawlSol.pawlWorldAngleRad;
+    this.lowerPawlLift01 = this._lowerPawlSol.lift01;
   }
 
   get isLocked(): boolean {
@@ -837,6 +1467,15 @@ export class LockMechanism {
       boltForce += (this.boltDragTarget01 - this.boltThrow01) * 260.0;
     }
 
+    // Physical spring-loaded upper detent pawl seating force near unlocked (0) & locked (1) V-notches
+    if (!talonEngaged && !this.isDraggingBolt) {
+      if (this.boltThrow01 < 0.065) {
+        boltForce -= this.boltThrow01 * 55.0;
+      } else if (this.boltThrow01 > 0.935) {
+        boltForce += (1.0 - this.boltThrow01) * 55.0;
+      }
+    }
+
     // 5. Integrate deadbolt linear motion and enforce exact bolt-stump <-> 5-lever collision
     const prevBolt = this.boltThrow01;
     this.boltVel += boltForce * h;
@@ -927,6 +1566,9 @@ export class LockMechanism {
     this.caseRecoilVelX += (-this.caseRecoilX * 380.0 - this.caseRecoilVelX * 26.0) * h;
     this.caseRecoilX = Math.max(-0.012, Math.min(0.012, this.caseRecoilX + this.caseRecoilVelX * h));
     this.detentPulse *= Math.exp(-h * 12.0);
+
+    // Sync coupled horological gear-train & detent-pawl poses strictly with live bolt/key state
+    this.syncGearTrainStates();
   }
 
   getState(): LockDiagnosticsState {
@@ -943,6 +1585,16 @@ export class LockMechanism {
       boltBlocked: this.boltBlocked,
       bindingLeverIndex: this.bindingLeverIndex,
       autoTurning: this.autoTurnActive,
+      gearAnglesRad: {
+        upperPinionU1: Number(this.upperPinionAngleRad.toFixed(4)),
+        upperDetentU2: Number(this.upperDetentAngleRad.toFixed(4)),
+        upperPawl: Number(this.upperPawlAngleRad.toFixed(4)),
+        curtainB1: Number(this.curtainB1AngleRad.toFixed(4)),
+        curtainIdlerB2: Number(this.curtainB2AngleRad.toFixed(4)),
+        curtainCompoundB3: Number(this.curtainB3AngleRad.toFixed(4)),
+        keyHomeWheelB4: Number(this.keyHomeB4AngleRad.toFixed(4)),
+        lowerPawl: Number(this.lowerPawlAngleRad.toFixed(4)),
+      },
     };
   }
 }

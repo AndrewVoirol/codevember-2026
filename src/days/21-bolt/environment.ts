@@ -45,8 +45,8 @@ export function createBoltStudioEnvironment(
 ): StudioEnvironmentHandle {
   const pmrem = new THREE.PMREMGenerator(renderer);
   const envScene = new THREE.Scene();
-  // Deep slate negative-fill base preserves metallic depth and contrast in beveled grooves
-  envScene.background = new THREE.Color(0x0d1117);
+  // Calibrated horological dark-slate negative fill preserves crisp metallic edge contrast without black collapse
+  envScene.background = new THREE.Color(0x121720);
 
   const disposables: Array<{ dispose: () => void }> = [];
 
@@ -74,32 +74,35 @@ export function createBoltStudioEnvironment(
     disposables.push(geo, tex, mat);
   };
 
-  // 1. Broad overhead-front-left warm calcite key softbox (sweeps silky reflections across flat brass levers & oak chamfers)
-  addSoftbox(11.0, 8.5, [-3.8, 5.4, 5.2], [0, 0, 0], 1.0, 0.96, 0.89, 1.88);
+  // 1. Broad overhead-front-left warm calcite key softbox (sweeps silky reflections across lathe-turned gears, levers & oak)
+  addSoftbox(11.0, 8.2, [-3.6, 5.4, 5.2], [0, 0, 0], 1.0, 0.96, 0.89, 2.02);
 
-  // 2. Tall right-front warm-neutral strip scrim (illuminates forend brass faceplate, protruding blued deadbolt & lever stack edges)
-  addSoftbox(7.8, 11.0, [6.4, 2.2, 4.4], [0, 0, 0], 0.99, 0.96, 0.91, 1.78);
+  // 2. Tall right-front warm-neutral strip scrim (illuminates forend faceplate, blued deadbolt & right gear train)
+  addSoftbox(7.4, 11.2, [6.4, 2.0, 4.5], [0, 0, 0], 0.99, 0.96, 0.91, 1.92);
 
-  // 3. Front-center soft fill ring card (keeps front faces of stacked brass levers & keyhole escutcheon luminous at frontal view)
-  addSoftbox(9.0, 7.0, [0.4, 1.4, 7.8], [0, 0, 0], 0.97, 0.95, 0.92, 1.18);
+  // 3. Narrow vertical high-contrast horological highlight ribbon (makes concentric gear lathe turning & bevels sparkle!)
+  addSoftbox(2.8, 10.5, [2.2, 4.2, 6.2], [0, 0, 0], 1.0, 0.98, 0.94, 2.15);
 
-  // 4. Cool mineral slate left flank fill (brings out Prussian blue hue in thermally blued deadbolt & gunmetal steel case)
-  addSoftbox(8.5, 8.0, [-6.8, 1.2, 1.8], [0, 0, 0], 0.84, 0.91, 1.0, 1.35);
+  // 4. Front-center soft fill ring card (keeps front faces of stacked brass levers, gears & escutcheon luminous)
+  addSoftbox(9.2, 7.2, [0.4, 1.2, 7.8], [0, 0, 0], 0.97, 0.95, 0.92, 1.22);
 
-  // 5. Rear-top grazing rim softbox (carves crisp contour separation against #212529 Chalky Slate)
-  addSoftbox(12.5, 5.2, [0.8, 5.8, -5.6], [0, 0, 0], 0.92, 0.96, 1.0, 1.48);
+  // 5. Cool mineral slate left flank fill (brings out Prussian blue oxide in thermally blued steel & gunmetal case)
+  addSoftbox(8.5, 8.0, [-6.8, 1.2, 1.8], [0, 0, 0], 0.82, 0.90, 1.0, 1.44);
 
-  // 6. Rear-right cool-warm bounce (lights rear of charred oak and forend bevel during 360 orbits)
-  addSoftbox(8.0, 7.0, [5.4, 0.8, -5.8], [0, 0, 0], 0.95, 0.92, 0.88, 1.08);
+  // 6. Rear-top grazing rim softbox (carves crisp contour separation against #212529 Chalky Slate)
+  addSoftbox(12.5, 5.2, [0.8, 5.8, -5.6], [0, 0, 0], 0.92, 0.96, 1.0, 1.54);
 
-  // 7. Rear-left cool calcite fill (illuminates rear oak bevels and left flank without dark collapse)
-  addSoftbox(8.5, 7.2, [-5.6, 1.8, -5.2], [0, 0, 0], 0.90, 0.94, 0.99, 0.96);
+  // 7. Rear-right cool-warm bounce (lights rear of charred oak and forend bevel during 360 orbits)
+  addSoftbox(8.0, 7.0, [5.4, 0.8, -5.8], [0, 0, 0], 0.95, 0.92, 0.88, 1.14);
 
-  // 8. Warm workbench under-bounce (lifts key bow underside, lower lever bellies, and forend lower bevel)
-  addSoftbox(12.0, 12.0, [0, -6.2, 1.2], [0, 0, 0], 0.96, 0.91, 0.84, 0.48);
+  // 8. Rear-left cool calcite fill (illuminates rear oak bevels and left flank without dark collapse)
+  addSoftbox(8.5, 7.2, [-5.6, 1.8, -5.2], [0, 0, 0], 0.90, 0.94, 0.99, 1.02);
 
-  // Crisp yet museum-smooth 0.065 pre-blur for flat & beveled horological metalwork
-  const renderTarget = pmrem.fromScene(envScene, 0.065);
+  // 9. Warm workbench under-bounce (lifts key bow underside, lower gear train & forend bevel)
+  addSoftbox(12.0, 12.0, [0, -6.2, 1.2], [0, 0, 0], 0.96, 0.91, 0.84, 0.54);
+
+  // Sharper 0.048 museum pre-blur preserves crisp lathe-turned gear reflections and chamfered steel glints
+  const renderTarget = pmrem.fromScene(envScene, 0.048);
 
   for (const d of disposables) d.dispose();
   pmrem.dispose();

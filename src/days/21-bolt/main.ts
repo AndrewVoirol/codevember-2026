@@ -1,6 +1,7 @@
 import * as THREE from 'three/webgpu';
 import { SpecimenStage } from '../../core/stage/SpecimenStage';
 import { createBoltStudioEnvironment } from './environment';
+import { buildGearTrainAssembly } from './gearTrain';
 import {
   buildDeadboltAssembly,
   buildForendAssembly,
@@ -142,6 +143,9 @@ async function mountDay21Bolt(): Promise<void> {
   const springPack = buildSpringPackAssembly(materials);
   lockRoot.add(springPack.group);
 
+  const gearTrain = buildGearTrainAssembly(materials);
+  lockRoot.add(gearTrain.group);
+
   const key = buildKeyAssembly(materials);
   lockRoot.add(key.group);
 
@@ -149,6 +153,16 @@ async function mountDay21Bolt(): Promise<void> {
   deadbolt.group.position.x = lock.boltThrow01 * BOLT_TRAVEL;
   key.group.rotation.z = -lock.keyAngleRad;
   springPack.update(lock.leverAnglesRad);
+  gearTrain.update(
+    lock.upperPinionAngleRad,
+    lock.upperDetentAngleRad,
+    lock.upperPawlAngleRad,
+    lock.curtainB1AngleRad,
+    lock.curtainB2AngleRad,
+    lock.curtainB3AngleRad,
+    lock.keyHomeB4AngleRad,
+    lock.lowerPawlAngleRad
+  );
 
   // Expose read-only verification hook
   window.__DAY21__ = {
@@ -536,6 +550,7 @@ async function mountDay21Bolt(): Promise<void> {
     deadbolt.dispose();
     leverPack.dispose();
     springPack.dispose();
+    gearTrain.dispose();
     key.dispose();
     materials.dispose();
   });
@@ -552,6 +567,18 @@ async function mountDay21Bolt(): Promise<void> {
 
     // 3. Drive heavy blued-steel deadbolt translation through brass forend slot
     deadbolt.group.position.x = lock.boltThrow01 * BOLT_TRAVEL;
+
+    // 4. Drive coupled horological gear train & spring-loaded detent escapement pawls
+    gearTrain.update(
+      lock.upperPinionAngleRad,
+      lock.upperDetentAngleRad,
+      lock.upperPawlAngleRad,
+      lock.curtainB1AngleRad,
+      lock.curtainB2AngleRad,
+      lock.curtainB3AngleRad,
+      lock.keyHomeB4AngleRad,
+      lock.lowerPawlAngleRad
+    );
 
     // 4. Drive all 5 independent brass lever pivots & their flexing phosphor-bronze leaf springs
     for (let i = 0; i < LEVER_COUNT; i++) {

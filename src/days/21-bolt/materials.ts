@@ -4,6 +4,7 @@ import {
   abs,
   atan,
   clamp,
+  cos,
   dot,
   float,
   fract,
@@ -36,6 +37,8 @@ export interface BoltMaterials {
   gunmetalCase: THREE.MeshStandardNodeMaterial;
   bluedSteelBolt: THREE.MeshStandardNodeMaterial;
   forendBrass: THREE.MeshStandardNodeMaterial;
+  machinedGearBrass: THREE.MeshStandardNodeMaterial;
+  machinedBronzeRack: THREE.MeshStandardNodeMaterial;
   phosphorBronze: THREE.MeshStandardNodeMaterial;
   keyBrass: THREE.MeshStandardNodeMaterial;
   hardenedSteel: THREE.MeshStandardNodeMaterial;
@@ -48,11 +51,10 @@ export interface BoltMaterials {
 }
 
 /**
- * Analytical 4-tap tetrahedral 3D FBM micro-normal perturbation in object space.
- * Normalized independent of `scaleVec` so ultra-fine machined brush streaks stay
- * crisp and razor-flat (zero low-frequency crumpled-foil blotches on flat metal plates).
+ * Analytical 4-tap tetrahedral 3D FBM micro-normal perturbation in object space,
+ * returned in OBJECT space (so concentric lathe/ring bumps can be composed before transforming to view space).
  */
-const perturbNormalAniso = Fn(
+const perturbNormalAnisoObject = Fn(
   ([baseNorm_in, pos_in, scaleVec_in, strength_in]: [TslNode, TslNode, TslNode, TslNode]) => {
     const n = normalize(vec3(baseNorm_in));
     const p = vec3(pos_in).mul(vec3(scaleVec_in));
@@ -81,9 +83,30 @@ const perturbNormalAniso = Fn(
       .div(eps.mul(4.0))
       .mul(anisoDirWeight);
     const tanGrad = grad.sub(n.mul(dot(grad, n)));
-    return transformNormalToView(normalize(n.sub(tanGrad.mul(float(strength_in)))));
+    return normalize(n.sub(tanGrad.mul(float(strength_in))));
   }
 );
+
+/**
+ * View-space wrapper for anisotropic FBM normal perturbation.
+ */
+const perturbNormalAniso = Fn(
+  ([baseNorm_in, pos_in, scaleVec_in, strength_in]: [TslNode, TslNode, TslNode, TslNode]) => {
+    return transformNormalToView(
+      perturbNormalAnisoObject(baseNorm_in, pos_in, scaleVec_in, strength_in)
+    );
+  }
+);
+
+/**
+ * Computes chamfered bevel / edge wear mask in object space:
+ * returns ~0 on flat cardinal faces (|nx|, |ny|, or |nz| ~ 1) and ~1 on 45-deg chamfers & curved fillets.
+ */
+const computeBevelEdgeMask = Fn(([nObj_in]: [TslNode]) => {
+  const n = normalize(vec3(nObj_in));
+  const maxAxis = max(abs(n.x), max(abs(n.y), abs(n.z)));
+  return smoothstep(float(0.975), float(0.76), maxAxis);
+});
 
 export function createBoltMaterials(): BoltMaterials {
   const uKeyHover = uniform(0);
@@ -106,332 +129,597 @@ export function createBoltMaterials(): BoltMaterials {
   const azuriteRgb = vec3(...MINERAL_PALETTE.azuritePrussian.rInfLinear);
   const lapisRgb = vec3(...MINERAL_PALETTE.lapisUltramarine.rInfLinear);
   const hematiteRgb = vec3(...MINERAL_PALETTE.hematiteRust.rInfLinear);
+  const verdigrisRgb = vec3(...MINERAL_PALETTE.verdigrisMalachite.rInfLinear);
 
   // ---------------------------------------------------------------------------
-  // 1. Oiled Charred-Oak Architectural Door-Stile Specimen Block
-  //    True cylindrical quarter-sawn oak cathedral growth rings + medullary rays
-  //    on longitudinal faces (|N.x|, |N.z|) AND tight concentric cross-cut end-grain
-  //    with open pin-pores on horizontal cuts (|N.y|)!
+  // 1. Natural Oiled Charred-Oak Architectural Door-Stile Specimen Block
+  //    Organic non-uniform ring-porous oak cathedral growth rings (zero zebra stripes!),
+  //    dense fibrous vertical wood strands, etched dark oak vessel pores, luminous
+  //    quarter-sawn medullary ray flecks, lighter chisel-cut mortise walls, and
+  //    crisp concentric cross-cut end-grain with radial medullary spokes!
   // ---------------------------------------------------------------------------
   const charredOak = new THREE.MeshStandardNodeMaterial({
-    metalness: 0.04,
-    roughness: 0.52,
-    envMapIntensity: 0.88,
+    metalness: 0.03,
+    roughness: 0.48,
+    envMapIntensity: 0.92,
   });
   {
     const nObj = normalize(normalLocal);
-    // Horizontal cross-cut faces (top/bottom stile ends & horizontal mortise shelves) show end-grain
-    const endGrainMask = smoothstep(float(0.52), float(0.86), abs(nObj.y));
+    const bevelMask = computeBevelEdgeMask(nObj);
+    const endGrainMask = smoothstep(float(0.54), float(0.86), abs(nObj.y));
 
-    // Offset tree pith in XZ creates authentic tight quarter-sawn & gentle cathedral arch rings along Y
-    const pithOffset = vec2(positionLocal.x.add(2.25), positionLocal.z.add(1.65));
-    const gentleBow = positionLocal.y.mul(positionLocal.y).mul(0.085);
-    const fiberWander = mineralToothFbm(positionLocal.mul(vec3(2.4, 0.42, 2.4)), float(1.4));
-    const fineWander = mineralToothFbm(positionLocal.mul(vec3(7.5, 1.3, 7.5)), float(1.2));
+    // Offset tree pith creates authentic natural cathedral grain on front & concentric rings on cut ends
+    const pithOffset = vec2(positionLocal.x.add(1.48), positionLocal.z.add(1.12));
+    const gentleBow = positionLocal.y.mul(positionLocal.y).mul(0.115);
+    const slowWander = mineralToothFbm(positionLocal.mul(vec3(2.2, 0.48, 2.2)), float(1.45));
+    const midWander = mineralToothFbm(positionLocal.mul(vec3(6.8, 1.4, 6.8)), float(1.25));
+    const growthRateVar = mineralToothFbm(positionLocal.mul(vec3(4.1, 0.35, 4.1)).add(vec3(3.2, 1.1, 5.7)), float(1.3));
 
-    // Radial ring coordinate around pith (tight realistic ring spacing, subtle organic wander -> zero camo blobs!)
+    // Organic ring radius with natural tree growth-rate variation (breaks up any uniform stripe spacing!)
     const rPith = length(pithOffset)
       .add(gentleBow)
-      .add(fiberWander.sub(0.5).mul(0.16))
-      .add(fineWander.sub(0.5).mul(0.035));
+      .add(slowWander.sub(0.5).mul(0.24))
+      .add(midWander.sub(0.5).mul(0.055));
+    const warpedRingCoord = rPith.mul(22.5).add(growthRateVar.sub(0.5).mul(3.4));
+    const warpedEndCoord = rPith.mul(26.0).add(growthRateVar.sub(0.5).mul(3.6));
 
-    // Asymmetric oak growth rings: thin dark scorched latewood lines separating warm oiled earlywood bands
-    const ringCoordLong = fract(rPith.mul(14.5).add(10.0));
-    const dLong = abs(ringCoordLong.sub(0.5)).mul(2.0);
-    const latewoodLong = smoothstep(float(0.52), float(0.95), dLong.mul(dLong));
-
-    const ringCoordEnd = fract(rPith.mul(18.5).add(10.0));
-    const dEnd = abs(ringCoordEnd.sub(0.5)).mul(2.0);
-    const latewoodEnd = smoothstep(float(0.46), float(0.94), dEnd.mul(dEnd));
-    const latewood = mix(latewoodLong, latewoodEnd, endGrainMask);
-
-    // Fine elongated vertical oak vessel pores (longitudinal) vs dense circular end-grain pin pores
-    const longPores = mineralToothFbm(positionLocal.mul(vec3(78.0, 5.2, 78.0)), float(1.3));
-    const endPores = mineralToothFbm(positionLocal.mul(vec3(96.0, 96.0, 96.0)), float(1.2));
-    const microTooth = mineralToothFbm(positionLocal.mul(vec3(120.0, 18.0, 120.0)), float(1.1));
-    const activePores = mix(longPores, endPores, endGrainMask);
-
-    // Subtle quarter-sawn medullary rays radiating from tree pith
-    const rayAngle = atan(pithOffset.y, pithOffset.x);
-    const rayFleckLong = smoothstep(
-      float(0.68),
-      float(0.92),
-      mineralToothFbm(vec3(rayAngle.mul(42.0), positionLocal.y.mul(14.0), rPith.mul(6.0)), float(1.0))
+    // Authentic ring-porous oak profile:
+    //  - Narrow crisp dark latewood boundary (~24% of ring width) with asymmetric autumn->spring transition
+    //  - Open earlywood vessel-pore band right along the spring boundary of each annual ring
+    const phaseLong = fract(warpedRingCoord.add(20.0));
+    const latewoodLong = smoothstep(float(0.70), float(0.93), phaseLong).mul(
+      float(1.0).sub(smoothstep(float(0.95), float(1.0), phaseLong))
     );
-    const rayLinesEnd = sin(rayAngle.mul(110.0).add(fiberWander.mul(2.0))).mul(0.5).add(0.5);
-    const rayAccent = mix(rayFleckLong.mul(0.16), rayLinesEnd.mul(0.22), endGrainMask);
+    const earlySoftGradLong = smoothstep(float(0.08), float(0.72), phaseLong);
+    const earlyPorousLong = smoothstep(float(0.02), float(0.14), phaseLong).mul(
+      float(1.0).sub(smoothstep(float(0.22), float(0.42), phaseLong))
+    );
 
-    // Rich linseed-oiled charred raw-umber palette (earlywood warm umber-sienna vs scorched latewood)
-    const earlyWood = mix(rawUmberRgb.mul(0.30), burntSiennaRgb.mul(0.22), float(0.32).add(rayAccent));
-    const lateWood = rawUmberRgb.mul(0.055);
-    const woodBase = mix(earlyWood, lateWood, latewood.mul(0.84));
+    const phaseEnd = fract(warpedEndCoord.add(20.0));
+    const latewoodEnd = smoothstep(float(0.68), float(0.92), phaseEnd).mul(
+      float(1.0).sub(smoothstep(float(0.95), float(1.0), phaseEnd))
+    );
+    const earlySoftGradEnd = smoothstep(float(0.08), float(0.70), phaseEnd);
+    const earlyPorousEnd = smoothstep(float(0.02), float(0.16), phaseEnd).mul(
+      float(1.0).sub(smoothstep(float(0.24), float(0.44), phaseEnd))
+    );
 
-    // Kubelka-Munk oiled raw-umber glaze for deep museum-varnished timber saturation
-    const glazeThick = float(0.34).add(activePores.mul(0.40));
-    const oiledTimber = kubelkaMunkGlaze(pUmber.K, pUmber.S, glazeThick, woodBase).mul(0.33);
+    const latewood = mix(latewoodLong, latewoodEnd, endGrainMask);
+    const ringGrad = mix(earlySoftGradLong, earlySoftGradEnd, endGrainMask);
+    const earlyPorousBand = mix(earlyPorousLong, earlyPorousEnd, endGrainMask);
 
-    // Subtle warm heartwood lift on front chamfered cutaway face & darker end-grain oil absorption
-    const frontCutWarmth = smoothstep(float(0.12), float(0.25), positionLocal.z).mul(float(1.0).sub(endGrainMask));
-    const warmCut = mix(rawUmberRgb.mul(0.38), burntSiennaRgb.mul(0.28), float(1.0).sub(latewood));
-    const withFrontLift = mix(oiledTimber, warmCut.mul(0.48), frontCutWarmth.mul(0.28));
-    const withEndDarken = withFrontLift.mul(mix(float(1.0), float(0.74), endGrainMask));
+    // Rich fibrous vertical oak grain strands + elongated etched open oak vessel pores!
+    const broadFiber = mineralToothFbm(positionLocal.mul(vec3(36.0, 2.6, 36.0)), float(1.3));
+    const fineFibers = mineralToothFbm(positionLocal.mul(vec3(115.0, 6.2, 115.0)), float(1.25));
+    const microVesselsLong = mineralToothFbm(positionLocal.mul(vec3(165.0, 11.5, 165.0)), float(1.2));
+    const endPoresRaw = mineralToothFbm(positionLocal.mul(vec3(135.0, 135.0, 135.0)), float(1.3));
+    const activePores = mix(microVesselsLong, endPoresRaw, endGrainMask);
 
-    // Crisp dark open-pore valleys + gentle interior mortise pocket shadow
-    const poreMask = smoothstep(float(0.18), float(0.54), activePores);
-    const inPocketX = smoothstep(float(-0.88), float(-0.82), positionLocal.x);
-    const inPocketY = float(1.0).sub(smoothstep(float(0.60), float(0.66), abs(positionLocal.y.sub(0.01))));
-    const pocketAO = mix(float(1.0), float(0.76), inPocketX.mul(inPocketY).mul(smoothstep(float(0.20), float(-0.18), positionLocal.z)));
+    // Dark recessed oak vessel streaks concentrated in earlywood porous ring zones + scattered fine fibers
+    const vesselGroove = clamp(
+      float(1.0)
+        .sub(smoothstep(float(0.18), float(0.46), activePores))
+        .mul(float(0.42).add(earlyPorousBand.mul(1.15)))
+        .add(float(1.0).sub(smoothstep(float(0.12), float(0.36), fineFibers)).mul(0.28)),
+      0.0,
+      1.0
+    );
 
-    charredOak.colorNode = withEndDarken.mul(mix(float(0.60), float(1.05), poreMask)).mul(pocketAO);
+    // Prominent quarter-sawn oak medullary ray flecks (iridescent silver-amber ribbons across grain!)
+    const rayAngle = atan(pithOffset.y, pithOffset.x);
+    const rayNoise = mineralToothFbm(
+      vec3(rayAngle.mul(42.0), positionLocal.y.mul(16.0), rPith.mul(6.5)),
+      float(1.2)
+    );
+    const rayFleckLong = smoothstep(float(0.62), float(0.88), rayNoise).mul(
+      float(1.0).sub(latewood.mul(0.65))
+    );
+    const rayLinesEnd = smoothstep(
+      float(0.48),
+      float(0.94),
+      sin(rayAngle.mul(104.0).add(slowWander.mul(2.6))).mul(0.5).add(0.5)
+    );
+    const rayAccent = mix(rayFleckLong, rayLinesEnd.mul(0.74), endGrainMask);
 
-    // Blend longitudinal fiber-grain normal relief with cross-cut end-grain pore relief (unconditional uniform flow)
-    const normLong = perturbNormalAniso(nObj, positionLocal, vec3(76.0, 6.5, 76.0), float(0.022));
-    const normEnd = perturbNormalAniso(nObj, positionLocal, vec3(92.0, 92.0, 92.0), float(0.032));
-    charredOak.normalNode = normalize(mix(normLong, normEnd, endGrainMask));
+    // Rich deep linseed-oiled dark charred-oak heartwood palette (warm espresso-chestnut, NEVER cartoon milk-chocolate!)
+    const heartwoodBase = mix(
+      rawUmberRgb.mul(0.64),
+      burntSiennaRgb.mul(0.50),
+      float(0.28).add(broadFiber.mul(0.28))
+    );
+    const heartwoodRich = mix(
+      heartwoodBase,
+      mix(yellowOchreRgb.mul(0.44), burntSiennaRgb.mul(0.42), 0.45),
+      ringGrad.mul(0.38).add(fineFibers.mul(0.18))
+    );
+    const raySheen = mix(yellowOchreRgb.mul(0.64), warmKaolinRgb.mul(0.38), 0.24);
+    const earlyWithRays = mix(heartwoodRich, raySheen, rayAccent.mul(0.42));
+
+    // Deep charred latewood growth lines (crisp natural dark espresso contrast!)
+    const darkLate = mix(rawUmberRgb.mul(0.085), azuriteRgb.mul(0.045), 0.22);
+    const woodFigure = mix(earlyWithRays, darkLate, latewood.mul(0.86));
+
+    // Calibrated Kubelka-Munk raw-umber linseed-oil depth glaze
+    const glazeThick = float(0.28).add(latewood.mul(0.26)).add(vesselGroove.mul(0.24));
+    const kmGlazed = kubelkaMunkGlaze(pUmber.K, pUmber.S, glazeThick, woodFigure).mul(0.76);
+    const oiledTimber = mix(woodFigure.mul(0.68), kmGlazed, 0.48);
+
+    // Lighter freshly-chiseled oak inside the mortise pocket & rebated forend walls vs deeper oiled exterior
+    const inPocketX = smoothstep(float(-0.87), float(-0.81), positionLocal.x);
+    const inPocketY = float(1.0).sub(smoothstep(float(0.58), float(0.65), abs(positionLocal.y.sub(0.01))));
+    const inRebateWall = smoothstep(float(0.89), float(0.95), positionLocal.x);
+    const chiselCutMask = clamp(
+      inPocketX.mul(inPocketY).mul(smoothstep(float(0.24), float(0.10), positionLocal.z)).add(inRebateWall.mul(0.52)),
+      0.0,
+      1.0
+    );
+    const chiseledTone = mix(burntSiennaRgb.mul(0.56), yellowOchreRgb.mul(0.46), 0.46).mul(
+      mix(float(1.0), float(0.28), latewood)
+    );
+    const withMortiseWalls = mix(oiledTimber, chiseledTone, chiselCutMask.mul(0.44));
+
+    // Warm hand-rubbed chamfer lift + richer oiled end-grain absorption
+    const chamferLift = mix(withMortiseWalls, withMortiseWalls.mul(1.24), bevelMask.mul(0.52));
+    const endGrainTone = chamferLift.mul(mix(float(1.0), float(0.88), endGrainMask));
+
+    // Crisp etched dark vessel-pore valleys + realistic deep-pocket shadow
+    const deepPocketAO = mix(
+      float(1.0),
+      float(0.76),
+      inPocketX.mul(inPocketY).mul(smoothstep(float(0.06), float(-0.22), positionLocal.z))
+    );
+    charredOak.colorNode = endGrainTone
+      .mul(mix(float(1.05), float(0.32), vesselGroove))
+      .mul(deepPocketAO);
+
+    // Tactile fibrous grain relief: crisp vertical wood fibers + etched vessel grooves + ring boundary step!
+    const normLongObj = perturbNormalAnisoObject(nObj, positionLocal, vec3(110.0, 6.2, 110.0), float(0.082));
+    const normEndObj = perturbNormalAnisoObject(nObj, positionLocal, vec3(130.0, 130.0, 130.0), float(0.098));
+    const ringSlope = sin(mix(warpedRingCoord, warpedEndCoord, endGrainMask).mul(6.283185)).mul(0.022);
+    const pithDir = normalize(vec3(pithOffset.x, float(0.0), pithOffset.y));
+    const ringTan = pithDir.sub(nObj.mul(dot(pithDir, nObj)));
+    const blendedObjNorm = normalize(mix(normLongObj, normEndObj, endGrainMask).add(ringTan.mul(ringSlope)));
+    charredOak.normalNode = transformNormalToView(blendedObjNorm);
 
     charredOak.roughnessNode = clamp(
-      float(0.42)
-        .add(latewood.mul(0.12))
-        .add(float(1.0).sub(poreMask).mul(0.18))
-        .sub(rayAccent.mul(0.18))
-        .sub(microTooth.mul(0.04))
-        .add(endGrainMask.mul(0.15))
-        .sub(frontCutWarmth.mul(0.05)),
-      0.34,
-      0.84
+      float(0.44)
+        .add(latewood.mul(0.11))
+        .add(vesselGroove.mul(0.34))
+        .sub(rayAccent.mul(0.22))
+        .sub(bevelMask.mul(0.08))
+        .add(endGrainMask.mul(0.10))
+        .sub(fineFibers.mul(0.05)),
+      0.24,
+      0.88
     );
   }
 
   // ---------------------------------------------------------------------------
-  // 2. Oil-Blackened Surface-Ground Gunmetal Steel Lock Case Interior
-  //    Fine high-frequency machining grain (zero blurry zebra stripes!)
+  // 2. Oil-Blackened Machined Gunmetal Steel Lock Case Interior & Cutaway Rim
+  //    Visible fly-cutter / surface-grinder milling sheen + rubbed steel chamfer arrises!
   // ---------------------------------------------------------------------------
   const gunmetalCase = new THREE.MeshStandardNodeMaterial({
-    metalness: 0.82,
-    roughness: 0.38,
-    envMapIntensity: 1.06,
-  });
-  {
-    // Ultra-fine machined surface-grinder finish along X + subtle oil-blackened temper variation
-    const fineMill = mineralToothFbm(positionLocal.mul(vec3(14.0, 210.0, 68.0)), float(1.1));
-    const oilMottle = mineralToothFbm(positionLocal.add(vec3(3.1, 1.7, 5.4)), float(14.0));
-
-    // Strictly derived from azuritePrussian, rawUmber & boneCalcite (zero hardcoded RGBs)
-    const steelDeep = mix(rawUmberRgb.mul(0.22), azuriteRgb.mul(0.26), 0.58);
-    const steelMid = mix(rawUmberRgb.mul(0.34), azuriteRgb.mul(0.40), 0.56);
-    const steelHighlight = mix(steelMid, boneCalciteRgb.mul(0.14), 0.28);
-
-    // Subtle tonal modulation (fine micro-grain, never loud zebra banding)
-    const baseSteel = mix(steelDeep, steelMid, smoothstep(float(0.18), float(0.84), fineMill).mul(0.55).add(0.22));
-    const patinated = mix(baseSteel, steelHighlight, smoothstep(float(0.55), float(0.90), oilMottle).mul(0.32));
-
-    // Gentle recessed case depth AO toward backplate so stacked golden levers pop vividly forward
-    const backAO = smoothstep(float(-0.22), float(0.06), positionLocal.z);
-    gunmetalCase.colorNode = patinated.mul(mix(float(0.68), float(1.0), backAO));
-    gunmetalCase.normalNode = perturbNormalAniso(
-      normalLocal,
-      positionLocal,
-      vec3(16.0, 220.0, 72.0),
-      float(0.0055)
-    );
-    gunmetalCase.roughnessNode = clamp(
-      float(0.34)
-        .add(fineMill.sub(0.5).mul(0.10))
-        .add(oilMottle.sub(0.5).mul(0.07)),
-      0.26,
-      0.50
-    );
-  }
-
-  // ---------------------------------------------------------------------------
-  // 3. Heavy Thermally Blued-Steel Deadbolt (Prussian-Blued Temper Steel)
-  //    Fine draw-filed X grain on side faces + crisp cross-ground nose face (zero blotches!)
-  // ---------------------------------------------------------------------------
-  const bluedSteelBolt = new THREE.MeshStandardNodeMaterial({
-    metalness: 0.90,
-    roughness: 0.24,
-    envMapIntensity: 1.32,
+    metalness: 0.85,
+    roughness: 0.34,
+    envMapIntensity: 1.18,
   });
   {
     const nObj = normalize(normalLocal);
+    const bevelMask = computeBevelEdgeMask(nObj);
+
+    // Parallel surface-grinder tool-path lines along X + subtle rotary fly-cutter face-mill arcs on backplate
+    const fineMill = mineralToothFbm(positionLocal.mul(vec3(12.0, 210.0, 72.0)), float(1.15));
+    const millArcR = length(vec2(positionLocal.x.add(0.15), positionLocal.y.sub(0.08)));
+    const flyCutterArc = sin(millArcR.mul(165.0).add(fineMill.mul(1.8))).mul(0.5).add(0.5);
+    const oilMottle = mineralToothFbm(positionLocal.add(vec3(3.1, 1.7, 5.4)), float(12.5));
+
+    // Calibrated oil-blackened gunmetal slate (lifted cleanly above pitch black so backplate machining reads!)
+    const steelDeep = mix(rawUmberRgb.mul(0.28), azuriteRgb.mul(0.34), 0.56);
+    const steelMid = mix(rawUmberRgb.mul(0.44), azuriteRgb.mul(0.52), 0.54);
+    const steelHighlight = mix(steelMid, boneCalciteRgb.mul(0.28), 0.42);
+    const oilCrevice = mix(rawUmberRgb.mul(0.18), burntSiennaRgb.mul(0.14), 0.45);
+
+    const millBlend = smoothstep(float(0.15), float(0.85), fineMill.mul(0.72).add(flyCutterArc.mul(0.28)));
+    const baseSteel = mix(steelDeep, steelMid, millBlend.mul(0.65).add(0.22));
+    const withOil = mix(baseSteel, oilCrevice, smoothstep(float(0.62), float(0.92), oilMottle).mul(0.26));
+    // Crisp bright rubbed-steel edge highlights along chamfered cutaway rim & wall bevels
+    const withBevelWear = mix(withOil, steelHighlight, bevelMask.mul(0.58));
+
+    // Gentle cavity depth shading toward backplate (preserves visible fly-cutter steel behind gears!)
+    const backAO = smoothstep(float(-0.22), float(0.06), positionLocal.z);
+    gunmetalCase.colorNode = withBevelWear.mul(mix(float(0.78), float(1.04), backAO));
+
+    const millObjNorm = perturbNormalAnisoObject(nObj, positionLocal, vec3(14.0, 220.0, 76.0), float(0.017));
+    const arcDir = normalize(vec3(positionLocal.x.add(0.15), positionLocal.y.sub(0.08), float(0.001)));
+    const arcTan = arcDir.sub(nObj.mul(dot(arcDir, nObj)));
+    const arcSlope = cos(millArcR.mul(165.0)).mul(0.009).mul(smoothstep(float(0.85), float(0.98), abs(nObj.z)));
+    gunmetalCase.normalNode = transformNormalToView(normalize(millObjNorm.add(arcTan.mul(arcSlope))));
+
+    gunmetalCase.roughnessNode = clamp(
+      float(0.32)
+        .add(fineMill.sub(0.5).mul(0.14))
+        .add(oilMottle.sub(0.5).mul(0.09))
+        .sub(bevelMask.mul(0.10)),
+      0.20,
+      0.52
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // 3. Heavy Thermally Blued-Steel Deadbolt & Coaxial Detent Cams (Prussian-Blue Temper Steel)
+  //    Crisp parallel draw-filed milling lines, organic thermal temper sheen, AND
+  //    authentic bright-steel mechanical rub-through along chamfered edges & sliding rails!
+  // ---------------------------------------------------------------------------
+  const bluedSteelBolt = new THREE.MeshStandardNodeMaterial({
+    metalness: 0.92,
+    roughness: 0.22,
+    envMapIntensity: 1.38,
+  });
+  {
+    const nObj = normalize(normalLocal);
+    const bevelMask = computeBevelEdgeMask(nObj);
     const noseFaceMask = smoothstep(float(0.55), float(0.85), abs(nObj.x));
 
-    // High-frequency draw-filed satin grain on sides vs fine cross-ground satin on +X nose face
-    const drawSide = mineralToothFbm(positionLocal.mul(vec3(9.0, 220.0, 220.0)), float(1.1));
-    const groundNose = mineralToothFbm(positionLocal.mul(vec3(48.0, 180.0, 180.0)), float(1.1));
-    const activeGrain = mix(drawSide, groundNose, noseFaceMask);
-    const temperWave = mineralToothFbm(positionLocal.add(vec3(4.2, 8.1, 2.3)), float(9.5));
+    // High-frequency multi-scale draw-filed satin grain on sides (zero synthetic corduroy sine stripes!)
+    const drawSide = mineralToothFbm(positionLocal.mul(vec3(8.5, 285.0, 285.0)), float(1.15));
+    const drawMicro = mineralToothFbm(positionLocal.mul(vec3(22.0, 560.0, 560.0)), float(1.1));
+    const groundNose = mineralToothFbm(positionLocal.mul(vec3(54.0, 220.0, 220.0)), float(1.15));
+    const activeGrain = mix(drawSide.mul(0.62).add(drawMicro.mul(0.38)), groundNose, noseFaceMask);
+    const temperWave = mineralToothFbm(positionLocal.add(vec3(4.2, 8.1, 2.3)), float(7.8));
 
-    // Rich Prussian-blued temper steel anchored strictly in azuritePrussian, lapisUltramarine & boneCalcite
-    const blueDeep = mix(azuriteRgb.mul(0.58), lapisRgb.mul(0.52), 0.35);
-    const blueMid = mix(azuriteRgb.mul(0.92), boneCalciteRgb.mul(0.24), 0.28);
-    const blueSheen = mix(azuriteRgb.mul(1.12), warmKaolinRgb.mul(0.36), 0.38);
+    // Deep Prussian-blue thermal temper steel + subtle violet-straw heat iridescence
+    const blueDeep = mix(azuriteRgb.mul(0.52), lapisRgb.mul(0.46), 0.42);
+    const blueMid = mix(azuriteRgb.mul(0.94), boneCalciteRgb.mul(0.24), 0.26);
+    const temperVioletStraw = mix(lapisRgb.mul(0.68), burntSiennaRgb.mul(0.32), 0.32);
+    const brightSteel = mix(boneCalciteRgb.mul(0.66), warmKaolinRgb.mul(0.74), 0.42);
 
     const kmBlue = kubelkaMunkGlaze(
       pPrussian.K,
       pPrussian.S,
-      float(0.46).add(temperWave.mul(0.22)),
-      blueSheen
+      float(0.44).add(temperWave.mul(0.24)),
+      blueMid
     );
-    // Low-contrast micro-brushed albedo + subtle thermal temper iridescence (zero thick horizontal stripes!)
-    const grainFactor = smoothstep(float(0.15), float(0.85), activeGrain).mul(0.38).add(0.32);
+    const grainFactor = smoothstep(float(0.14), float(0.86), activeGrain).mul(0.48).add(0.28);
     const boltBase = mix(blueDeep, mix(blueMid, kmBlue, 0.36), grainFactor);
-    const withTemper = mix(boltBase, blueSheen, smoothstep(float(0.58), float(0.88), temperWave).mul(0.24));
+    const withTemper = mix(boltBase, temperVioletStraw, smoothstep(float(0.54), float(0.88), temperWave).mul(0.30));
 
-    // Subtle burnished sliding-wear sheen along top/bottom faces passing through the brass forend slot
-    const wearBand = float(1.0)
-      .sub(smoothstep(float(0.09), float(0.17), abs(positionLocal.y.sub(0.16))))
-      .mul(float(1.0).sub(noseFaceMask));
-    const burnished = mix(withTemper, mix(withTemper, boneCalciteRgb.mul(0.46), 0.20), wearBand.mul(0.28));
+    // Authentic mechanical wear: bright steel rub-through along forend sliding rails AND chamfered bevel edges!
+    const railWearY = smoothstep(float(0.115), float(0.162), abs(positionLocal.y.sub(0.16))).mul(
+      float(1.0).sub(noseFaceMask)
+    );
+    const rubThrough = clamp(
+      bevelMask.mul(0.44).add(railWearY.mul(0.38).mul(smoothstep(float(0.22), float(0.82), drawSide))),
+      0.0,
+      0.62
+    );
+    const burnished = mix(withTemper, brightSteel, rubThrough);
 
-    bluedSteelBolt.colorNode = burnished.add(blueSheen.mul(uBoltHover.mul(0.20)));
+    bluedSteelBolt.colorNode = burnished.add(brightSteel.mul(uBoltHover.mul(0.16)));
 
-    const normSide = perturbNormalAniso(nObj, positionLocal, vec3(10.0, 240.0, 240.0), float(0.0046));
-    const normNose = perturbNormalAniso(nObj, positionLocal, vec3(64.0, 200.0, 200.0), float(0.0038));
-    bluedSteelBolt.normalNode = normalize(mix(normSide, normNose, noseFaceMask));
+    const normSide = perturbNormalAnisoObject(nObj, positionLocal, vec3(9.0, 240.0, 240.0), float(0.017));
+    const normNose = perturbNormalAnisoObject(nObj, positionLocal, vec3(64.0, 210.0, 210.0), float(0.014));
+    bluedSteelBolt.normalNode = transformNormalToView(normalize(mix(normSide, normNose, noseFaceMask)));
 
     bluedSteelBolt.roughnessNode = clamp(
       float(0.21)
-        .add(activeGrain.sub(0.5).mul(0.08))
-        .sub(wearBand.mul(0.04))
-        .add(temperWave.sub(0.5).mul(0.03)),
-      0.15,
+        .add(activeGrain.sub(0.5).mul(0.11))
+        .sub(rubThrough.mul(0.08))
+        .add(temperWave.sub(0.5).mul(0.04)),
+      0.12,
+      0.34
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // 4. Precision Lathe-Turned Horological Gear Brass (Gears, Pinions, Curtain Wheel & Bridge)
+  //    True concentric lathe turning rings (length(localXY)), bright-burnished tooth tips &
+  //    chamfers, amber-umber oil-patinated roots & spoke recesses, and subtle verdigris age!
+  // ---------------------------------------------------------------------------
+  const machinedGearBrass = new THREE.MeshStandardNodeMaterial({
+    metalness: 0.91,
+    roughness: 0.22,
+    envMapIntensity: 1.38,
+  });
+  {
+    const nObj = normalize(normalLocal);
+    const bevelMask = computeBevelEdgeMask(nObj);
+    const faceZMask = smoothstep(float(0.75), float(0.96), abs(nObj.z));
+    const rXY = length(positionLocal.xy);
+    const angXY = atan(positionLocal.y, positionLocal.x);
+
+    // Authentic fine concentric watchmaker lathe turning grooves + radial chatter
+    const latheFine = sin(rXY.mul(420.0)).mul(0.5).add(0.5);
+    const latheMed = sin(rXY.mul(175.0).add(mineralToothFbm(positionLocal, float(24.0)).mul(1.8))).mul(0.5).add(0.5);
+    const latheWave = latheFine.mul(0.58).add(latheMed.mul(0.42));
+    const patinaMottle = mineralToothFbm(positionLocal.add(vec3(5.3, 2.7, 1.9)), float(26.0));
+    const microFile = mineralToothFbm(positionLocal.mul(vec3(110.0, 110.0, 22.0)), float(1.15));
+
+    // Oil-patinated recesses near spoke pockets / tooth roots vs bright burnished outer tooth crowns & chamfers
+    const rootRecessMask = smoothstep(float(0.125), float(0.042), rXY).mul(
+      smoothstep(float(0.32), float(0.84), patinaMottle)
+    );
+    const tipBurnishMask = clamp(
+      bevelMask.mul(0.78).add(smoothstep(float(0.095), float(0.145), rXY).mul(0.42)),
+      0.0,
+      1.0
+    );
+
+    const agedUmberBrass = mix(rawUmberRgb.mul(0.52), burntSiennaRgb.mul(0.44), 0.35);
+    const patinaVerdigris = mix(agedUmberBrass, verdigrisRgb.mul(0.48), 0.38);
+    const satinBrass = mix(yellowOchreRgb.mul(0.98), boneCalciteRgb.mul(0.78), 0.26);
+    const brightBurnished = mix(yellowOchreRgb.mul(1.24), boneCalciteRgb.mul(0.96), 0.44);
+    const kmBrass = kubelkaMunkGlaze(pOchre.K, pOchre.S, float(0.48), satinBrass);
+
+    const baseGear = mix(
+      mix(agedUmberBrass, satinBrass, 0.56),
+      mix(satinBrass, kmBrass, 0.22),
+      latheWave.mul(0.55).add(microFile.mul(0.25)).add(0.20)
+    );
+    // Warm dried clock-oil amber darkening + restrained trace of sheltered verdigris oxidation in recesses
+    const withOilPatina = mix(baseGear, agedUmberBrass, rootRecessMask.mul(0.48));
+    const creviceVerdigris = smoothstep(float(0.74), float(0.94), patinaMottle).mul(rootRecessMask);
+    const withAge = mix(withOilPatina, patinaVerdigris, creviceVerdigris.mul(0.32));
+    // Crisp bright-burnished tooth tips & beveled spoke edges
+    machinedGearBrass.colorNode = mix(withAge, brightBurnished, tipBurnishMask.mul(0.46));
+
+    // Concentric lathe turning normal grooves on front/back gear faces + crisp radial filing on tooth flanks!
+    const baseMicroNorm = perturbNormalAnisoObject(nObj, positionLocal, vec3(92.0, 92.0, 26.0), float(0.014));
+    const safeR = max(rXY, float(0.002));
+    const radialDir = vec3(positionLocal.x.div(safeR), positionLocal.y.div(safeR), float(0.0));
+    const radialTan = radialDir.sub(nObj.mul(dot(radialDir, nObj)));
+    // Add subtle tangential sunburst modulation so studio softbox splits across gear face
+    const latheSlope = cos(rXY.mul(420.0))
+      .mul(0.022)
+      .add(cos(rXY.mul(175.0)).mul(0.011))
+      .add(sin(angXY.mul(2.0)).mul(0.004))
+      .mul(faceZMask);
+    machinedGearBrass.normalNode = transformNormalToView(
+      normalize(baseMicroNorm.add(radialTan.mul(latheSlope)))
+    );
+
+    machinedGearBrass.roughnessNode = clamp(
+      float(0.21)
+        .add(latheWave.sub(0.5).mul(0.11))
+        .add(rootRecessMask.mul(0.18))
+        .add(creviceVerdigris.mul(0.20))
+        .sub(tipBurnishMask.mul(0.09)),
+      0.12,
+      0.48
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // 5. Precision-Milled Aged Dark Horological Bronze (Deadbolt Upper Rack & Compound Pinion)
+  //    Warm patinated gunmetal-bronze with fine parallel milling lines, oil-darkened roots & bright tooth crowns!
+  // ---------------------------------------------------------------------------
+  const machinedBronzeRack = new THREE.MeshStandardNodeMaterial({
+    metalness: 0.91,
+    roughness: 0.24,
+    envMapIntensity: 1.34,
+  });
+  {
+    const nObj = normalize(normalLocal);
+    const bevelMask = computeBevelEdgeMask(nObj);
+    const millGrain = mineralToothFbm(positionLocal.mul(vec3(11.0, 250.0, 250.0)), float(1.15));
+    const oilPatina = mineralToothFbm(positionLocal.add(vec3(1.7, 6.4, 3.2)), float(24.0));
+
+    const bronzeRoot = mix(rawUmberRgb.mul(0.42), burntSiennaRgb.mul(0.36), 0.36);
+    const bronzeMid = mix(rawUmberRgb.mul(0.76), yellowOchreRgb.mul(0.72), 0.48);
+    const bronzeTip = mix(yellowOchreRgb.mul(1.10), boneCalciteRgb.mul(0.84), 0.34);
+    const kmBronze = kubelkaMunkGlaze(pUmber.K, pUmber.S, float(0.38), bronzeMid);
+
+    const milled = mix(
+      bronzeRoot,
+      mix(bronzeMid, kmBronze, 0.26),
+      smoothstep(float(0.16), float(0.84), millGrain).mul(0.54).add(0.28)
+    );
+    const patinated = mix(milled, bronzeRoot, smoothstep(float(0.58), float(0.90), oilPatina).mul(0.38));
+    machinedBronzeRack.colorNode = mix(patinated, bronzeTip, bevelMask.mul(0.56));
+
+    machinedBronzeRack.normalNode = perturbNormalAniso(
+      nObj,
+      positionLocal,
+      vec3(13.0, 260.0, 260.0),
+      float(0.015)
+    );
+    machinedBronzeRack.roughnessNode = clamp(
+      float(0.23)
+        .add(millGrain.sub(0.5).mul(0.10))
+        .add(oilPatina.sub(0.5).mul(0.10))
+        .sub(bevelMask.mul(0.09)),
+      0.13,
+      0.44
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // 6. Mortised Forend Satin Brass Faceplate, Escutcheon, Washers & Slotted Screws
+  //    Crisp vertical satin draw-brushing + subtle oil patina in recesses + bright chamfers!
+  // ---------------------------------------------------------------------------
+  const forendBrass = new THREE.MeshStandardNodeMaterial({
+    metalness: 0.91,
+    roughness: 0.23,
+    envMapIntensity: 1.32,
+  });
+  {
+    const nObj = normalize(normalLocal);
+    const bevelMask = computeBevelEdgeMask(nObj);
+    const brushY = mineralToothFbm(positionLocal.mul(vec3(240.0, 10.5, 240.0)), float(1.15));
+    const fineSatin = mineralToothFbm(positionLocal.add(vec3(6.3, 2.1, 4.7)), float(42.0));
+
+    const brassAged = mix(rawUmberRgb.mul(0.56), yellowOchreRgb.mul(0.68), 0.42);
+    const brassMid = mix(yellowOchreRgb.mul(1.06), boneCalciteRgb.mul(0.82), 0.28);
+    const brassBright = mix(yellowOchreRgb.mul(1.22), boneCalciteRgb.mul(0.94), 0.42);
+    const kmBrass = kubelkaMunkGlaze(pOchre.K, pOchre.S, float(0.52), brassMid);
+
+    const grainMix = smoothstep(float(0.16), float(0.84), brushY.mul(0.68).add(fineSatin.mul(0.32)))
+      .mul(0.54)
+      .add(0.28);
+    const base = mix(brassAged, mix(brassMid, kmBrass, 0.20), grainMix);
+    const withAge = mix(base, brassAged, smoothstep(float(0.66), float(0.92), fineSatin).mul(0.24));
+    forendBrass.colorNode = mix(withAge, brassBright, bevelMask.mul(0.42));
+
+    forendBrass.normalNode = perturbNormalAniso(
+      nObj,
+      positionLocal,
+      vec3(260.0, 11.0, 260.0),
+      float(0.014)
+    );
+    forendBrass.roughnessNode = clamp(
+      float(0.22)
+        .add(brushY.sub(0.5).mul(0.11))
+        .add(fineSatin.sub(0.5).mul(0.06))
+        .sub(bevelMask.mul(0.07)),
+      0.14,
+      0.38
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // 7. Tempered Phosphor-Bronze Curved Leaf Springs & Detent Springs
+  //    Rolled spring temper grain + darkened anchor oil patina + bright rubbed contact tips
+  // ---------------------------------------------------------------------------
+  const phosphorBronze = new THREE.MeshStandardNodeMaterial({
+    metalness: 0.89,
+    roughness: 0.21,
+    envMapIntensity: 1.36,
+  });
+  {
+    const nObj = normalize(normalLocal);
+    const bevelMask = computeBevelEdgeMask(nObj);
+    const rollGrain = mineralToothFbm(positionLocal.mul(vec3(12.0, 195.0, 195.0)), float(1.15));
+    const heatBand = mineralToothFbm(positionLocal.add(vec3(3.7, 1.2, 8.4)), float(16.0));
+
+    const temperDark = mix(burntSiennaRgb.mul(0.62), hematiteRgb.mul(0.50), 0.34);
+    const temperBright = mix(realgarAmberRgb.mul(1.02), yellowOchreRgb.mul(1.04), 0.44);
+    const kmBronze = kubelkaMunkGlaze(pSienna.K, pSienna.S, float(0.42), temperBright);
+
+    const base = mix(
+      temperDark,
+      mix(temperBright, kmBronze, 0.24),
+      smoothstep(float(0.16), float(0.84), rollGrain).mul(0.54).add(0.28)
+    );
+    const withHeat = mix(base, temperDark, smoothstep(float(0.60), float(0.90), heatBand).mul(0.24));
+    phosphorBronze.colorNode = mix(withHeat, temperBright.mul(1.12), bevelMask.mul(0.36));
+
+    phosphorBronze.normalNode = perturbNormalAniso(
+      nObj,
+      positionLocal,
+      vec3(14.0, 215.0, 215.0),
+      float(0.013)
+    );
+    phosphorBronze.roughnessNode = clamp(
+      float(0.19)
+        .add(rollGrain.sub(0.5).mul(0.09))
+        .add(heatBand.sub(0.5).mul(0.06))
+        .sub(bevelMask.mul(0.05)),
+      0.13,
+      0.34
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // 8. Ornate Victorian Key Hand-Rubbed Antique Brass Bow & Concentric Bitting Teeth
+  //    Darkened antique umber-patinated recesses contrasted against hand-burnished rims!
+  // ---------------------------------------------------------------------------
+  const keyBrass = new THREE.MeshStandardNodeMaterial({
+    metalness: 0.92,
+    roughness: 0.20,
+    envMapIntensity: 1.38,
+  });
+  {
+    const nObj = normalize(normalLocal);
+    const bevelMask = computeBevelEdgeMask(nObj);
+    const handRub = mineralToothFbm(positionLocal, float(34.0));
+    const fineBuff = mineralToothFbm(positionLocal.add(vec3(2.9, 7.1, 1.3)), float(115.0));
+
+    const antiqueDeep = mix(rawUmberRgb.mul(0.52), burntSiennaRgb.mul(0.46), 0.28);
+    const antiqueMid = mix(yellowOchreRgb.mul(0.96), rawUmberRgb.mul(0.68), 0.16);
+    const burnishedGold = mix(yellowOchreRgb.mul(1.26), boneCalciteRgb.mul(0.94), 0.42);
+
+    const rubMix = smoothstep(float(0.16), float(0.84), handRub.mul(0.55).add(fineBuff.mul(0.45)))
+      .mul(0.52)
+      .add(0.28);
+    const patinated = mix(antiqueDeep, antiqueMid, rubMix);
+    const withEdgeRub = mix(patinated, burnishedGold, clamp(bevelMask.mul(0.64), 0.0, 0.72));
+
+    keyBrass.colorNode = withEdgeRub.add(burnishedGold.mul(uKeyHover.mul(0.18)));
+    keyBrass.normalNode = perturbNormalAniso(
+      nObj,
+      positionLocal,
+      vec3(96.0, 96.0, 96.0),
+      float(0.009)
+    );
+    keyBrass.roughnessNode = clamp(
+      float(0.20)
+        .add(handRub.sub(0.5).mul(0.10))
+        .sub(bevelMask.mul(0.08))
+        .sub(uKeyHover.mul(0.04)),
+      0.11,
+      0.34
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // 9. Lathe-Turned Hardened Tool Steel (Arbors, Pawls, Bolt Stump, Pivot Post, Key Barrel)
+  //    Crisp concentric lathe turning grooves + oil-darkened shoulders + bright polished chamfers!
+  // ---------------------------------------------------------------------------
+  const hardenedSteel = new THREE.MeshStandardNodeMaterial({
+    metalness: 0.94,
+    roughness: 0.19,
+    envMapIntensity: 1.42,
+  });
+  {
+    const nObj = normalize(normalLocal);
+    const bevelMask = computeBevelEdgeMask(nObj);
+    const rXY = length(positionLocal.xy);
+    const faceZMask = smoothstep(float(0.70), float(0.95), abs(nObj.z));
+
+    const latheRadial = sin(rXY.mul(520.0)).mul(0.5).add(0.5);
+    const latheAxial = sin(positionLocal.z.mul(720.0)).mul(0.5).add(0.5);
+    const latheGroove = mix(latheAxial.mul(0.32).add(0.34), latheRadial, faceZMask);
+    const fineTurn = mineralToothFbm(positionLocal.mul(vec3(68.0, 68.0, 290.0)), float(1.15));
+    const oilFilm = mineralToothFbm(positionLocal.add(vec3(7.1, 3.4, 2.8)), float(19.0));
+
+    const steelOil = mix(rawUmberRgb.mul(0.32), azuriteRgb.mul(0.40), 0.42);
+    const steelCool = mix(boneCalciteRgb.mul(0.48), azuriteRgb.mul(0.50), 0.24);
+    const steelBright = mix(boneCalciteRgb.mul(0.84), warmKaolinRgb.mul(0.92), 0.44);
+
+    const turned = mix(
+      steelCool,
+      steelBright,
+      smoothstep(float(0.16), float(0.84), fineTurn.mul(0.76).add(latheGroove.mul(0.24))).mul(0.52).add(0.30)
+    );
+    const withOil = mix(turned, steelOil, smoothstep(float(0.66), float(0.94), oilFilm).mul(0.24));
+    const withChamfer = mix(withOil, steelBright.mul(1.06), bevelMask.mul(0.46));
+
+    hardenedSteel.colorNode = withChamfer.add(steelBright.mul(uBoltHover.mul(0.10)));
+
+    const microObj = perturbNormalAnisoObject(nObj, positionLocal, vec3(72.0, 72.0, 280.0), float(0.011));
+    const safeR = max(rXY, float(0.002));
+    const radialDir = vec3(positionLocal.x.div(safeR), positionLocal.y.div(safeR), float(0.0));
+    const radialTan = radialDir.sub(nObj.mul(dot(radialDir, nObj)));
+    const radialBump = cos(rXY.mul(520.0)).mul(0.014).mul(faceZMask);
+    hardenedSteel.normalNode = transformNormalToView(normalize(microObj.add(radialTan.mul(radialBump))));
+
+    hardenedSteel.roughnessNode = clamp(
+      float(0.18)
+        .add(latheGroove.sub(0.5).mul(0.05))
+        .add(oilFilm.sub(0.5).mul(0.07))
+        .sub(bevelMask.mul(0.06)),
+      0.11,
       0.32
     );
   }
 
   // ---------------------------------------------------------------------------
-  // 4. Mortised Forend Satin Brass Faceplate, Escutcheon, Washers & Slotted Screws
-  //    Fine directional vertical satin brushing along Y (zero coarse blurry stripes!)
-  // ---------------------------------------------------------------------------
-  const forendBrass = new THREE.MeshStandardNodeMaterial({
-    metalness: 0.90,
-    roughness: 0.24,
-    envMapIntensity: 1.26,
-  });
-  {
-    const brushY = mineralToothFbm(positionLocal.mul(vec3(240.0, 11.0, 240.0)), float(1.1));
-    const fineSatin = mineralToothFbm(positionLocal.add(vec3(6.3, 2.1, 4.7)), float(64.0));
-
-    const brassDark = mix(yellowOchreRgb.mul(0.76), rawUmberRgb.mul(0.68), 0.22);
-    const brassBright = mix(yellowOchreRgb.mul(1.14), boneCalciteRgb.mul(0.86), 0.34);
-    const kmBrass = kubelkaMunkGlaze(pOchre.K, pOchre.S, float(0.56), brassBright);
-
-    // Subtle satin micro-grain contrast driven primarily by normal + roughness anisotropy
-    const grainMix = smoothstep(float(0.18), float(0.84), brushY.mul(0.65).add(fineSatin.mul(0.35))).mul(0.45).add(0.30);
-    forendBrass.colorNode = mix(brassDark, mix(brassBright, kmBrass, 0.22), grainMix);
-    forendBrass.normalNode = perturbNormalAniso(
-      normalLocal,
-      positionLocal,
-      vec3(260.0, 12.0, 260.0),
-      float(0.0040)
-    );
-    forendBrass.roughnessNode = clamp(
-      float(0.22)
-        .add(brushY.sub(0.5).mul(0.08))
-        .add(fineSatin.sub(0.5).mul(0.03)),
-      0.17,
-      0.33
-    );
-  }
-
-  // ---------------------------------------------------------------------------
-  // 5. Tempered Phosphor-Bronze Curved Leaf Springs (Warm Rolled Coppery-Amber Sheen)
-  // ---------------------------------------------------------------------------
-  const phosphorBronze = new THREE.MeshStandardNodeMaterial({
-    metalness: 0.88,
-    roughness: 0.21,
-    envMapIntensity: 1.32,
-  });
-  {
-    const rollGrain = mineralToothFbm(positionLocal.mul(vec3(14.0, 180.0, 180.0)), float(1.1));
-    const temperDark = mix(burntSiennaRgb.mul(0.74), hematiteRgb.mul(0.56), 0.28);
-    const temperBright = mix(realgarAmberRgb.mul(0.96), yellowOchreRgb.mul(0.98), 0.42);
-    const kmBronze = kubelkaMunkGlaze(pSienna.K, pSienna.S, float(0.42), temperBright);
-
-    phosphorBronze.colorNode = mix(
-      temperDark,
-      mix(temperBright, kmBronze, 0.26),
-      smoothstep(float(0.18), float(0.84), rollGrain).mul(0.48).add(0.28)
-    );
-    phosphorBronze.normalNode = perturbNormalAniso(
-      normalLocal,
-      positionLocal,
-      vec3(16.0, 210.0, 210.0),
-      float(0.0036)
-    );
-    phosphorBronze.roughnessNode = clamp(float(0.19).add(rollGrain.sub(0.5).mul(0.07)), 0.15, 0.29);
-  }
-
-  // ---------------------------------------------------------------------------
-  // 6. Ornate Victorian Key Hand-Buffed Satin Brass Bow & Stepped Bitting Teeth
-  // ---------------------------------------------------------------------------
-  const keyBrass = new THREE.MeshStandardNodeMaterial({
-    metalness: 0.92,
-    roughness: 0.20,
-    envMapIntensity: 1.34,
-  });
-  {
-    const handRub = mineralToothFbm(positionLocal, float(46.0));
-    const fineBuff = mineralToothFbm(positionLocal.add(vec3(2.9, 7.1, 1.3)), float(120.0));
-    const antiqueDeep = mix(yellowOchreRgb.mul(0.72), rawUmberRgb.mul(0.60), 0.24);
-    const antiqueGold = mix(yellowOchreRgb.mul(1.22), boneCalciteRgb.mul(0.90), 0.36);
-
-    const base = mix(
-      antiqueDeep,
-      antiqueGold,
-      smoothstep(float(0.18), float(0.82), handRub.mul(0.55).add(fineBuff.mul(0.45))).mul(0.48).add(0.28)
-    );
-    keyBrass.colorNode = base.add(antiqueGold.mul(uKeyHover.mul(0.18)));
-    keyBrass.normalNode = perturbNormalAniso(
-      normalLocal,
-      positionLocal,
-      vec3(96.0, 96.0, 96.0),
-      float(0.0024)
-    );
-    keyBrass.roughnessNode = clamp(
-      float(0.18).add(handRub.sub(0.5).mul(0.06)).sub(uKeyHover.mul(0.04)),
-      0.13,
-      0.28
-    );
-  }
-
-  // ---------------------------------------------------------------------------
-  // 7. Bright Lathe-Turned Hardened Tool Steel (Bolt Stump, Pivot Post, Pins, Key Pipe)
-  //    Strictly palette-derived (boneCalcite + warmKaolin + azuritePrussian)
-  // ---------------------------------------------------------------------------
-  const hardenedSteel = new THREE.MeshStandardNodeMaterial({
-    metalness: 0.93,
-    roughness: 0.20,
-    envMapIntensity: 1.36,
-  });
-  {
-    const latheTurn = mineralToothFbm(positionLocal.mul(vec3(54.0, 54.0, 220.0)), float(1.1));
-    const steelCool = mix(boneCalciteRgb.mul(0.46), azuriteRgb.mul(0.48), 0.26);
-    const steelBright = mix(boneCalciteRgb.mul(0.76), warmKaolinRgb.mul(0.84), 0.40);
-
-    hardenedSteel.colorNode = mix(
-      steelCool,
-      steelBright,
-      smoothstep(float(0.20), float(0.82), latheTurn).mul(0.46).add(0.32)
-    ).add(steelBright.mul(uBoltHover.mul(0.10)));
-    hardenedSteel.normalNode = perturbNormalAniso(
-      normalLocal,
-      positionLocal,
-      vec3(64.0, 64.0, 240.0),
-      float(0.0032)
-    );
-    hardenedSteel.roughnessNode = clamp(float(0.18).add(latheTurn.sub(0.5).mul(0.07)), 0.13, 0.27);
-  }
-
-  // ---------------------------------------------------------------------------
-  // 8. Five Distinctly Patinated Fine Hand-Filed Satin-Brass Lever Tumbler Plates (lever[0..4])
-  //    Subtle alloy/age shifts make all 5 stacked layers & anti-pick serrations read razor-clear!
+  // 10. Five Distinctly Patinated Hand-Filed Satin-Brass Chubb Lever Tumbler Plates (lever[0..4])
+  //     Crisp horizontal draw-file machining lines, oil-patinated H-gate/anti-pick roots,
+  //     and bright burnished sliding wear along the curved Chubb belly & spring contact crest!
   // ---------------------------------------------------------------------------
   const leverMaterials: THREE.MeshStandardNodeMaterial[] = [];
-  // Individual alloy/patina shifts across the 5 stacked plates
-  const leverToneScale = [0.78, 0.96, 0.84, 1.03, 0.92];
-  const leverWarmShift = [0.26, 0.07, 0.19, 0.04, 0.12];
+  const leverToneScale = [0.76, 0.96, 0.83, 1.04, 0.91];
+  const leverWarmShift = [0.30, 0.08, 0.22, 0.04, 0.14];
 
   for (let i = 0; i < LEVER_COUNT; i++) {
     const uHover = uniform(0);
@@ -442,53 +730,76 @@ export function createBoltMaterials(): BoltMaterials {
     const mat = new THREE.MeshStandardNodeMaterial({
       metalness: 0.91,
       roughness: 0.22,
-      envMapIntensity: 1.30,
+      envMapIntensity: 1.34,
     });
 
+    const nObj = normalize(normalLocal);
+    const bevelMask = computeBevelEdgeMask(nObj);
     const seedOff = vec3(float(i * 3.71 + 1.1), float(i * 2.13 + 0.7), float(i * 4.37));
-    // Ultra-fine horizontal hand-filed satin brushing along X (zero blotchy streaks!)
-    const brushX = mineralToothFbm(positionLocal.add(seedOff).mul(vec3(11.0, 220.0, 96.0)), float(1.1));
-    const microFile = mineralToothFbm(positionLocal.add(seedOff.mul(1.7)), float(88.0));
+
+    // Crisp horizontal hand-filed satin grain along X (zero corduroy sine aliasing!) + aged patina mottle
+    const brushX = mineralToothFbm(positionLocal.add(seedOff).mul(vec3(10.0, 280.0, 128.0)), float(1.15));
+    const microFile = mineralToothFbm(positionLocal.add(seedOff.mul(1.3)).mul(vec3(26.0, 560.0, 210.0)), float(1.1));
+    const ageMottle = mineralToothFbm(positionLocal.add(seedOff.mul(1.7)), float(22.0));
 
     const tone = float(leverToneScale[i]);
     const warmMix = float(leverWarmShift[i]);
 
-    const brassShadow = mix(
-      yellowOchreRgb.mul(0.66),
-      burntSiennaRgb.mul(0.60),
-      warmMix
-    ).mul(tone);
+    const brassOilPatina = mix(rawUmberRgb.mul(0.48), burntSiennaRgb.mul(0.44), warmMix).mul(tone);
+    const brassVerdigris = mix(brassOilPatina, verdigrisRgb.mul(0.44), 0.34);
     const brassMid = mix(
-      yellowOchreRgb.mul(1.08),
+      yellowOchreRgb.mul(1.06),
       boneCalciteRgb.mul(0.84),
-      float(0.32).sub(warmMix.mul(0.45))
+      float(0.30).sub(warmMix.mul(0.40))
     ).mul(tone);
+    const brassBurnish = mix(yellowOchreRgb.mul(1.24), boneCalciteRgb.mul(0.95), 0.44).mul(
+      mix(float(1.0), tone, 0.45)
+    );
 
-    const kmLever = kubelkaMunkGlaze(pOchre.K, pOchre.S, float(0.50), brassMid);
-    const grainMix = smoothstep(float(0.18), float(0.84), brushX.mul(0.66).add(microFile.mul(0.34)))
-      .mul(0.44)
-      .add(0.30);
-    const brushed = mix(brassShadow, mix(brassMid, kmLever, 0.18), grainMix);
+    const kmLever = kubelkaMunkGlaze(pOchre.K, pOchre.S, float(0.48), brassMid);
+    const grainMix = smoothstep(float(0.16), float(0.84), brushX.mul(0.64).add(microFile.mul(0.36)))
+      .mul(0.50)
+      .add(0.28);
+    const brushed = mix(brassOilPatina, mix(brassMid, kmLever, 0.18), grainMix);
+
+    // Oil darkening in sheltered H-gate / anti-pick root region + trace of verdigris oxidation
+    const gatePocketMask = smoothstep(float(0.40), float(0.52), positionLocal.x)
+      .mul(float(1.0).sub(smoothstep(float(0.86), float(0.98), positionLocal.x)))
+      .mul(float(1.0).sub(smoothstep(float(0.14), float(0.22), abs(positionLocal.y.sub(0.04)))));
+    const oilSpot = smoothstep(float(0.56), float(0.88), ageMottle).mul(float(0.35).add(gatePocketMask.mul(0.65)));
+    const aged = mix(brushed, brassOilPatina, oilSpot.mul(0.42));
+    const withVerdigris = mix(
+      aged,
+      brassVerdigris,
+      smoothstep(float(0.76), float(0.95), ageMottle).mul(gatePocketMask).mul(0.28)
+    );
+
+    // Bright burnished wear along sliding Chubb belly arc (y < -0.09), top spring crest (y > 0.225), and beveled edges!
+    const bellyWear = smoothstep(float(-0.08), float(-0.15), positionLocal.y);
+    const crestWear = smoothstep(float(0.22), float(0.262), positionLocal.y);
+    const wearMask = clamp(bevelMask.mul(0.54).add(bellyWear.mul(0.42)).add(crestWear.mul(0.38)), 0.0, 0.72);
+    const finished = mix(withVerdigris, brassBurnish, wearMask);
 
     // Subtle hover sheen lift + warm Realgar-Amber contact gleam when lever physically binds bolt stump
     const bindTint = mix(realgarAmberRgb, yellowOchreRgb, 0.35).mul(0.32);
-    mat.colorNode = brushed
+    mat.colorNode = finished
       .add(brassMid.mul(uHover.mul(0.22)))
       .add(bindTint.mul(uBind));
 
     mat.normalNode = perturbNormalAniso(
-      normalLocal,
+      nObj,
       positionLocal.add(seedOff),
-      vec3(12.0, 240.0, 108.0),
-      float(0.0038)
+      vec3(11.0, 240.0, 112.0),
+      float(0.015)
     );
     mat.roughnessNode = clamp(
-      float(0.20)
-        .add(brushX.sub(0.5).mul(0.08))
-        .add(microFile.sub(0.5).mul(0.03))
+      float(0.21)
+        .add(brushX.sub(0.5).mul(0.10))
+        .add(oilSpot.mul(0.16))
+        .sub(wearMask.mul(0.09))
         .sub(uHover.mul(0.04)),
-      0.14,
-      0.31
+      0.12,
+      0.44
     );
 
     leverMaterials.push(mat);
@@ -499,6 +810,8 @@ export function createBoltMaterials(): BoltMaterials {
     gunmetalCase,
     bluedSteelBolt,
     forendBrass,
+    machinedGearBrass,
+    machinedBronzeRack,
     phosphorBronze,
     keyBrass,
     hardenedSteel,
@@ -512,6 +825,8 @@ export function createBoltMaterials(): BoltMaterials {
       gunmetalCase.dispose();
       bluedSteelBolt.dispose();
       forendBrass.dispose();
+      machinedGearBrass.dispose();
+      machinedBronzeRack.dispose();
       phosphorBronze.dispose();
       keyBrass.dispose();
       hardenedSteel.dispose();
