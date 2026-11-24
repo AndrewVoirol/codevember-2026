@@ -41,6 +41,7 @@ export const MAX_ACTIVE_CUBES = 4;
 export const MAX_SWIRL_OMEGA = 10.5;
 
 export const BUBBLE_COUNT = 2000;
+export const CRUMB_COUNT = 512;
 export const WAVE_RES = 48;
 const WAVE_CELLS = WAVE_RES * WAVE_RES;
 
@@ -217,9 +218,9 @@ export function evalCrystalErosionMetrics(massInput: number): CrystalErosionMetr
   const scaleY = 1.0 - 0.30 * sliverT;
   const scaleXZ = 1.0 / Math.sqrt(scaleY);
 
-  // Dissolution etching pits deepen across mid-dissolution and taper as final sliver melts
-  const pitEnv = Math.sin(Math.PI * clamp(progress / 0.94, 0.0, 1.0));
-  const pitAmp = 0.095 * pitEnv * halfExtent;
+  // Dissolution etching pits deepen sharply across early/mid-dissolution so notches & cavities bite visibly
+  const pitEnv = Math.sin(Math.PI * clamp(progress / 0.96, 0.0, 1.0));
+  const pitAmp = 0.175 * pitEnv * halfExtent;
 
   // Radial extents before anisotropic sliver flattening (for clean isotropic corner-vs-face measure)
   const faceRadius = halfExtent;
@@ -381,6 +382,7 @@ export interface Day30TelemetryState {
   totalDissolvedCount: number;
   meanCubeMass: number;
   activeBubbles: number;
+  activeCrumbs: number;
   swirlAngularVel: number;
   bathConcentration: number;
 }
@@ -445,10 +447,31 @@ export class BeakerDissolveSim {
   readonly bubbleCubeSlot = new Int8Array(BUBBLE_COUNT);
   activeBubbleCount = 0;
 
+  // Detaching Solid Mineral Crumb / Granule Pool (SoA, zero GC)
+  readonly crumbAlive = new Uint8Array(CRUMB_COUNT);
+  readonly crumbPosX = new Float32Array(CRUMB_COUNT);
+  readonly crumbPosY = new Float32Array(CRUMB_COUNT);
+  readonly crumbPosZ = new Float32Array(CRUMB_COUNT);
+  readonly crumbVelX = new Float32Array(CRUMB_COUNT);
+  readonly crumbVelY = new Float32Array(CRUMB_COUNT);
+  readonly crumbVelZ = new Float32Array(CRUMB_COUNT);
+  readonly crumbRotX = new Float32Array(CRUMB_COUNT);
+  readonly crumbRotY = new Float32Array(CRUMB_COUNT);
+  readonly crumbRotZ = new Float32Array(CRUMB_COUNT);
+  readonly crumbSpin = new Float32Array(CRUMB_COUNT);
+  readonly crumbScale = new Float32Array(CRUMB_COUNT);
+  readonly crumbInitScale = new Float32Array(CRUMB_COUNT);
+  readonly crumbLife = new Float32Array(CRUMB_COUNT);
+  readonly crumbMaxLife = new Float32Array(CRUMB_COUNT);
+  readonly crumbPigmentIndex = new Uint8Array(CRUMB_COUNT);
+  activeCrumbCount = 0;
+
   private nextCubeId = 1;
   private pigmentCursor = 0;
   private bubbleSpawnCursor = 0;
   private bubbleEmitAccum = 0;
+  private crumbSpawnCursor = 0;
+  private crumbEmitAccum = 0;
   private popRippleBudget = 0;
   private waveAmbientTimer = 0;
   private rngState = 1337911;
@@ -530,6 +553,9 @@ export class BeakerDissolveSim {
     this.bubbleAlive.fill(0);
     this.activeBubbleCount = 0;
     this.bubbleEmitAccum = 0;
+    this.crumbAlive.fill(0);
+    this.activeCrumbCount = 0;
+    this.crumbEmitAccum = 0;
 
     for (let i = 0; i < MAX_ACTIVE_CUBES; i++) {
       const c = this.cubes[i];
@@ -582,8 +608,9 @@ export class BeakerDissolveSim {
     this.injectSplash(-0.06, -0.05, 0.014, 0.32);
     this.swirlAngularVel = 0.42;
 
-    // Pre-seed effervescent micro-bubble stream rising off the plunging starter cube
+    // Pre-seed effervescent micro-bubble stream & detaching mineral crumbs off the plunging starter cube
     this.seedInitialBubbleColumn(slot, 280);
+    this.seedInitialCrumbs(slot, 54);
     this.updateBathOptics();
     this.packWaveTexture();
     return slot;
@@ -844,6 +871,9 @@ export class BeakerDissolveSim {
     // 4. Step 2,000-instance rising effervescent silver micro-bubble pool
     this.stepBubbles(dt);
 
+    // 4b. Step 512-instance detaching solid mineral crumbs flaking off the active eroding crust
+    this.stepCrumbs(dt);
+
     // 5. Step 2D circular gravity-capillary meniscus wave PDE & pack HalfFloat DataTexture
     this.stepWavePde(dt);
 
@@ -878,6 +908,7 @@ export class BeakerDissolveSim {
             c.splashTriggered = true;
             this.injectSplash(c.pos.x, c.pos.z, -0.044, 0.25);
             this.spawnSplashBubbles(c, 55);
+            this.spawnSplashCrumbs(c, 24);
           }
           // Immediate entry drag decelerates air plunge into smooth underwater sink
           c.vel.y *= 0.48;
@@ -1002,10 +1033,11 @@ export class BeakerDissolveSim {
       this.integrateCubeRotation(c, dt);
 
       // ---- Curvature-Enhanced & Convective Sherwood Dissolution Rate ----
-      // Base rate ~25s at rest, accelerating up to ~2.6x under active glass-rod stirring.
-      const areaExposure = 0.22 + 0.78 * Math.pow(Math.max(0.0, c.mass), 0.55);
-      const convectiveSherwood = 1.0 + 0.22 * swirlMag + 0.28 * Math.min(2.5, rodSpeed);
-      const dissolveRate = 0.042 * areaExposure * convectiveSherwood;
+      // Base rate ~16-18s at rest so surface erosion, corner biting & crumb shedding read clearly
+      // within the first 2-4 seconds, accelerating up to ~2.8x under active glass-rod stirring.
+      const areaExposure = 0.24 + 0.76 * Math.pow(Math.max(0.0, c.mass), 0.52);
+      const convectiveSherwood = 1.0 + 0.25 * swirlMag + 0.34 * Math.min(2.5, rodSpeed);
+      const dissolveRate = 0.068 * areaExposure * convectiveSherwood;
       c.lastDissolveRate = dissolveRate;
 
       let dm = dissolveRate * dt;
@@ -1272,6 +1304,232 @@ export class BeakerDissolveSim {
   }
 
   // -------------------------------------------------------------------------
+  // Detaching Solid Mineral Crumbs / Granules Flaking Off the Eroding Crust
+  // -------------------------------------------------------------------------
+  private spawnCrumbOnCube(cube: DissolvingCubeState, preAgeFrac = 0): void {
+    const idx = this.crumbSpawnCursor;
+    this.crumbSpawnCursor = (this.crumbSpawnCursor + 1) % CRUMB_COUNT;
+
+    // Strongly bias detachment toward high-curvature corners & edges where the crust clips away first
+    const face = Math.floor(this.nextRand() * 6);
+    const s1 = this.nextRand() * 2.0 - 1.0;
+    const s2 = this.nextRand() * 2.0 - 1.0;
+    const u1 = Math.sign(s1) * Math.pow(Math.abs(s1), 0.42);
+    const u2 = Math.sign(s2) * Math.pow(Math.abs(s2), 0.42);
+
+    let ux = 0;
+    let uy = 0;
+    let uz = 0;
+    if (face === 0) {
+      ux = 1;
+      uy = u1;
+      uz = u2;
+    } else if (face === 1) {
+      ux = -1;
+      uy = u1;
+      uz = u2;
+    } else if (face === 2) {
+      ux = u1;
+      uy = 1;
+      uz = u2;
+    } else if (face === 3) {
+      ux = u1;
+      uy = -1;
+      uz = u2;
+    } else if (face === 4) {
+      ux = u1;
+      uy = u2;
+      uz = 1;
+    } else {
+      ux = u1;
+      uy = u2;
+      uz = -1;
+    }
+
+    evalCrystalSurfacePoint(ux, uy, uz, cube.mass, cube.seed, _tmpLocalPt, _tmpLocalNorm);
+    _tmpWorldPt.copy(_tmpLocalPt).applyQuaternion(cube.quat).add(cube.pos);
+    _tmpWorldNorm.copy(_tmpLocalNorm).applyQuaternion(cube.quat);
+
+    // Chunky faceted mineral grains (larger early-mid dissolution, finer salt crystals near end)
+    const massScale = 0.55 + 0.45 * Math.pow(Math.max(0.02, cube.mass), 0.4);
+    const initScale = (0.0068 + Math.pow(this.nextRand(), 1.55) * 0.0175) * massScale;
+    const maxLife = 2.0 + this.nextRand() * 2.8;
+    const life = clamp(1.0 - preAgeFrac, 0.12, 1.0);
+
+    const peelSpeed = 0.065 + this.nextRand() * 0.11;
+    // Slight bubble-jostle scatter on detachment; heavier chunks sink decisively toward glass floor
+    const isTinyFleck = initScale < 0.011;
+    const initVy = isTinyFleck
+      ? _tmpWorldNorm.y * peelSpeed + 0.04 + (this.nextRand() - 0.5) * 0.12
+      : _tmpWorldNorm.y * peelSpeed * 0.45 - (0.09 + this.nextRand() * 0.14);
+
+    const floorY = BEAKER_INNER_FLOOR_Y + initScale * 0.9;
+    let px = _tmpWorldPt.x + _tmpWorldNorm.x * (initScale * 0.75 + 0.004);
+    let py = _tmpWorldPt.y + _tmpWorldNorm.y * (initScale * 0.75 + 0.004);
+    let pz = _tmpWorldPt.z + _tmpWorldNorm.z * (initScale * 0.75 + 0.004);
+
+    if (preAgeFrac > 0) {
+      const tPre = preAgeFrac * maxLife * 0.42;
+      px += (_tmpWorldNorm.x * peelSpeed + (this.nextRand() - 0.5) * 0.08) * tPre;
+      py += initVy * tPre - 0.08 * tPre * tPre;
+      pz += (_tmpWorldNorm.z * peelSpeed + (this.nextRand() - 0.5) * 0.08) * tPre;
+    }
+
+    py = clamp(py, floorY, WATER_REST_Y - 0.03);
+    const rHoriz = Math.hypot(px, pz);
+    const maxR = WATER_RADIUS - 0.025;
+    if (rHoriz > maxR && rHoriz > 1e-5) {
+      px = (px / rHoriz) * maxR;
+      pz = (pz / rHoriz) * maxR;
+    }
+
+    this.crumbAlive[idx] = 1;
+    this.crumbPosX[idx] = px;
+    this.crumbPosY[idx] = py;
+    this.crumbPosZ[idx] = pz;
+    this.crumbVelX[idx] = _tmpWorldNorm.x * peelSpeed + (this.nextRand() - 0.5) * 0.05;
+    this.crumbVelY[idx] = initVy;
+    this.crumbVelZ[idx] = _tmpWorldNorm.z * peelSpeed + (this.nextRand() - 0.5) * 0.05;
+    this.crumbRotX[idx] = this.nextRand() * Math.PI * 2.0;
+    this.crumbRotY[idx] = this.nextRand() * Math.PI * 2.0;
+    this.crumbRotZ[idx] = this.nextRand() * Math.PI * 2.0;
+    this.crumbSpin[idx] = (this.nextRand() - 0.5) * 5.2;
+    this.crumbInitScale[idx] = initScale;
+    this.crumbScale[idx] = initScale * Math.pow(life, 0.72);
+    this.crumbLife[idx] = life;
+    this.crumbMaxLife[idx] = maxLife;
+    this.crumbPigmentIndex[idx] = cube.pigmentIndex;
+  }
+
+  private spawnSplashCrumbs(cube: DissolvingCubeState, count: number): void {
+    for (let k = 0; k < count; k++) {
+      this.spawnCrumbOnCube(cube, 0);
+    }
+  }
+
+  private seedInitialCrumbs(cube: DissolvingCubeState, count: number): void {
+    for (let k = 0; k < count; k++) {
+      this.spawnCrumbOnCube(cube, this.nextRand() * 0.72);
+    }
+    this.activeCrumbCount = count;
+  }
+
+  private stepCrumbs(dt: number): void {
+    let totalEmitRate = 0;
+    for (let i = 0; i < MAX_ACTIVE_CUBES; i++) {
+      const c = this.cubes[i];
+      if (!c.active || !c.submerged || c.mass <= 0) continue;
+      // Steady visible crumbling (~52..108 solid mineral chips/sec per dissolving cube!)
+      const cubeRate =
+        (52.0 + 46.0 * Math.pow(c.mass, 0.35)) *
+        (1.0 + 0.18 * Math.abs(this.swirlAngularVel));
+      totalEmitRate += cubeRate;
+    }
+
+    this.crumbEmitAccum += totalEmitRate * dt;
+    const toSpawn = Math.min(18, Math.floor(this.crumbEmitAccum));
+    this.crumbEmitAccum -= toSpawn;
+
+    if (toSpawn > 0) {
+      let spawned = 0;
+      for (let pass = 0; pass < MAX_ACTIVE_CUBES && spawned < toSpawn; pass++) {
+        for (let i = 0; i < MAX_ACTIVE_CUBES && spawned < toSpawn; i++) {
+          const c = this.cubes[i];
+          if (!c.active || !c.submerged || c.mass <= 0) continue;
+          const share = Math.max(1, Math.ceil(toSpawn / MAX_ACTIVE_CUBES));
+          for (let s = 0; s < share && spawned < toSpawn; s++) {
+            this.spawnCrumbOnCube(c, 0);
+            spawned++;
+          }
+        }
+      }
+    }
+
+    const fluidVel = { vx: 0, vz: 0 };
+    const maxR = WATER_RADIUS - 0.022;
+    const topY = WATER_REST_Y - 0.026;
+    const swirlAbs = Math.abs(this.swirlAngularVel);
+    const t = this.simTime;
+    let aliveCount = 0;
+
+    for (let i = 0; i < CRUMB_COUNT; i++) {
+      if (this.crumbAlive[i] === 0) continue;
+
+      const nextLife = this.crumbLife[i] - dt / this.crumbMaxLife[i];
+      if (nextLife <= 0.005) {
+        this.crumbAlive[i] = 0;
+        this.crumbScale[i] = 0;
+        continue;
+      }
+
+      this.crumbLife[i] = nextLife;
+      const sc = this.crumbInitScale[i] * Math.pow(nextLife, 0.72);
+      this.crumbScale[i] = sc;
+
+      let x = this.crumbPosX[i];
+      let y = this.crumbPosY[i];
+      let z = this.crumbPosZ[i];
+
+      this.evalFluidVelocityXZ(x, z, fluidVel);
+
+      // Heavier mineral granules sink toward the glass floor; fine flecks dance in bubble wakes & Ekman spiral
+      const rHoriz = Math.hypot(x, z);
+      const nearFloor = smoothstepCpu(BEAKER_INNER_FLOOR_Y + 0.16, BEAKER_INNER_FLOOR_Y + 0.01, y);
+      let ekX = 0;
+      let ekZ = 0;
+      if (rHoriz > 0.03 && this.ekmanStrength > 0.02) {
+        const pull = -this.ekmanStrength * nearFloor * 0.36;
+        ekX = (x / rHoriz) * pull;
+        ekZ = (z / rHoriz) * pull;
+      }
+
+      const sinkTerminal = -(0.095 + sc * 13.5) + this.ekmanStrength * 0.18 * Math.exp(-rHoriz * rHoriz * 5.0);
+      const flutter = Math.sin(t * (4.3 + (i % 9) * 0.41) + i * 1.7) * 0.045;
+      const relaxXZ = 1.0 - Math.exp(-(4.2 + swirlAbs * 0.35) * dt);
+      const relaxY = 1.0 - Math.exp(-3.8 * dt);
+
+      this.crumbVelX[i] += (fluidVel.vx + ekX + flutter - this.crumbVelX[i]) * relaxXZ;
+      this.crumbVelZ[i] += (fluidVel.vz + ekZ - flutter * 0.8 - this.crumbVelZ[i]) * relaxXZ;
+      this.crumbVelY[i] += (sinkTerminal - this.crumbVelY[i]) * relaxY;
+
+      x += this.crumbVelX[i] * dt;
+      y += this.crumbVelY[i] * dt;
+      z += this.crumbVelZ[i] * dt;
+
+      const floorY = BEAKER_INNER_FLOOR_Y + sc * 0.85;
+      if (y < floorY) {
+        y = floorY;
+        this.crumbVelY[i] = Math.max(0, -this.crumbVelY[i] * 0.08);
+        const fDrag = Math.exp(-3.4 * dt);
+        this.crumbVelX[i] *= fDrag;
+        this.crumbVelZ[i] *= fDrag;
+      } else if (y > topY) {
+        y = topY;
+        if (this.crumbVelY[i] > 0) this.crumbVelY[i] *= -0.15;
+      }
+
+      const rNew = Math.hypot(x, z);
+      if (rNew > maxR && rNew > 1e-5) {
+        const s = maxR / rNew;
+        x *= s;
+        z *= s;
+      }
+
+      const spinRate = this.crumbSpin[i] * (y <= floorY + 0.004 ? 0.25 : 1.0);
+      this.crumbRotX[i] += spinRate * dt;
+      this.crumbRotY[i] += spinRate * 0.78 * dt;
+      this.crumbRotZ[i] += spinRate * 0.54 * dt;
+
+      this.crumbPosX[i] = x;
+      this.crumbPosY[i] = y;
+      this.crumbPosZ[i] = z;
+      aliveCount++;
+    }
+
+    this.activeCrumbCount = aliveCount;
+  }
+
+  // -------------------------------------------------------------------------
   // 2D Circular Gravity-Capillary Free-Surface Wave PDE
   // -------------------------------------------------------------------------
   private stepWavePde(dt: number): void {
@@ -1425,6 +1683,7 @@ export class BeakerDissolveSim {
       totalDissolvedCount: this.totalDissolvedCount,
       meanCubeMass: activeCubeCount > 0 ? Number((solidSum / activeCubeCount).toFixed(4)) : 0,
       activeBubbles: this.activeBubbleCount,
+      activeCrumbs: this.activeCrumbCount,
       swirlAngularVel: Number(this.swirlAngularVel.toFixed(4)),
       bathConcentration: Number(this.bathSoluteMass.toFixed(4)),
     };

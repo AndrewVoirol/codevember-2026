@@ -556,21 +556,129 @@ const DIGIT_GLYPHS: Readonly<Record<string, readonly string[]>> = {
 };
 
 /**
- * Generates a crisp procedural 512x512 etched-glass volumetric graduation mask texture
- * (100..500 mL major/minor ticks, calibration spine, numerals & "500 mL BORO 3.3" mark).
+ * Generates a high-resolution 1024x1024 etched fired-enamel volumetric graduation texture
+ * (50..500 mL major/minor ticks, fine vertical spine, Swiss laboratory sans-serif numerals,
+ * "500 mL", "APPROX. VOL." and "BORO 3.3" mark). Uses crisp anti-aliased Canvas2D typography
+ * in browsers with a deterministic DataTexture bitmap fallback in headless Node/Vitest.
  */
 export function createGraduatedMarkingsTexture(): THREE.DataTexture {
-  const W = 512;
-  const H = 512;
+  const W = 1024;
+  const H = 1024;
   const data = new Uint8Array(W * H * 4);
 
+  if (typeof document !== 'undefined') {
+    const canvas = document.createElement('canvas');
+    canvas.width = W;
+    canvas.height = H;
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      ctx.clearRect(0, 0, W, H);
+      ctx.fillStyle = '#f3efe6';
+      ctx.strokeStyle = '#f3efe6';
+      ctx.textBaseline = 'middle';
+
+      // Canvas Y=0 is top (corresponds to v=1 after flipY copy below)
+      const toCanvasY = (texY: number) => H - texY;
+      const spineX = 532;
+
+      // Crisp thin laboratory calibration spine
+      ctx.globalAlpha = 0.72;
+      ctx.fillRect(spineX - 2, toCanvasY(888), 4, 772);
+
+      // Volumetric ticks: 50 mL to 500 mL in 25 mL increments
+      const yBase = 120;
+      const ySpan = 764;
+      ctx.font = '500 50px "Helvetica Neue", "Inter", -apple-system, BlinkMacSystemFont, sans-serif';
+      ctx.textAlign = 'left';
+
+      for (let ml = 50; ml <= 500; ml += 25) {
+        const frac = (ml - 50) / 450;
+        const ty = yBase + frac * ySpan;
+        const cy = toCanvasY(ty);
+        const isMajor = ml % 100 === 0;
+        const isMid = ml % 50 === 0 && !isMajor;
+
+        const leftW = isMajor ? 112 : isMid ? 68 : 38;
+        const rightW = isMajor ? 104 : isMid ? 56 : 32;
+        const thick = isMajor ? 5.0 : isMid ? 3.4 : 2.4;
+
+        ctx.globalAlpha = isMajor ? 0.96 : isMid ? 0.80 : 0.64;
+        ctx.fillRect(spineX - leftW, cy - thick * 0.5, leftW + rightW, thick);
+
+        if (isMajor) {
+          ctx.globalAlpha = 0.94;
+          ctx.fillText(String(ml), spineX + rightW + 26, cy + 2);
+        }
+      }
+
+      // Authentic Pyrex / borosilicate 3.3 laboratory markings on left flank
+      ctx.textAlign = 'left';
+      ctx.globalAlpha = 0.92;
+      ctx.font = '600 66px "Helvetica Neue", "Inter", -apple-system, BlinkMacSystemFont, sans-serif';
+      ctx.fillText('500 mL', 86, toCanvasY(844));
+
+      ctx.globalAlpha = 0.74;
+      ctx.font = '500 32px "Helvetica Neue", "Inter", -apple-system, BlinkMacSystemFont, sans-serif';
+      ctx.fillText('APPROX. VOL.', 88, toCanvasY(784));
+
+      ctx.globalAlpha = 0.78;
+      ctx.font = '600 34px "Helvetica Neue", "Inter", -apple-system, BlinkMacSystemFont, sans-serif';
+      ctx.fillText('BORO 3.3', 88, toCanvasY(734));
+
+      // Authentic delicate Pyrex hairline writing-patch frame with subtle ruled lines (zero solid grey block)
+      const patchX = 92;
+      const patchY = toCanvasY(600);
+      const patchW = 204;
+      const patchH = 148;
+      ctx.globalAlpha = 0.032;
+      ctx.fillRect(patchX, patchY, patchW, patchH);
+      ctx.globalAlpha = 0.34;
+      ctx.lineWidth = 2.6;
+      ctx.strokeRect(patchX, patchY, patchW, patchH);
+      ctx.globalAlpha = 0.16;
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.moveTo(patchX + 18, patchY + patchH * 0.36);
+      ctx.lineTo(patchX + patchW - 18, patchY + patchH * 0.36);
+      ctx.moveTo(patchX + 18, patchY + patchH * 0.68);
+      ctx.lineTo(patchX + patchW - 18, patchY + patchH * 0.68);
+      ctx.stroke();
+
+      const img = ctx.getImageData(0, 0, W, H).data;
+      // Copy vertically flipped so v=0 maps to bottom of beaker (flipY = false)
+      for (let row = 0; row < H; row++) {
+        const srcRow = (H - 1 - row) * W * 4;
+        const dstRow = row * W * 4;
+        for (let col = 0; col < W * 4; col += 4) {
+          const a = img[srcRow + col + 3];
+          data[dstRow + col] = 243;
+          data[dstRow + col + 1] = 239;
+          data[dstRow + col + 2] = 230;
+          data[dstRow + col + 3] = a;
+        }
+      }
+
+      const tex = new THREE.DataTexture(data, W, H, THREE.RGBAFormat);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.flipY = false;
+      tex.wrapS = THREE.ClampToEdgeWrapping;
+      tex.wrapT = THREE.ClampToEdgeWrapping;
+      tex.minFilter = THREE.LinearMipmapLinearFilter;
+      tex.magFilter = THREE.LinearFilter;
+      tex.generateMipmaps = true;
+      tex.needsUpdate = true;
+      return tex;
+    }
+  }
+
+  // Deterministic Node/Vitest fallback writing directly into the 1024x1024 DataTexture buffer
   const stampAlpha = (x: number, y: number, a: number) => {
     const ix = Math.round(x);
     const iy = Math.round(y);
     if (ix < 0 || ix >= W || iy < 0 || iy >= H) return;
     const idx = (iy * W + ix) * 4;
     const nextA = Math.min(255, Math.max(data[idx + 3], Math.round(a * 255)));
-    data[idx] = 243; // Eggshell #f3efe6
+    data[idx] = 243;
     data[idx + 1] = 239;
     data[idx + 2] = 230;
     data[idx + 3] = nextA;
@@ -583,7 +691,6 @@ export function createGraduatedMarkingsTexture(): THREE.DataTexture {
     const maxY = Math.min(H - 1, Math.ceil(Math.max(y0, y1)));
     for (let py = minY; py <= maxY; py++) {
       for (let px = minX; px <= maxX; px++) {
-        // Soft 1-pixel anti-aliased border falloff
         const dx = Math.min(px - x0, x1 - px);
         const dy = Math.min(py - y0, y1 - py);
         const edge = Math.max(0, Math.min(1, Math.min(dx, dy) + 0.65));
@@ -601,7 +708,6 @@ export function createGraduatedMarkingsTexture(): THREE.DataTexture {
           const bits = glyph[row];
           for (let col = 0; col < 5; col++) {
             if (bits[col] === '1') {
-              // Texture v=0 is bottom (y=0), so row 0 is highest y
               const gy = yBottom + (6 - row) * scale;
               const gx = cursorX + col * scale;
               drawRect(gx, gy, gx + scale * 0.92, gy + scale * 0.92, alpha);
@@ -613,31 +719,24 @@ export function createGraduatedMarkingsTexture(): THREE.DataTexture {
     }
   };
 
-  // Vertical laboratory calibration spine
-  const spineX = 256;
-  drawRect(spineX - 1.5, 58, spineX + 1.5, 444, 0.72);
-
-  // Volumetric ticks: 50 mL to 500 mL in 25 mL increments (y = 58 .. 444)
-  const yBase = 60;
-  const ySpan = 382;
+  const spineX = 532;
+  drawRect(spineX - 2.0, 116, spineX + 2.0, 888, 0.72);
+  const yBase = 120;
+  const ySpan = 764;
   for (let ml = 50; ml <= 500; ml += 25) {
     const frac = (ml - 50) / 450;
     const y = yBase + frac * ySpan;
     const isMajor = ml % 100 === 0;
     const isMid = ml % 50 === 0 && !isMajor;
-
-    const halfW = isMajor ? 58 : isMid ? 34 : 20;
-    const halfH = isMajor ? 2.1 : 1.3;
+    const halfW = isMajor ? 108 : isMid ? 64 : 36;
+    const halfH = isMajor ? 2.6 : 1.7;
     drawRect(spineX - halfW, y - halfH, spineX + halfW, y + halfH, isMajor ? 0.94 : 0.72);
-
     if (isMajor) {
-      drawText(String(ml), spineX + halfW + 14, y - 9, 3.0, 0.90);
+      drawText(String(ml), spineX + halfW + 24, y - 16, 5.4, 0.90);
     }
   }
-
-  // Laboratory header stamp on the left of the scale ("500 mL" + "BORO 3.3")
-  drawText('500 mL', 62, 412, 3.2, 0.86);
-  drawText('BORO 3.3', 56, 376, 2.2, 0.62);
+  drawText('500 mL', 112, 824, 5.8, 0.86);
+  drawText('BORO 3.3', 112, 748, 4.0, 0.65);
 
   const tex = new THREE.DataTexture(data, W, H, THREE.RGBAFormat);
   tex.colorSpace = THREE.SRGBColorSpace;
@@ -717,7 +816,7 @@ export function buildGraduatedMarkingsGeometry(): THREE.BufferGeometry {
  * Builds a welded, watertight `[-1, 1]^3` subdivided cube with smooth edge clustering so
  * TSL curvature-weighted corner rounding & dissolution pitting deform with zero edge seams.
  */
-export function buildSubdividedUnitCubeGeometry(segs = 18): THREE.BufferGeometry {
+export function buildSubdividedUnitCubeGeometry(segs = 22): THREE.BufferGeometry {
   const keyToIdx = new Map<string, number>();
   const positions: number[] = [];
   const normals: number[] = [];
@@ -828,4 +927,28 @@ export function buildBaseCausticDiscGeometry(): THREE.BufferGeometry {
   geom.rotateX(-Math.PI * 0.5);
   geom.translate(0, BEAKER_INNER_FLOOR_Y + 0.002, 0);
   return geom;
+}
+
+// ---------------------------------------------------------------------------
+// 7. Faceted Cleaved Mineral Crumb / Crystal Chip Geometry (Outward Winding)
+// ---------------------------------------------------------------------------
+/**
+ * Builds an angular, asymmetrically cleaved crystalline mineral grain (convex icosahedron
+ * with subtle cleaved mineral facet stretching, `signedVolume > 0`, `inwardTri === 0`) for
+ * solid crumbs detaching off the eroding brick boundary.
+ */
+export function buildMineralCrumbGeometry(): THREE.BufferGeometry {
+  const raw = new THREE.IcosahedronGeometry(1.0, 0);
+  const pos = raw.attributes.position as THREE.BufferAttribute;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i);
+    const y = pos.getY(i);
+    const z = pos.getZ(i);
+    // Crisp crystalline cleavage facet irregularity (preserving strict convexity & outward winding)
+    const cleavage = 0.84 + 0.24 * Math.abs(Math.sin(x * 3.7 + y * 2.1 - z * 2.9));
+    pos.setXYZ(i, x * cleavage * 1.12, y * cleavage * 0.82, z * cleavage * 0.96);
+  }
+  pos.needsUpdate = true;
+  raw.computeVertexNormals();
+  return raw;
 }

@@ -18,6 +18,7 @@ import {
   buildBaseCausticDiscGeometry,
   buildBorosilicateBeakerGeometry,
   buildGraduatedMarkingsGeometry,
+  buildMineralCrumbGeometry,
   buildStirringRodGeometry,
   buildSubdividedUnitCubeGeometry,
   createGraduatedMarkingsTexture,
@@ -410,6 +411,40 @@ describe('Day 30 - Dissolve: Effervescent Mineral Cubes in a Borosilicate Glass 
     const cNorm = causticGeom.attributes.normal as THREE.BufferAttribute;
     expect(cNorm.getY(0)).toBeGreaterThan(0.99);
     causticGeom.dispose();
+
+    // F. Faceted Cleaved Mineral Crumb Geometry (Outward Winding & Positive Volume)
+    const crumbGeom = buildMineralCrumbGeometry();
+    expect(computeSignedVolume(crumbGeom)).toBeGreaterThan(1.2);
+    expect(countInwardTrianglesConvex(crumbGeom, new THREE.Vector3(0, 0, 0))).toBe(0);
+    crumbGeom.dispose();
+
     dummyMat.dispose();
+  });
+
+  it('5. Detaching Mineral Crumbs: flakes spawn off active eroding cubes, stay inside the beaker, and dissolve monotonically', () => {
+    const sim = new BeakerDissolveSim(true);
+    expect(sim.activeCrumbCount).toBeGreaterThan(20);
+    expect(sim.getTelemetry().activeCrumbs).toBe(sim.activeCrumbCount);
+
+    let maxCrumbs = sim.activeCrumbCount;
+    for (let s = 0; s < 180; s++) {
+      sim.step(1 / 60);
+      if (sim.activeCrumbCount > maxCrumbs) maxCrumbs = sim.activeCrumbCount;
+      for (let i = 0; i < sim.crumbAlive.length; i++) {
+        if (sim.crumbAlive[i] === 0) continue;
+        expect(Number.isFinite(sim.crumbPosX[i])).toBe(true);
+        expect(Number.isFinite(sim.crumbPosY[i])).toBe(true);
+        expect(Number.isFinite(sim.crumbPosZ[i])).toBe(true);
+        expect(Math.hypot(sim.crumbPosX[i], sim.crumbPosZ[i])).toBeLessThan(WATER_RADIUS);
+        expect(sim.crumbPosY[i]).toBeGreaterThanOrEqual(BEAKER_INNER_FLOOR_Y - 0.005);
+        expect(sim.crumbScale[i]).toBeGreaterThan(0);
+      }
+    }
+    expect(maxCrumbs).toBeGreaterThan(50);
+
+    // Flush clears crumbs & re-seeds starter crumbs cleanly
+    sim.flushBeaker(false);
+    expect(sim.activeCrumbCount).toBe(0);
+    sim.dispose();
   });
 });

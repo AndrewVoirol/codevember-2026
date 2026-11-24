@@ -142,21 +142,21 @@ export function createDissolvePlumesSystem(): DissolvePlumesSystem {
     const life = float(0.0).toVar();
     const age = float(0.0).toVar();
 
-    // Seed 2,400 lively initial solute tendrils peeling downward & spreading across glass floor
-    If(fIdx.lessThan(2400.0), () => {
+    // Seed 3,600 dense initial solute streamers peeling straight off the plunging crystal & pooling on the floor
+    If(fIdx.lessThan(3600.0), () => {
       const azim = h0.mul(6.2831853);
-      const isFloorPool = h1.lessThan(0.52);
+      const isFloorPool = h1.lessThan(0.46);
 
       const descFrac = h2;
-      const poolR = float(0.08).add(sqrt(h3).mul(0.36));
-      const streamR = float(0.06).add(h3.mul(0.17)).add(descFrac.mul(0.11));
+      const poolR = float(0.06).add(sqrt(h3).mul(0.38));
+      const streamR = float(0.05).add(h3.mul(0.16)).add(descFrac.mul(0.10));
       const r = select(isFloorPool, poolR, streamR);
 
-      const yPool = float(FLOOR_LIMIT).add(h2.mul(h2).mul(0.14));
-      const yStream = float(BEAKER_INNER_FLOOR_Y + 0.42).sub(descFrac.mul(0.38));
+      const yPool = float(FLOOR_LIMIT).add(h2.mul(h2).mul(0.13));
+      const yStream = float(BEAKER_INNER_FLOOR_Y + 0.45).sub(descFrac.mul(0.42));
       const y = clamp(select(isFloorPool, yPool, yStream), float(FLOOR_LIMIT), float(TOP_LIMIT));
 
-      const swirlShift = sin(y.mul(9.0).add(azim)).mul(0.035);
+      const swirlShift = sin(y.mul(10.5).add(azim)).mul(0.032);
       pos.assign(
         vec3(
           cos(azim).mul(r).add(0.04).add(swirlShift),
@@ -167,14 +167,14 @@ export function createDissolvePlumesSystem(): DissolvePlumesSystem {
 
       vel.assign(
         vec3(
-          cos(azim).mul(0.05).add(sin(azim).mul(0.08)),
-          select(isFloorPool, float(0.015), float(-0.12)),
-          sin(azim).mul(0.05).sub(cos(azim).mul(0.08))
+          cos(azim).mul(0.055).add(sin(azim).mul(0.085)),
+          select(isFloorPool, float(0.012), float(-0.15)),
+          sin(azim).mul(0.055).sub(cos(azim).mul(0.085))
         )
       );
 
-      age.assign(select(isFloorPool, float(1.4).add(h4.mul(2.8)), h2.mul(1.5)));
-      life.assign(clamp(float(0.92).sub(h4.mul(0.45)), 0.30, 0.95));
+      age.assign(select(isFloorPool, float(1.1).add(h4.mul(2.4)), h2.mul(1.2)));
+      life.assign(clamp(float(0.95).sub(h4.mul(0.42)), 0.34, 0.96));
     });
 
     posLifeBuf.element(idx).assign(vec4(pos, life));
@@ -236,20 +236,20 @@ export function createDissolvePlumesSystem(): DissolvePlumesSystem {
         });
       }
 
-      // Spawn directly off the dissolving crystal's corners & lower flanks
+      // Spawn tightly onto the actively eroding crystal crust, biased toward corners & lower flanks where heavy brine pours off
       const azim = h0.mul(6.2831853);
-      const elev = h1.mul(2.0).sub(1.18); // slightly biased toward lower/side facets where heavy brine peels off
+      const elev = h1.mul(2.0).sub(1.22);
       const rCos = sqrt(max(float(0.04), float(1.0).sub(clamp(elev.mul(elev), 0.0, 0.96))));
       const shellDir = vec3(cos(azim).mul(rCos), clamp(elev, -0.96, 0.96), sin(azim).mul(rCos));
-      const spawnRad = chosenPosRad.w.mul(float(0.88).add(h2.mul(0.32)));
+      const spawnRad = chosenPosRad.w.mul(float(0.72).add(h2.mul(0.30)));
 
       pos.assign(chosenPosRad.xyz.add(shellDir.mul(spawnRad)));
       // Clamp safely inside liquid bounds
       pos.y.assign(clamp(pos.y, float(FLOOR_LIMIT), float(TOP_LIMIT)));
 
-      // Heavy dissolved solute peels outward and sinks decisively toward the curved glass floor
-      const sinkSpeed = float(0.13).add(h2.mul(0.14)).add(chosenColRate.w.mul(0.85));
-      const peelOut = float(0.045).add(h3.mul(0.055));
+      // Heavy dissolved pigment brine peels off the eroding notch and streams decisively down to the glass floor
+      const sinkSpeed = float(0.15).add(h2.mul(0.16)).add(chosenColRate.w.mul(0.95));
+      const peelOut = float(0.048).add(h3.mul(0.062));
       vel.assign(vec3(shellDir.x.mul(peelOut), sinkSpeed.negate(), shellDir.z.mul(peelOut)));
 
       pigment.assign(chosenColRate.xyz);
@@ -398,10 +398,10 @@ export function createDissolvePlumesSystem(): DissolvePlumesSystem {
   const aliveGate = smoothstep(0.003, 0.018, pLife);
   const spawnRamp = smoothstep(0.0, 0.25, pAge);
 
-  const wispSize = mix(float(0.026), float(0.088), smoothstep(0.0, 5.5, pAge))
+  const wispSize = mix(float(0.020), float(0.078), smoothstep(0.0, 5.2, pAge))
     .mul(float(0.72).add(fractSimple(pSeed.mul(7.31)).mul(0.55)));
-  const stretchFactor = clamp(float(1.0).add(length(pVel).mul(0.95)), 1.0, 2.15);
-  const grainSize = mix(float(0.0035), float(0.0075), fractSimple(pSeed.mul(13.7)));
+  const stretchFactor = clamp(float(1.18).add(length(pVel).mul(1.45)), 1.15, 2.75);
+  const grainSize = mix(float(0.0042), float(0.0095), fractSimple(pSeed.mul(13.7)));
 
   const scaleX = mix(grainSize, wispSize.mul(stretchFactor), isWisp)
     .mul(aliveGate)
@@ -451,33 +451,35 @@ export function createDissolvePlumesSystem(): DissolvePlumesSystem {
   const viewDir = normalize(cameraPosition.sub(vWorldPos));
   const backScatter = clamp(dot(viewDir.negate(), rimDir).mul(0.5).add(0.5), 0.0, 1.0);
 
-  // Rich mineral body shading (deep saturated pigment core + luminous studio rim & refractive schlieren gleam)
-  const shadedPigment = vPigment
-    .mul(float(0.52).add(keyLit.mul(0.58)).add(backScatter.mul(0.22)))
-    .add(colCalcite.mul(rimLit.mul(0.14).add(schlierenRing.mul(0.32))));
+  // Rich saturated mineral pigment ribbons (deep dense core when freshly peeled, luminous studio edge)
+  const freshRichness = smoothstep(3.6, 0.1, vAge);
+  const corePigment = mix(vPigment, vPigment.mul(vPigment.mul(0.45).add(0.68)), freshRichness.mul(0.55));
+  const shadedPigment = corePigment
+    .mul(float(0.62).add(keyLit.mul(0.64)).add(backScatter.mul(0.28)))
+    .add(colCalcite.mul(rimLit.mul(0.11).add(schlierenRing.mul(0.22))));
 
   const fragIsWisp = smoothstep(0.78, 0.74, vSeed);
   const grainSparkle = smoothstep(
-    0.82,
+    0.80,
     0.99,
-    sin(vAge.mul(6.4).add(vSeed.mul(53.0))).mul(0.5).add(0.5)
+    sin(vAge.mul(6.8).add(vSeed.mul(53.0))).mul(0.5).add(0.5)
   );
-  const grainCol = mix(vPigment.mul(1.25), colCalcite, float(0.42).add(grainSparkle.mul(0.38)));
+  const grainCol = mix(vPigment.mul(1.18), colCalcite, float(0.26).add(grainSparkle.mul(0.42)));
 
   const finalColor = mix(grainCol, shadedPigment, fragIsWisp);
 
-  const fadeIn = smoothstep(0.0, 0.22, vAge);
+  const fadeIn = smoothstep(0.0, 0.14, vAge);
   const fadeOut = smoothstep(0.0, 0.34, vLife);
-  // Concentrated freshly peeled streams are visibly denser; older clouds diffuse delicately
-  const concentrationAlpha = mix(float(0.095), float(0.036), smoothstep(0.4, 7.0, vAge));
-  const wispAlpha = softBell.mul(concentrationAlpha).add(schlierenRing.mul(0.028));
-  const grainAlpha = grainMask.mul(float(0.42).add(grainSparkle.mul(0.36)));
+  // Freshly peeled ink-like descending pigment curtains read clearly while keeping late-stage eroded cores legible
+  const concentrationAlpha = mix(float(0.215), float(0.042), smoothstep(0.35, 5.5, vAge));
+  const wispAlpha = softBell.mul(concentrationAlpha).add(schlierenRing.mul(0.042));
+  const grainAlpha = grainMask.mul(float(0.68).add(grainSparkle.mul(0.28)));
 
   plumeMaterial.colorNode = finalColor;
   plumeMaterial.opacityNode = clamp(
     mix(grainAlpha, wispAlpha, fragIsWisp).mul(fadeIn).mul(fadeOut),
     0.0,
-    0.88
+    0.92
   );
 
   const sprite = new THREE.Sprite(plumeMaterial);
@@ -486,7 +488,7 @@ export function createDissolvePlumesSystem(): DissolvePlumesSystem {
   sprite.frustumCulled = false;
   sprite.renderOrder = 3;
 
-  let spawnCursor = 2400;
+  let spawnCursor = 3600;
   let spawnAccum = 0;
   let initialized = false;
 
@@ -501,7 +503,7 @@ export function createDissolvePlumesSystem(): DissolvePlumesSystem {
     starterPigmentRgb: readonly [number, number, number]
   ) => {
     uStarterColor.value.set(starterPigmentRgb[0], starterPigmentRgb[1], starterPigmentRgb[2]);
-    spawnCursor = 2400;
+    spawnCursor = 3600;
     spawnAccum = 0;
     initialized = true;
     renderer.compute(initCompute);
@@ -552,10 +554,10 @@ export function createDissolvePlumesSystem(): DissolvePlumesSystem {
     uRodVel.value.set(sim.rod.vx, 0, sim.rod.vz);
 
     if (activeSubmerged > 0) {
-      // Rich continuous solute ribbon shedding (~900..2,200 particles/sec across active cubes)
-      const emitPerSec = 950.0 + totalDissolveRate * 14500.0;
+      // Rich continuous ink-like solute ribbon shedding (~1,450..3,400 particles/sec across active cubes)
+      const emitPerSec = 1450.0 + totalDissolveRate * 22500.0;
       spawnAccum += emitPerSec * dt;
-      const count = Math.min(260, Math.floor(spawnAccum));
+      const count = Math.min(340, Math.floor(spawnAccum));
       spawnAccum -= count;
       uSpawnWindow.value.set(spawnCursor, count, totalDissolveRate, sim.simTime * 1.37 + 0.51);
       spawnCursor = (spawnCursor + count) % N;

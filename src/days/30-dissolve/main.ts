@@ -7,6 +7,7 @@ import {
   buildBaseCausticDiscGeometry,
   buildBorosilicateBeakerGeometry,
   buildGraduatedMarkingsGeometry,
+  buildMineralCrumbGeometry,
   buildStirringRodGeometry,
   buildSubdividedUnitCubeGeometry,
   createGraduatedMarkingsTexture,
@@ -22,6 +23,8 @@ import {
   BEAKER_OUTER_RADIUS,
   BEAKER_TOP_Y,
   BUBBLE_COUNT,
+  CRUMB_COUNT,
+  DISSOLVE_PIGMENT_CYCLE,
   MAX_ACTIVE_CUBES,
   WATER_RADIUS,
   WATER_REST_Y,
@@ -45,10 +48,15 @@ const _stirPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -0.05);
 const _meniscusPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -WATER_REST_Y);
 const _planeHit = new THREE.Vector3();
 const _localHit = new THREE.Vector3();
-const _bubbleMat = new THREE.Matrix4();
-const _bubblePos = new THREE.Vector3();
-const _bubbleScale = new THREE.Vector3();
-const _bubbleQuat = new THREE.Quaternion();
+const _instMat = new THREE.Matrix4();
+const _instPos = new THREE.Vector3();
+const _instScale = new THREE.Vector3();
+const _instQuat = new THREE.Quaternion();
+const _instEuler = new THREE.Euler();
+
+// Pre-baked linear RGB table for fast zero-allocation crumb color sync
+const PIGMENT_LINEAR_RGB: ReadonlyArray<readonly [number, number, number]> =
+  DISSOLVE_PIGMENT_CYCLE.map((key) => MINERAL_PALETTE[key].rInfLinear);
 
 /**
  * Day 30 — Dissolve:
@@ -59,7 +67,7 @@ const _bubbleQuat = new THREE.Quaternion();
  *    (cycling celadonGlauconite -> realgarAmber -> azuritePrussian -> cinnabarVermilion -> yellowOchre,
  *    up to 4 concurrent dissolving cubes mixing colors in the bath) with an immediate splash ripple.
  *  - Drag inside the beaker: Smoothly dips and sweeps the slender borosilicate glass stirring rod
- *    to whip up a central vortex swirling cubes, silver bubbles, and marbled schlieren pigment ribbons.
+ *    to whip up a central vortex swirling cubes, detaching crumbs, silver bubbles, and marbled dye ribbons.
  *  - Drag empty space outside the beaker: Smooth 360-degree 3D orbit around the suspended specimen.
  *  - Double-click empty space: Flushes the beaker clean with clear water and drops one crisp starter cube.
  */
@@ -81,10 +89,10 @@ export async function bootDay30Dissolve(): Promise<SpecimenStage> {
   stage.controls.rotateSpeed = 0.62;
   stage.controls.update();
 
-  // Glass-lab photographer's PMREM studio softbox reflections (curved strip windows + calcite rim)
+  // High-contrast dark-field glass-lab PMREM studio softbox reflections
   const studioEnv = createBeakerStudioEnvironment(stage.renderer);
   stage.scene.environment = studioEnv.texture;
-  stage.scene.environmentIntensity = 1.18;
+  stage.scene.environmentIntensity = 1.24;
 
   // Harmonize key/rim shadows tightly around the suspended laboratory beaker
   let dirIdx = 0;
@@ -92,7 +100,7 @@ export async function bootDay30Dissolve(): Promise<SpecimenStage> {
     if (child instanceof THREE.DirectionalLight) {
       if (dirIdx === 0) {
         child.position.set(2.8, 4.4, 3.3);
-        child.intensity = 2.45;
+        child.intensity = 2.55;
         child.shadow.mapSize.set(1024, 1024);
         const d = 1.5;
         child.shadow.camera.left = -d;
@@ -104,17 +112,17 @@ export async function bootDay30Dissolve(): Promise<SpecimenStage> {
         child.shadow.bias = -0.00035;
         child.shadow.camera.updateProjectionMatrix();
       } else if (dirIdx === 1) {
-        child.intensity = 0.92;
+        child.intensity = 0.90;
       } else if (dirIdx === 2) {
-        child.intensity = 1.65;
+        child.intensity = 1.72;
       }
       dirIdx++;
     }
   }
 
-  // Subtle warm studio uplift beneath the thick solid borosilicate base puck
-  const baseBounce = new THREE.PointLight(0xeae3d2, 0.95, 5.2, 1.8);
-  baseBounce.position.set(0.25, -1.75, 0.45);
+  // Subtle warm studio uplift beneath the thick solid borosilicate base heel (kept low so it never hotspots the heel wall)
+  const baseBounce = new THREE.PointLight(0xeae3d2, 0.42, 5.4, 2.0);
+  baseBounce.position.set(0.18, -2.25, 0.35);
   stage.specimenGroup.add(baseBounce);
 
   // -------------------------------------------------------------------------
@@ -122,36 +130,65 @@ export async function bootDay30Dissolve(): Promise<SpecimenStage> {
   // -------------------------------------------------------------------------
   const sim = new BeakerDissolveSim(true);
   const markingsTex = createGraduatedMarkingsTexture();
+  markingsTex.anisotropy = Math.min(16, stage.renderer.getMaxAnisotropy());
   const mats = createDissolveMaterials(sim, markingsTex);
 
   const beakerGroup = new THREE.Group();
   beakerGroup.name = 'BorosilicateDissolveApparatus';
   stage.specimenGroup.add(beakerGroup);
 
-  // 1. Four Pre-Allocated Dissolving Crystalline Mineral Cube Slots (`renderOrder = 1`)
-  const unitCubeGeom = buildSubdividedUnitCubeGeometry(18);
-  const cubeMeshes: THREE.Mesh[] = [];
+  // 1. Four Pre-Allocated Dual-Layer Dissolving Mineral Cube Slots (Eroding Crust + Wet Inner Core, `renderOrder = 1`)
+  const unitCubeGeom = buildSubdividedUnitCubeGeometry(22);
+  const crustMeshes: THREE.Mesh[] = [];
+  const coreMeshes: THREE.Mesh[] = [];
   const lastSlotPigment: Array<string> = new Array(MAX_ACTIVE_CUBES).fill('');
 
   for (let i = 0; i < MAX_ACTIVE_CUBES; i++) {
-    const mesh = new THREE.Mesh(unitCubeGeom, mats.cubeHandles[i].material);
-    mesh.name = `DissolvingMineralCube_${i}`;
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
-    mesh.renderOrder = 1;
-    mesh.frustumCulled = false;
-    mesh.visible = false;
-    beakerGroup.add(mesh);
-    cubeMeshes.push(mesh);
+    const coreMesh = new THREE.Mesh(unitCubeGeom, mats.cubeHandles[i].coreMaterial);
+    coreMesh.name = `DissolvingMineralCore_${i}`;
+    coreMesh.castShadow = true;
+    coreMesh.receiveShadow = true;
+    coreMesh.renderOrder = 1;
+    coreMesh.frustumCulled = false;
+    coreMesh.visible = false;
+    beakerGroup.add(coreMesh);
+    coreMeshes.push(coreMesh);
+
+    const crustMesh = new THREE.Mesh(unitCubeGeom, mats.cubeHandles[i].crustMaterial);
+    crustMesh.name = `DissolvingMineralCrust_${i}`;
+    crustMesh.castShadow = true;
+    crustMesh.receiveShadow = true;
+    crustMesh.renderOrder = 1;
+    crustMesh.frustumCulled = false;
+    crustMesh.visible = false;
+    beakerGroup.add(crustMesh);
+    crustMeshes.push(crustMesh);
   }
 
-  // 2. Thick-Walled Borosilicate Glass Beaker (Back-Face Depth Pass = 2, Front-Face Reflections = 8)
+  // 1B. 512-Instance Solid Detaching Faceted Mineral Crumbs (`renderOrder = 1`, opaque with per-instance pigment)
+  const crumbGeom = buildMineralCrumbGeometry();
+  const crumbColors = new Float32Array(CRUMB_COUNT * 3);
+  const crumbColorAttr = new THREE.InstancedBufferAttribute(crumbColors, 3);
+  crumbGeom.setAttribute('aCrumbColor', crumbColorAttr);
+
+  const crumbInstancedMesh = new THREE.InstancedMesh(crumbGeom, mats.crumbMat, CRUMB_COUNT);
+  crumbInstancedMesh.name = 'DetachingMineralCrumbs';
+  crumbInstancedMesh.renderOrder = 1;
+  crumbInstancedMesh.frustumCulled = false;
+  beakerGroup.add(crumbInstancedMesh);
+
+  // 2. Far Back Borosilicate Glass Walls (`renderOrder = 2`, strictly behind water/plumes/bubbles!)
   const beakerGeom = buildBorosilicateBeakerGeometry(96);
 
-  const beakerBackMesh = new THREE.Mesh(beakerGeom, mats.beakerBackMat);
-  beakerBackMesh.name = 'BorosilicateBeakerBackShell';
-  beakerBackMesh.renderOrder = 2;
-  beakerGroup.add(beakerBackMesh);
+  const beakerBackOuterMesh = new THREE.Mesh(beakerGeom, mats.beakerBackOuterMat);
+  beakerBackOuterMesh.name = 'BorosilicateBeakerBackOuterShell';
+  beakerBackOuterMesh.renderOrder = 2;
+  beakerGroup.add(beakerBackOuterMesh);
+
+  const beakerBackInnerMesh = new THREE.Mesh(beakerGeom, mats.beakerBackInnerMat);
+  beakerBackInnerMesh.name = 'BorosilicateBeakerBackInnerShell';
+  beakerBackInnerMesh.renderOrder = 2;
+  beakerGroup.add(beakerBackInnerMesh);
 
   // 3. 16,384-Particle WebGPU TSL-Compute Descending Schlieren & Marbled Pigment Plumes (`renderOrder = 3`)
   const plumes = createDissolvePlumesSystem();
@@ -184,27 +221,33 @@ export async function bootDay30Dissolve(): Promise<SpecimenStage> {
   waterCylinder.updateFromSim(sim);
   beakerGroup.add(waterCylinder.mesh);
 
-  // 7. Thick Glass Base Caustic & Solute Pool Shimmer (`renderOrder = 7`)
+  // 7. Focused Floor Caustic Filaments & Rim Ring (`renderOrder = 7`, zero milky haze)
   const causticDiscGeom = buildBaseCausticDiscGeometry();
   const causticDiscMesh = new THREE.Mesh(causticDiscGeom, mats.causticDiscMat);
   causticDiscMesh.name = 'BeakerBaseCausticDisc';
   causticDiscMesh.renderOrder = 7;
   beakerGroup.add(causticDiscMesh);
 
-  // 8. Front-Face Thick Borosilicate Glass Wall & Flared Pouring Spout (`renderOrder = 8`)
+  // 8. Near Inner Glass Wall Interface (`renderOrder = 8`, double-wall thickness line)
+  const beakerNearInnerMesh = new THREE.Mesh(beakerGeom, mats.beakerNearInnerMat);
+  beakerNearInnerMesh.name = 'BorosilicateBeakerNearInnerShell';
+  beakerNearInnerMesh.renderOrder = 8;
+  beakerGroup.add(beakerNearInnerMesh);
+
+  // 9. Hero Front-Face Refractive Borosilicate Glass Wall (`renderOrder = 9`, samples viewportSharedTexture!)
   const beakerFrontMesh = new THREE.Mesh(beakerGeom, mats.beakerFrontMat);
   beakerFrontMesh.name = 'BorosilicateBeakerFrontShell';
-  beakerFrontMesh.renderOrder = 8;
+  beakerFrontMesh.renderOrder = 9;
   beakerGroup.add(beakerFrontMesh);
 
-  // 9. Graduated Etched Eggshell Volumetric Markings (`renderOrder = 9`)
+  // 10. Crisp High-Resolution Fired-Enamel Volumetric Markings (`renderOrder = 10`)
   const markingsGeom = buildGraduatedMarkingsGeometry();
   const markingsMesh = new THREE.Mesh(markingsGeom, mats.markingsMat);
   markingsMesh.name = 'GraduatedVolumetricMarkings';
-  markingsMesh.renderOrder = 9;
+  markingsMesh.renderOrder = 10;
   beakerGroup.add(markingsMesh);
 
-  // 10. Invisible Cylinder Collider exclusively for crisp Pointer Raycasting over the Beaker
+  // 11. Invisible Cylinder Collider exclusively for crisp Pointer Raycasting over the Beaker
   const hitHeight = BEAKER_TOP_Y - BEAKER_BOTTOM_OUTER_Y + 0.16;
   const hitCylGeom = new THREE.CylinderGeometry(
     BEAKER_OUTER_RADIUS + 0.07,
@@ -389,23 +432,50 @@ export async function bootDay30Dissolve(): Promise<SpecimenStage> {
     getState: () => sim.getTelemetry(),
   };
 
-  // Helper to sync all 2,000 bubble instances without heap allocations
+  // Sync all 2,000 rising bubble instances without heap allocations
   const syncBubbleInstances = () => {
+    _instQuat.identity();
     for (let i = 0; i < BUBBLE_COUNT; i++) {
       if (sim.bubbleAlive[i] === 0) {
-        _bubblePos.set(0, -10, 0);
-        _bubbleScale.set(0, 0, 0);
+        _instPos.set(0, -10, 0);
+        _instScale.set(0, 0, 0);
       } else {
         const r = sim.bubbleRadius[i];
-        // Slight hydrodynamic oblate flattening on larger rising bubbles
         const oblate = 1.0 - Math.min(0.22, r * 12.0);
-        _bubblePos.set(sim.bubblePosX[i], sim.bubblePosY[i], sim.bubblePosZ[i]);
-        _bubbleScale.set(r, r * oblate, r);
+        _instPos.set(sim.bubblePosX[i], sim.bubblePosY[i], sim.bubblePosZ[i]);
+        _instScale.set(r, r * oblate, r);
       }
-      _bubbleMat.compose(_bubblePos, _bubbleQuat, _bubbleScale);
-      bubbleInstancedMesh.setMatrixAt(i, _bubbleMat);
+      _instMat.compose(_instPos, _instQuat, _instScale);
+      bubbleInstancedMesh.setMatrixAt(i, _instMat);
     }
     bubbleInstancedMesh.instanceMatrix.needsUpdate = true;
+  };
+
+  // Sync all 512 solid faceted detaching mineral crumbs without heap allocations
+  const syncCrumbInstances = () => {
+    for (let i = 0; i < CRUMB_COUNT; i++) {
+      if (sim.crumbAlive[i] === 0 || sim.crumbScale[i] <= 1e-5) {
+        _instPos.set(0, -10, 0);
+        _instScale.set(0, 0, 0);
+        _instQuat.identity();
+      } else {
+        const sc = sim.crumbScale[i];
+        _instPos.set(sim.crumbPosX[i], sim.crumbPosY[i], sim.crumbPosZ[i]);
+        _instEuler.set(sim.crumbRotX[i], sim.crumbRotY[i], sim.crumbRotZ[i]);
+        _instQuat.setFromEuler(_instEuler);
+        _instScale.set(sc, sc, sc);
+
+        const rgb = PIGMENT_LINEAR_RGB[sim.crumbPigmentIndex[i]] ?? PIGMENT_LINEAR_RGB[0];
+        const base = i * 3;
+        crumbColors[base] = rgb[0];
+        crumbColors[base + 1] = rgb[1];
+        crumbColors[base + 2] = rgb[2];
+      }
+      _instMat.compose(_instPos, _instQuat, _instScale);
+      crumbInstancedMesh.setMatrixAt(i, _instMat);
+    }
+    crumbInstancedMesh.instanceMatrix.needsUpdate = true;
+    crumbColorAttr.needsUpdate = true;
   };
 
   // -------------------------------------------------------------------------
@@ -421,20 +491,25 @@ export async function bootDay30Dissolve(): Promise<SpecimenStage> {
     sim.setStirringRodTarget(isStirring, stirTargetX, stirTargetZ, dt);
     sim.step(dt);
 
-    // 2. Sync dissolving mineral cubes (GPU curvature-weighted corner rounding & pitting uniforms)
+    // 2. Sync dual-layer dissolving mineral cubes (clipped outer crust + wet receding inner core)
     for (let i = 0; i < MAX_ACTIVE_CUBES; i++) {
       const c = sim.cubes[i];
-      const mesh = cubeMeshes[i];
+      const crustMesh = crustMeshes[i];
+      const coreMesh = coreMeshes[i];
       const handle = mats.cubeHandles[i];
 
       if (!c.active || c.mass <= 1e-5) {
-        mesh.visible = false;
+        crustMesh.visible = false;
+        coreMesh.visible = false;
         continue;
       }
 
-      mesh.visible = true;
-      mesh.position.copy(c.pos);
-      mesh.quaternion.copy(c.quat);
+      crustMesh.visible = true;
+      coreMesh.visible = true;
+      crustMesh.position.copy(c.pos);
+      crustMesh.quaternion.copy(c.quat);
+      coreMesh.position.copy(c.pos);
+      coreMesh.quaternion.copy(c.quat);
 
       if (lastSlotPigment[i] !== c.pigmentKey) {
         lastSlotPigment[i] = c.pigmentKey;
@@ -460,8 +535,9 @@ export async function bootDay30Dissolve(): Promise<SpecimenStage> {
     // 4. Update watertight deformable water column mesh from 2D wave PDE + vortex funnel
     waterCylinder.updateFromSim(sim);
 
-    // 5. Sync 2,000 rising effervescent silver micro-bubbles & shared optical uniforms
+    // 5. Sync rising effervescent silver micro-bubbles, detaching solid crumbs & shared optics
     syncBubbleInstances();
+    syncCrumbInstances();
     mats.syncFromSim(sim);
 
     // 6. Dispatch 16,384-particle WebGPU TSL-Compute descending schlieren & swirling pigment plumes
@@ -485,6 +561,7 @@ export async function bootDay30Dissolve(): Promise<SpecimenStage> {
     mats.dispose();
     markingsTex.dispose();
     unitCubeGeom.dispose();
+    crumbGeom.dispose();
     beakerGeom.dispose();
     bubbleSphereGeom.dispose();
     rodGeom.dispose();
