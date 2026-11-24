@@ -6,34 +6,51 @@ import {
 
 type Pt3 = readonly [number, number, number];
 
+interface SlabVertexBuffers {
+  positions: number[];
+  normals: number[];
+  uvs: number[];
+  matClasses: number[];
+  slabIds: number[];
+  slabLocals: number[];
+  slabSizes: number[];
+  kindFlags: number[];
+}
+
+interface SlabMeta {
+  center: Pt3;
+  min: Pt3;
+  size: Pt3;
+  matClass: number;
+  slabId: number;
+  isStairTread: number;
+  isTerrace: number;
+}
+
 function pushOutwardTri(
-  positions: number[],
-  normals: number[],
-  uvs: number[],
-  matClasses: number[],
+  buf: SlabVertexBuffers,
   a: Pt3,
   b: Pt3,
   c: Pt3,
-  center: Pt3,
-  matClass: number
+  meta: SlabMeta
 ): void {
   let p1 = b;
   let p2 = c;
 
-  let abx = p1[0] - a[0];
-  let aby = p1[1] - a[1];
-  let abz = p1[2] - a[2];
-  let acx = p2[0] - a[0];
-  let acy = p2[1] - a[1];
-  let acz = p2[2] - a[2];
+  const abx = p1[0] - a[0];
+  const aby = p1[1] - a[1];
+  const abz = p1[2] - a[2];
+  const acx = p2[0] - a[0];
+  const acy = p2[1] - a[1];
+  const acz = p2[2] - a[2];
 
   let nx = aby * acz - abz * acy;
   let ny = abz * acx - abx * acz;
   let nz = abx * acy - aby * acx;
 
-  const cx = (a[0] + p1[0] + p2[0]) / 3 - center[0];
-  const cy = (a[1] + p1[1] + p2[1]) / 3 - center[1];
-  const cz = (a[2] + p1[2] + p2[2]) / 3 - center[2];
+  const cx = (a[0] + p1[0] + p2[0]) / 3 - meta.center[0];
+  const cy = (a[1] + p1[1] + p2[1]) / 3 - meta.center[1];
+  const cz = (a[2] + p1[2] + p2[2]) / 3 - meta.center[2];
 
   if (nx * cx + ny * cy + nz * cz < 0) {
     const tmp = p1;
@@ -60,46 +77,68 @@ function pushOutwardTri(
     return [p[0], p[1]];
   };
 
+  const invSx = 1 / Math.max(1e-5, meta.size[0]);
+  const invSy = 1 / Math.max(1e-5, meta.size[1]);
+  const invSz = 1 / Math.max(1e-5, meta.size[2]);
+
   const verts: readonly Pt3[] = [a, p1, p2];
   for (let i = 0; i < 3; i++) {
     const v = verts[i];
-    positions.push(v[0], v[1], v[2]);
-    normals.push(nx, ny, nz);
+    buf.positions.push(v[0], v[1], v[2]);
+    buf.normals.push(nx, ny, nz);
     const [u, w] = projectUv(v);
-    uvs.push(u, w);
-    matClasses.push(matClass);
+    buf.uvs.push(u, w);
+    buf.matClasses.push(meta.matClass);
+    buf.slabIds.push(meta.slabId);
+    buf.slabLocals.push(
+      (v[0] - meta.min[0]) * invSx,
+      (v[1] - meta.min[1]) * invSy,
+      (v[2] - meta.min[2]) * invSz
+    );
+    buf.slabSizes.push(meta.size[0], meta.size[1], meta.size[2]);
+    buf.kindFlags.push(meta.isStairTread, meta.isTerrace);
   }
 }
 
 function pushOutwardQuad(
-  positions: number[],
-  normals: number[],
-  uvs: number[],
-  matClasses: number[],
+  buf: SlabVertexBuffers,
   a: Pt3,
   b: Pt3,
   c: Pt3,
   d: Pt3,
-  center: Pt3,
-  matClass: number
+  meta: SlabMeta
 ): void {
-  pushOutwardTri(positions, normals, uvs, matClasses, a, b, c, center, matClass);
-  pushOutwardTri(positions, normals, uvs, matClasses, a, c, d, center, matClass);
+  pushOutwardTri(buf, a, b, c, meta);
+  pushOutwardTri(buf, a, c, d, meta);
 }
 
 /**
  * Builds a watertight, strictly outward-wound 26-face chamfered architectural slab
  * (6 main planar faces + 12 45-degree chamfer edge strips + 8 corner bevel facets).
- * All vertices lie cleanly on or inside [slab.min, slab.max].
+ * All vertices lie cleanly on or inside [slab.min, slab.max] and carry exact per-slab
+ * coordinates (`aSlabId`, `aSlabLocal`, `aSlabSize`, `aKindFlags`) for zero-self-occlusion
+ * cast-paint precision and slab-aware architectural masonry detailing.
  */
-export function buildBeveledSlabGeometry(slab: ArchitecturalSlab): THREE.BufferGeometry {
+export function buildBeveledSlabGeometry(
+  slab: ArchitecturalSlab,
+  slabIndex = 0
+): THREE.BufferGeometry {
   const [minX, minY, minZ] = slab.min;
   const [maxX, maxY, maxZ] = slab.max;
   const w = maxX - minX;
   const h = maxY - minY;
   const d = maxZ - minZ;
   const b = Math.max(0.001, Math.min(slab.bevel, Math.min(w, h, d) * 0.22));
-  const center: Pt3 = [(minX + maxX) * 0.5, (minY + maxY) * 0.5, (minZ + maxZ) * 0.5];
+
+  const meta: SlabMeta = {
+    center: [(minX + maxX) * 0.5, (minY + maxY) * 0.5, (minZ + maxZ) * 0.5],
+    min: [minX, minY, minZ],
+    size: [w, h, d],
+    matClass: slab.materialClass,
+    slabId: slabIndex,
+    isStairTread: slab.kind === 'stair' && slab.materialClass === 1 ? 1 : 0,
+    isTerrace: slab.kind === 'terrace' ? 1 : 0,
+  };
 
   // For each corner (sx, sy, sz) in {-1, +1}^3, generate its 3 chamfer vertices on ±X, ±Y, ±Z faces
   const vx = (sx: number, sy: number, sz: number): Pt3 => [
@@ -118,109 +157,42 @@ export function buildBeveledSlabGeometry(slab: ArchitecturalSlab): THREE.BufferG
     sz < 0 ? minZ : maxZ,
   ];
 
-  const positions: number[] = [];
-  const normals: number[] = [];
-  const uvs: number[] = [];
-  const matClasses: number[] = [];
-  const mc = slab.materialClass;
+  const buf: SlabVertexBuffers = {
+    positions: [],
+    normals: [],
+    uvs: [],
+    matClasses: [],
+    slabIds: [],
+    slabLocals: [],
+    slabSizes: [],
+    kindFlags: [],
+  };
 
   // 1. Six main planar faces
-  // +X and -X
   for (const sx of [-1, 1]) {
-    pushOutwardQuad(
-      positions,
-      normals,
-      uvs,
-      matClasses,
-      vx(sx, -1, -1),
-      vx(sx, 1, -1),
-      vx(sx, 1, 1),
-      vx(sx, -1, 1),
-      center,
-      mc
-    );
+    pushOutwardQuad(buf, vx(sx, -1, -1), vx(sx, 1, -1), vx(sx, 1, 1), vx(sx, -1, 1), meta);
   }
-  // +Y and -Y
   for (const sy of [-1, 1]) {
-    pushOutwardQuad(
-      positions,
-      normals,
-      uvs,
-      matClasses,
-      vy(-1, sy, -1),
-      vy(1, sy, -1),
-      vy(1, sy, 1),
-      vy(-1, sy, 1),
-      center,
-      mc
-    );
+    pushOutwardQuad(buf, vy(-1, sy, -1), vy(1, sy, -1), vy(1, sy, 1), vy(-1, sy, 1), meta);
   }
-  // +Z and -Z
   for (const sz of [-1, 1]) {
-    pushOutwardQuad(
-      positions,
-      normals,
-      uvs,
-      matClasses,
-      vz(-1, -1, sz),
-      vz(1, -1, sz),
-      vz(1, 1, sz),
-      vz(-1, 1, sz),
-      center,
-      mc
-    );
+    pushOutwardQuad(buf, vz(-1, -1, sz), vz(1, -1, sz), vz(1, 1, sz), vz(-1, 1, sz), meta);
   }
 
   // 2. Twelve 45-degree chamfer edge strips
-  // 4 edges parallel to X (between ±Y and ±Z)
   for (const sy of [-1, 1]) {
     for (const sz of [-1, 1]) {
-      pushOutwardQuad(
-        positions,
-        normals,
-        uvs,
-        matClasses,
-        vy(-1, sy, sz),
-        vy(1, sy, sz),
-        vz(1, sy, sz),
-        vz(-1, sy, sz),
-        center,
-        mc
-      );
+      pushOutwardQuad(buf, vy(-1, sy, sz), vy(1, sy, sz), vz(1, sy, sz), vz(-1, sy, sz), meta);
     }
   }
-  // 4 edges parallel to Y (between ±X and ±Z)
   for (const sx of [-1, 1]) {
     for (const sz of [-1, 1]) {
-      pushOutwardQuad(
-        positions,
-        normals,
-        uvs,
-        matClasses,
-        vx(sx, -1, sz),
-        vx(sx, 1, sz),
-        vz(sx, 1, sz),
-        vz(sx, -1, sz),
-        center,
-        mc
-      );
+      pushOutwardQuad(buf, vx(sx, -1, sz), vx(sx, 1, sz), vz(sx, 1, sz), vz(sx, -1, sz), meta);
     }
   }
-  // 4 edges parallel to Z (between ±X and ±Y)
   for (const sx of [-1, 1]) {
     for (const sy of [-1, 1]) {
-      pushOutwardQuad(
-        positions,
-        normals,
-        uvs,
-        matClasses,
-        vx(sx, sy, -1),
-        vx(sx, sy, 1),
-        vy(sx, sy, 1),
-        vy(sx, sy, -1),
-        center,
-        mc
-      );
+      pushOutwardQuad(buf, vx(sx, sy, -1), vx(sx, sy, 1), vy(sx, sy, 1), vy(sx, sy, -1), meta);
     }
   }
 
@@ -228,26 +200,20 @@ export function buildBeveledSlabGeometry(slab: ArchitecturalSlab): THREE.BufferG
   for (const sx of [-1, 1]) {
     for (const sy of [-1, 1]) {
       for (const sz of [-1, 1]) {
-        pushOutwardTri(
-          positions,
-          normals,
-          uvs,
-          matClasses,
-          vx(sx, sy, sz),
-          vy(sx, sy, sz),
-          vz(sx, sy, sz),
-          center,
-          mc
-        );
+        pushOutwardTri(buf, vx(sx, sy, sz), vy(sx, sy, sz), vz(sx, sy, sz), meta);
       }
     }
   }
 
   const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  geo.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
-  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
-  geo.setAttribute('aMatClass', new THREE.Float32BufferAttribute(matClasses, 1));
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(buf.positions, 3));
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(buf.normals, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(buf.uvs, 2));
+  geo.setAttribute('aMatClass', new THREE.Float32BufferAttribute(buf.matClasses, 1));
+  geo.setAttribute('aSlabId', new THREE.Float32BufferAttribute(buf.slabIds, 1));
+  geo.setAttribute('aSlabLocal', new THREE.Float32BufferAttribute(buf.slabLocals, 3));
+  geo.setAttribute('aSlabSize', new THREE.Float32BufferAttribute(buf.slabSizes, 3));
+  geo.setAttribute('aKindFlags', new THREE.Float32BufferAttribute(buf.kindFlags, 2));
   geo.computeBoundingBox();
   geo.computeBoundingSphere();
   return geo;
@@ -260,7 +226,7 @@ export function buildBeveledSlabGeometry(slab: ArchitecturalSlab): THREE.BufferG
 export function buildArchitecturalCourtyardGeometry(
   slabs: readonly ArchitecturalSlab[] = ARCHITECTURAL_SLABS
 ): THREE.BufferGeometry {
-  const slabGeos = slabs.map((s) => buildBeveledSlabGeometry(s));
+  const slabGeos = slabs.map((s, idx) => buildBeveledSlabGeometry(s, idx));
   let totalVerts = 0;
   for (const g of slabGeos) {
     totalVerts += g.attributes.position.count;
@@ -270,6 +236,10 @@ export function buildArchitecturalCourtyardGeometry(
   const norm = new Float32Array(totalVerts * 3);
   const uv = new Float32Array(totalVerts * 2);
   const matClass = new Float32Array(totalVerts);
+  const slabId = new Float32Array(totalVerts);
+  const slabLocal = new Float32Array(totalVerts * 3);
+  const slabSize = new Float32Array(totalVerts * 3);
+  const kindFlags = new Float32Array(totalVerts * 2);
 
   let offset = 0;
   for (const g of slabGeos) {
@@ -278,6 +248,10 @@ export function buildArchitecturalCourtyardGeometry(
     norm.set((g.attributes.normal as THREE.BufferAttribute).array as Float32Array, offset * 3);
     uv.set((g.attributes.uv as THREE.BufferAttribute).array as Float32Array, offset * 2);
     matClass.set((g.attributes.aMatClass as THREE.BufferAttribute).array as Float32Array, offset);
+    slabId.set((g.attributes.aSlabId as THREE.BufferAttribute).array as Float32Array, offset);
+    slabLocal.set((g.attributes.aSlabLocal as THREE.BufferAttribute).array as Float32Array, offset * 3);
+    slabSize.set((g.attributes.aSlabSize as THREE.BufferAttribute).array as Float32Array, offset * 3);
+    kindFlags.set((g.attributes.aKindFlags as THREE.BufferAttribute).array as Float32Array, offset * 2);
     offset += count;
     g.dispose();
   }
@@ -287,6 +261,10 @@ export function buildArchitecturalCourtyardGeometry(
   merged.setAttribute('normal', new THREE.BufferAttribute(norm, 3));
   merged.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
   merged.setAttribute('aMatClass', new THREE.BufferAttribute(matClass, 1));
+  merged.setAttribute('aSlabId', new THREE.BufferAttribute(slabId, 1));
+  merged.setAttribute('aSlabLocal', new THREE.BufferAttribute(slabLocal, 3));
+  merged.setAttribute('aSlabSize', new THREE.BufferAttribute(slabSize, 3));
+  merged.setAttribute('aKindFlags', new THREE.BufferAttribute(kindFlags, 2));
   merged.computeBoundingBox();
   merged.computeBoundingSphere();
   return merged;
@@ -308,10 +286,6 @@ export function buildSurveyorSightRingGeometry(): {
   bezelGeometry: THREE.BufferGeometry;
   ticksGeometry: THREE.BufferGeometry;
 } {
-  // Closed cross-section profile revolved around Y, then rotated +90 deg around X -> aperture faces +Z.
-  // Ordered strictly counter-clockwise around the cross-section centroid so outward normals point away from metal solid!
-  // Wait: Three.js LatheGeometry points traced bottom-to-top along outer wall produce outward normals (+r),
-  // and top-to-bottom along inner bore produce inward-toward-axis (-r) normals facing the hollow aperture!
   const rInner = 0.088;
   const rOuter = 0.114;
   const rFlange = 0.122;
@@ -319,20 +293,16 @@ export function buildSurveyorSightRingGeometry(): {
   const lip = 0.004;
 
   const profile: THREE.Vector2[] = [
-    // Inner bore top -> bottom (faces toward hollow center -r)
     new THREE.Vector2(rInner, halfDepth - lip),
     new THREE.Vector2(rInner, -halfDepth + lip),
-    // Bottom-inner chamfer -> bottom rim
     new THREE.Vector2(rInner + lip, -halfDepth),
     new THREE.Vector2(rOuter - lip, -halfDepth),
-    // Outer wall bottom -> stepped knurled flange -> top (faces outward +r)
     new THREE.Vector2(rOuter, -halfDepth + lip),
     new THREE.Vector2(rOuter, -0.005),
     new THREE.Vector2(rFlange, -0.003),
     new THREE.Vector2(rFlange, 0.003),
     new THREE.Vector2(rOuter, 0.005),
     new THREE.Vector2(rOuter, halfDepth - lip),
-    // Top rim -> top-inner chamfer closing loop cleanly
     new THREE.Vector2(rOuter - lip, halfDepth),
     new THREE.Vector2(rInner + lip, halfDepth),
     new THREE.Vector2(rInner, halfDepth - lip),
@@ -344,9 +314,7 @@ export function buildSurveyorSightRingGeometry(): {
   bezelGeometry.computeBoundingBox();
   bezelGeometry.computeBoundingSphere();
 
-  // Four precision cardinal reticle teeth (pointing slightly inward) + 4 fine outer index lugs
   const tickSlabs: ArchitecturalSlab[] = [
-    // Inner cardinal hairline ticks (leaving generous open center aperture r < 0.056)
     {
       id: 'tick-right',
       kind: 'pier',
@@ -379,7 +347,6 @@ export function buildSurveyorSightRingGeometry(): {
       max: [0.0032, -0.056, 0.0035],
       bevel: 0.0008,
     },
-    // Subtle outer brass alignment fins at 12, 3, 6, 9 o'clock
     {
       id: 'lug-top',
       kind: 'pier',

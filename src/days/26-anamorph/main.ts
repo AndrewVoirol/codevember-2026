@@ -42,9 +42,11 @@ async function mountDay26Anamorph(): Promise<void> {
     enableShadows: true,
   });
 
-  // Smooth 360-degree architectural turntable orbit around the suspended courtyard maquette
+  // Smooth 360-degree architectural turntable orbit + close-up macro inspection inside courtyard
+  stage.camera.near = 0.05;
+  stage.camera.updateProjectionMatrix();
   stage.controls.target.set(VANTAGE_TARGET[0], VANTAGE_TARGET[1], VANTAGE_TARGET[2]);
-  stage.controls.minDistance = 2.5;
+  stage.controls.minDistance = 1.45;
   stage.controls.maxDistance = 8.8;
   stage.controls.minPolarAngle = 0.12;
   stage.controls.maxPolarAngle = Math.PI * 0.88;
@@ -56,24 +58,25 @@ async function mountDay26Anamorph(): Promise<void> {
   stage.scene.environment = studioEnv.texture;
   stage.scene.environmentIntensity = 0.86;
 
-  // Tune studio 3-point rig & tighten 2048x2048 PCF shadow frustum around the architectural model
+  // Tune studio 3-point rig & tighten 4096x4096 soft PCF shadow frustum around the architectural model
   let dirIdx = 0;
   for (const child of stage.scene.children) {
     if (child instanceof THREE.DirectionalLight) {
       if (dirIdx === 0) {
         child.color.setHex(0xf8f2e6);
         child.position.set(3.2, 5.1, 3.4);
-        child.intensity = 2.05;
-        child.shadow.mapSize.set(2048, 2048);
-        const d = 1.95;
+        child.intensity = 2.08;
+        child.shadow.mapSize.set(4096, 4096);
+        child.shadow.radius = 2.2;
+        const d = 1.68;
         child.shadow.camera.left = -d;
         child.shadow.camera.right = d;
         child.shadow.camera.top = d;
         child.shadow.camera.bottom = -d;
-        child.shadow.camera.near = 1.0;
-        child.shadow.camera.far = 13.5;
-        child.shadow.bias = -0.00025;
-        child.shadow.normalBias = 0.012;
+        child.shadow.camera.near = 1.5;
+        child.shadow.camera.far = 12.5;
+        child.shadow.bias = -0.00018;
+        child.shadow.normalBias = 0.006;
         child.shadow.camera.updateProjectionMatrix();
       } else if (dirIdx === 1) {
         child.color.setHex(0xc8d6e5);

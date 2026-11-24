@@ -122,7 +122,13 @@ export const INITIAL_CAMERA_POS: Vec3Tuple = sphericalToCartesian(
 /** Standoff radius of the machined brass optical surveyor's sight-ring along vantageDir (clears max corner 1.82 from every 360 deg angle). */
 export const SIGHT_RING_RADIUS_FROM_TARGET = 2.05;
 
-/** Analytical ray-box self-intersection guard bias (exceeds max slab bevel 0.006, well below min slab thickness 0.085). */
+/**
+ * Analytical ray-box intersection guard bias:
+ * - OCCLUSION_OTHER_BIAS (0.002) is used when self-slab is excluded via `aSlabId`, keeping cast paint
+ *   boundaries razor-tight at 90-degree wall/stair contact seams with zero bleed.
+ * - OCCLUSION_SELF_BIAS (0.018) is the legacy fallback when `selfSlabIndex < 0`.
+ */
+export const OCCLUSION_OTHER_BIAS = 0.002;
 export const OCCLUSION_SELF_BIAS = 0.018;
 export const OCCLUSION_MIN_T = 0.001;
 export const OCCLUSION_FRONT_DOT_MIN = 0.025;
@@ -570,7 +576,8 @@ export function isPointVisibleFromVantage(
   worldPos: readonly [number, number, number],
   worldNormal: readonly [number, number, number],
   vantagePos: readonly [number, number, number],
-  slabs: readonly ArchitecturalSlab[] = ARCHITECTURAL_SLABS
+  slabs: readonly ArchitecturalSlab[] = ARCHITECTURAL_SLABS,
+  selfSlabIndex = -1
 ): boolean {
   const vx = vantagePos[0] - worldPos[0];
   const vy = vantagePos[1] - worldPos[1];
@@ -592,10 +599,11 @@ export function isPointVisibleFromVantage(
     return false;
   }
 
-  // 2. Ray from vantagePos toward worldPos, checking all slabs strictly before `dist - OCCLUSION_SELF_BIAS`
+  // 2. Ray from vantagePos toward worldPos, checking all other slabs strictly before the surface
   const rayDir: Vec3Tuple = [-toVantageX, -toVantageY, -toVantageZ];
-  const maxT = dist - OCCLUSION_SELF_BIAS;
+  const maxT = dist - (selfSlabIndex >= 0 ? OCCLUSION_OTHER_BIAS : OCCLUSION_SELF_BIAS);
   for (let i = 0; i < slabs.length; i++) {
+    if (i === selfSlabIndex) continue;
     if (rayBoxIntersectSegment(vantagePos, rayDir, maxT, slabs[i])) {
       return false;
     }
@@ -624,24 +632,29 @@ export function sdSegment2D(
 }
 
 /**
- * Helper converting L=7 Penrose triangular lattice coordinates (i, j) to centered 2D stencil coordinates.
+ * Helper converting L=8 truncated-corner Penrose triangular lattice coordinates (i, j)
+ * to centered 2D stencil coordinates.
  */
 function penroseLatticeToUv(i: number, j: number): [number, number] {
-  const scale = 0.132;
-  const x = (i - 7 / 3 + 0.5 * (j - 7 / 3)) * scale;
-  const y = (j - 7 / 3) * (Math.sqrt(3) * 0.5) * scale;
+  const L = 8;
+  const scale = 0.118;
+  const x = (i - L / 3 + 0.5 * (j - L / 3)) * scale;
+  const y = (j - L / 3) * (Math.sqrt(3) * 0.5) * scale;
   return [x, y];
 }
 
-// Precomputed exact Penrose tribar segments (3 arms x 3 segments, closed L=7 impossible topology)
+// Precomputed exact L=8 truncated-corner Penrose Tribar segments:
+// Primary = closed 6-edge truncated outer silhouette + 3-edge inner hollow triangle (9 segments)
+// Secondary = 3 cyclic L-bent internal impossible fold creases connecting outer bevel corners into hole vertices (6 segments)
 const PENROSE_OUTER_SEGMENTS: ReadonlyArray<readonly [number, number, number, number]> = (() => {
   const segs: Array<[number, number, number, number]> = [];
-  const rot120 = (i: number, j: number): [number, number] => [7 - i - j, i];
-  const baseOuter: Array<[[number, number], [number, number]]> = [
-    [[0, 0], [7, 0]],
-    [[0, 1], [5, 1]],
+  const rot120 = (i: number, j: number): [number, number] => [8 - i - j, i];
+  const basePrimary: Array<[[number, number], [number, number]]> = [
+    [[1, 0], [7, 0]], // Outer long beam edge (len 6)
+    [[7, 0], [7, 1]], // Truncated 60-deg corner bevel (len 1)
+    [[2, 2], [4, 2]], // Inner hollow triangle edge (len 2)
   ];
-  for (const [a0, b0] of baseOuter) {
+  for (const [a0, b0] of basePrimary) {
     let a = a0;
     let b = b0;
     for (let k = 0; k < 3; k++) {
@@ -657,15 +670,21 @@ const PENROSE_OUTER_SEGMENTS: ReadonlyArray<readonly [number, number, number, nu
 
 const PENROSE_INNER_SEGMENTS: ReadonlyArray<readonly [number, number, number, number]> = (() => {
   const segs: Array<[number, number, number, number]> = [];
-  const rot120 = (i: number, j: number): [number, number] => [7 - i - j, i];
-  let a: [number, number] = [1, 2];
-  let b: [number, number] = [3, 2];
-  for (let k = 0; k < 3; k++) {
-    const [ax, ay] = penroseLatticeToUv(a[0], a[1]);
-    const [bx, by] = penroseLatticeToUv(b[0], b[1]);
-    segs.push([ax, ay, bx, by]);
-    a = rot120(a[0], a[1]);
-    b = rot120(b[0], b[1]);
+  const rot120 = (i: number, j: number): [number, number] => [8 - i - j, i];
+  const baseCreases: Array<[[number, number], [number, number]]> = [
+    [[7, 1], [2, 1]], // Long internal depth ridge (len 5)
+    [[2, 1], [2, 2]], // Short elbow miter into inner hole vertex (len 1)
+  ];
+  for (const [a0, b0] of baseCreases) {
+    let a = a0;
+    let b = b0;
+    for (let k = 0; k < 3; k++) {
+      const [ax, ay] = penroseLatticeToUv(a[0], a[1]);
+      const [bx, by] = penroseLatticeToUv(b[0], b[1]);
+      segs.push([ax, ay, bx, by]);
+      a = rot120(a[0], a[1]);
+      b = rot120(b[0], b[1]);
+    }
   }
   return segs;
 })();
@@ -793,9 +812,10 @@ export function evaluateProjectedPaintCpu(
   worldNormal: readonly [number, number, number],
   basis: VantageBasis,
   stencilIndex: number,
-  slabs: readonly ArchitecturalSlab[] = ARCHITECTURAL_SLABS
+  slabs: readonly ArchitecturalSlab[] = ARCHITECTURAL_SLABS,
+  selfSlabIndex = -1
 ): StencilEvaluation {
-  if (!isPointVisibleFromVantage(worldPos, worldNormal, basis.pos, slabs)) {
+  if (!isPointVisibleFromVantage(worldPos, worldNormal, basis.pos, slabs, selfSlabIndex)) {
     return { primary: 0, secondary: 0, total: 0 };
   }
   const proj = projectWorldToStencilUv(worldPos, basis);
@@ -904,8 +924,16 @@ export class AnamorphController {
     this.alignmentErrorDeg = m.angularErrorDeg;
     this.radialError = m.radialError;
     this.isLockedIn = m.isLockedIn;
-    // Brass sight-ring smoothly dissolves as viewer enters the optical eyepiece
-    this.sightRingAlpha = smoothstep(1.2, 7.5, m.angularErrorDeg);
+    // Brass sight-ring smoothly dissolves both as viewer enters the optical eyepiece
+    // AND when zooming in close inside the courtyard to inspect stone & stair micro-detail
+    const camDist = Math.hypot(
+      this.cameraPos[0] - this.vantageBasis.target[0],
+      this.cameraPos[1] - this.vantageBasis.target[1],
+      this.cameraPos[2] - this.vantageBasis.target[2]
+    );
+    const angleFade = smoothstep(1.2, 7.5, m.angularErrorDeg);
+    const closeZoomFade = smoothstep(2.15, 2.75, camDist);
+    this.sightRingAlpha = angleFade * closeZoomFade;
   }
 
   setCameraPos(x: number, y: number, z: number): void {

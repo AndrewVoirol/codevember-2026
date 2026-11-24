@@ -6,7 +6,10 @@ import {
   DEFAULT_VANTAGE_POS,
   DETENT_CAPTURE_DEG,
   INITIAL_CAMERA_POS,
+  OCCLUSION_OTHER_BIAS,
   OCCLUSION_SELF_BIAS,
+  PENROSE_PRIMARY_SEGS,
+  PENROSE_SECONDARY_SEGS,
   SLAB_COUNT,
   STAGE_FOV_DEG,
   STENCIL_CONFIGS,
@@ -205,6 +208,22 @@ describe('Day 26 - Anamorph (Felice Varini Brutalist Courtyard Maquette)', () =>
     const matAttr = merged.attributes.aMatClass as THREE.BufferAttribute;
     expect(matAttr).toBeDefined();
     expect(matAttr.count).toBe(merged.attributes.position.count);
+    const slabIdAttr = merged.attributes.aSlabId as THREE.BufferAttribute;
+    const slabLocalAttr = merged.attributes.aSlabLocal as THREE.BufferAttribute;
+    const slabSizeAttr = merged.attributes.aSlabSize as THREE.BufferAttribute;
+    const kindFlagsAttr = merged.attributes.aKindFlags as THREE.BufferAttribute;
+    expect(slabIdAttr.count).toBe(merged.attributes.position.count);
+    expect(slabLocalAttr.count).toBe(merged.attributes.position.count);
+    expect(slabSizeAttr.count).toBe(merged.attributes.position.count);
+    expect(kindFlagsAttr.count).toBe(merged.attributes.position.count);
+    // Verify slabLocal stays in [0, 1] and stair treads are flagged cleanly
+    let stairFlagCount = 0;
+    for (let i = 0; i < slabLocalAttr.count; i++) {
+      expect(slabLocalAttr.getX(i)).toBeGreaterThanOrEqual(-1e-5);
+      expect(slabLocalAttr.getX(i)).toBeLessThanOrEqual(1 + 1e-5);
+      if (kindFlagsAttr.getX(i) > 0.5) stairFlagCount++;
+    }
+    expect(stairFlagCount).toBe(6 * 44 * 3); // 6 cantilevered travertine treads
     merged.dispose();
 
     // 4. Machined brass surveyor's sight-ring (closed Lathe bezel + cardinal ticks) outward winding
@@ -426,13 +445,36 @@ describe('Day 26 - Anamorph (Felice Varini Brutalist Courtyard Maquette)', () =>
     }
 
     // 3. Direct unoccluded front face of foreground portal-right-pier IS visible
-    const portalRight = ARCHITECTURAL_SLABS.find((s) => s.id === 'portal-right-pier')!;
+    const portalRightIdx = ARCHITECTURAL_SLABS.findIndex((s) => s.id === 'portal-right-pier');
+    const portalRight = ARCHITECTURAL_SLABS[portalRightIdx]!;
     const visibleFrontPt: Vec3Tuple = [
       (portalRight.min[0] + portalRight.max[0]) * 0.5,
       (portalRight.min[1] + portalRight.max[1]) * 0.5,
       portalRight.max[2],
     ];
-    expect(isPointVisibleFromVantage(visibleFrontPt, [0, 0, 1], basis.pos)).toBe(true);
+    expect(
+      isPointVisibleFromVantage(visibleFrontPt, [0, 0, 1], basis.pos, ARCHITECTURAL_SLABS, portalRightIdx)
+    ).toBe(true);
+
+    // 4. Per-slab exclusion eliminates the 1.8 cm contact-corner paint bleed:
+    //    a point on plinth-deck just 0.008 units behind baffle-mid-wall (inside old 0.018 bias,
+    //    outside new 0.002 OCCLUSION_OTHER_BIAS) MUST be blocked cleanly!
+    const plinthDeckIdx = ARCHITECTURAL_SLABS.findIndex((s) => s.id === 'plinth-deck');
+    const baffle = ARCHITECTURAL_SLABS.find((s) => s.id === 'baffle-mid-wall')!;
+    // Ray from DEFAULT_VANTAGE_POS (+X, +Y, +Z) past baffle's -X face onto plinth-deck right behind it
+    const cornerShadowPt: Vec3Tuple = [
+      baffle.min[0] - 0.006,
+      baffle.min[1], // top of plinth-deck (-0.46)
+      (baffle.min[2] + baffle.max[2]) * 0.5,
+    ];
+    expect(OCCLUSION_OTHER_BIAS).toBeLessThan(0.004);
+    expect(
+      isPointVisibleFromVantage(cornerShadowPt, [0, 1, 0], basis.pos, ARCHITECTURAL_SLABS, plinthDeckIdx)
+    ).toBe(false);
+
+    // 5. Truncated L=8 Penrose Tribar segment topology integrity (9 primary + 6 secondary)
+    expect(PENROSE_PRIMARY_SEGS.length).toBe(9);
+    expect(PENROSE_SECONDARY_SEGS.length).toBe(6);
   });
 
   it('supports live re-projection from arbitrary new camera angles across all 4 stencils and preserves double-click rollback', () => {
@@ -592,6 +634,11 @@ describe('Day 26 - Anamorph (Felice Varini Brutalist Courtyard Maquette)', () =>
     }
     expect(ctrl.getState().alignmentErrorDeg).toBeLessThan(0.05);
     expect(ctrl.getState().isLockedIn).toBe(true);
+
+    // 3b. Sight-ring fades out smoothly when zoomed close inside the courtyard (camDist < 2.2)
+    const closeZoomPos = sphericalToCartesian(VANTAGE_TARGET, 1.8, -0.45, 0.35);
+    ctrl.setCameraPos(closeZoomPos[0], closeZoomPos[1], closeZoomPos[2]);
+    expect(ctrl.sightRingAlpha).toBeLessThan(0.01);
 
     // 4. All 4 stencils produce clean non-overlapping primary & secondary masks in [0, 1]
     for (let sIdx = 0; sIdx < STENCIL_COUNT; sIdx++) {
