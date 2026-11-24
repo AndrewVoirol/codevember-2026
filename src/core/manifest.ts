@@ -280,12 +280,12 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
   createDay(
     22,
     'Echo',
-    'upcoming',
-    'wgsl',
+    'complete',
+    'tsl',
     'verdigrisMalachite',
-    'boneCalcite',
-    'Ellipsoidal acoustic whispering-gallery chamber visualizing 3D wave-equation wavefront reflections',
-    'Click anywhere inside the cavity to emit a sharp acoustic pulse that focuses at the conjugate focus'
+    'realgarAmber',
+    'Machined dark-bronze and satin-brass two-way infinity mirror cube with diamond-knurled micrometer thumbscrews and a 40-bounce TSL optical cavity enclosing a swinging Realgar-Amber Edison filament inside a faceted Bone-Calcite prism receding through Beer-Lambert soda-lime celadon and verdigris depths',
+    'Drag empty space to orbit 360° around all six faces; drag the cube or knurled brass thumbscrews (or Shift+drag) to micro-tilt the interior mirrors and bend the 40-bounce echo corridor into curves and vortices; click the glass (or press Space) to pluck the suspended amber pendulum; double-click to snap parallel or cycle canonical mirror geometries'
   ),
   createDay(
     23,

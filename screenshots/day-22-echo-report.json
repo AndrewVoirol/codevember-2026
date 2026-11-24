@@ -1,0 +1,46 @@
+{
+  "day": 22,
+  "slug": "22-echo",
+  "expectedHeader": "Day 22 - Echo",
+  "domAudit": {
+    "headerText": "Day 22 - Echo",
+    "bodyBg": "rgb(33, 37, 41)",
+    "drawerCount": 30
+  },
+  "telemetry": {
+    "frameCount": 360,
+    "avgFrameMs": 8.33,
+    "p95FrameMs": 9.9,
+    "sceneState": {
+      "day": 22,
+      "slug": "22-echo",
+      "headerLabel": "Day 22 - Echo",
+      "frameCount": 360,
+      "cameraPos": [
+        2.380000000000002,
+        1.4600000000000009,
+        3.680000000000002
+      ],
+      "pointerWorld": [
+        0.3408401632926532,
+        -0.3123745044996431,
+        -0.09056157520436425
+      ],
+      "pointerSpeed": 0,
+      "pointerDwellSec": 1.9398,
+      "pointerImpulse": 0.0007
+    }
+  },
+  "metrics": {
+    "specimenCoverageRatio": 0.2735,
+    "interactionMad": 5.513
+  },
+  "gpuErrors": [],
+  "gateFailures": [],
+  "artifacts": {
+    "contactSheet": "screenshots/day-22-echo-contact-sheet.png",
+    "initial": "screenshots/day-22-echo-initial.png",
+    "drawer": "screenshots/day-22-echo-drawer.png"
+  },
+  "passed": true
+}
