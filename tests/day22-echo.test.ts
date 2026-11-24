@@ -3,13 +3,16 @@ import * as THREE from 'three/webgpu';
 import {
   APERTURE_HALF,
   CAVITY_HALF,
+  CUBE_OUTER_HALF,
   ECHO_BOUNCE_COUNT,
   GLASS_PANE_HALF,
   MAX_MIRROR_TILT_DEG,
   MAX_MIRROR_TILT_RAD,
   MIRROR_PRESETS,
   computeMirrorPlaneNormals,
+  computeTiltedPlaneEdgeDistances,
   evalBounceTransmittanceRgb,
+  projectScreenDragToMirrorTilt,
   traceCavityRayCpu,
 } from '../src/days/22-echo/optics';
 import {
@@ -21,8 +24,23 @@ import {
   EchoSimulation,
 } from '../src/days/22-echo/physics';
 import {
+  BEZEL_BACK_Z,
+  BEZEL_FRONT_Z,
+  BEZEL_OUTER_HALF,
+  CORNER_BLOCK_HALF,
+  GUSSET_BASE_PLANE,
+  GUSSET_FRONT_PROTRUSION,
+  LEAD_SCREW_MAX_Y,
+  LEAD_SCREW_MIN_Y,
+  MAX_LEAD_SCREW_TRAVEL,
+  RAIL_HALF_W,
+  RAIL_OFFSET,
+  THUMBSCREW_MOUNT_OFFSET,
+  VERNIER_TOP_Y,
   buildEchoCubeAssembly,
+  createHelicalLeadScrewGeometry,
   createKnurledDrumGeometry,
+  createSlottedLockCapGeometry,
 } from '../src/days/22-echo/geometry';
 import { createEchoMaterials } from '../src/days/22-echo/materials';
 
@@ -297,8 +315,247 @@ describe('Day 22 - Echo (Brass-Framed Two-Way Infinity Mirror Cube)', () => {
     expect(mats.infinityMirror.colorNode).toBeTruthy();
     expect(mats.agedBronze.colorNode).toBeTruthy();
     expect(mats.satinBrass.colorNode).toBeTruthy();
+    expect(mats.bezelBrass.colorNode).toBeTruthy();
+    expect(mats.vernierBrass.colorNode).toBeTruthy();
     expect(mats.knurledBrass.colorNode).toBeTruthy();
     expect(mats.bluedSteel.colorNode).toBeTruthy();
     mats.dispose();
+  });
+
+  it('enforces flush corner-block / proud gusset seating, bezel rabbet overlap, and non-detaching helical lead screws', () => {
+    const dummyMat = new THREE.MeshBasicMaterial();
+    const assembly = buildEchoCubeAssembly({
+      agedBronze: dummyMat,
+      satinBrass: dummyMat,
+      knurledBrass: dummyMat,
+      bluedSteel: dummyMat,
+      infinityMirror: dummyMat,
+    });
+    assembly.group.updateMatrixWorld(true);
+
+    // 1. Corner blocks sit strictly flush with CUBE_OUTER_HALF (zero protrusion into gussets)
+    expect(RAIL_OFFSET + CORNER_BLOCK_HALF).toBeCloseTo(CUBE_OUTER_HALF, 6);
+    // Rails stay subtly recessed (0.3 mm) inside corner blocks -> zero coplanar z-fighting
+    expect(RAIL_OFFSET + RAIL_HALF_W).toBeLessThan(CUBE_OUTER_HALF - 0.0002);
+
+    const tmpBox = new THREE.Box3();
+    let cornerCount = 0;
+    let gussetCount = 0;
+    assembly.group.traverse((obj: any) => {
+      if (!obj.isMesh || !obj.material.visible) return;
+      if (obj.name.startsWith('BronzeCorner_')) {
+        cornerCount++;
+        tmpBox.setFromObject(obj);
+        expect(Math.max(Math.abs(tmpBox.min.x), Math.abs(tmpBox.max.x))).toBeLessThanOrEqual(
+          CUBE_OUTER_HALF + 1e-5
+        );
+        expect(Math.max(Math.abs(tmpBox.min.y), Math.abs(tmpBox.max.y))).toBeLessThanOrEqual(
+          CUBE_OUTER_HALF + 1e-5
+        );
+        expect(Math.max(Math.abs(tmpBox.min.z), Math.abs(tmpBox.max.z))).toBeLessThanOrEqual(
+          CUBE_OUTER_HALF + 1e-5
+        );
+      } else if (obj.name.startsWith('Gusset') && !obj.name.includes('_Bolt')) {
+        gussetCount++;
+        tmpBox.setFromObject(obj);
+        const maxExtent = Math.max(
+          Math.abs(tmpBox.min.x),
+          Math.abs(tmpBox.max.x),
+          Math.abs(tmpBox.min.y),
+          Math.abs(tmpBox.max.y),
+          Math.abs(tmpBox.min.z),
+          Math.abs(tmpBox.max.z)
+        );
+        // Gusset front plateau stands cleanly proud of the 0.725 bronze face with zero coplanar overlap
+        expect(maxExtent).toBeCloseTo(GUSSET_BASE_PLANE + GUSSET_FRONT_PROTRUSION, 4);
+      }
+    });
+    expect(cornerCount).toBe(8);
+    expect(gussetCount).toBe(24);
+
+    // 2. Stepped brass bezels overlap watertight over the glass pane and embed inside bronze rail walls
+    expect(BEZEL_BACK_Z).toBeLessThan(GLASS_PANE_HALF - 0.002);
+    expect(BEZEL_FRONT_Z).toBeGreaterThan(GLASS_PANE_HALF + 0.02);
+    expect(BEZEL_OUTER_HALF).toBeGreaterThan(RAIL_OFFSET - RAIL_HALF_W + 0.003);
+    // Orthogonal bezel inner bevel never intersects adjacent bezel back plane
+    expect(APERTURE_HALF + 0.014).toBeLessThanOrEqual(BEZEL_BACK_Z + 1e-6);
+
+    // 3. Helical lead screw remains deeply engaged inside vernier collar across full ±MAX_LEAD_SCREW_TRAVEL
+    //    and never pokes back through the outer bronze rail face into the optical cavity
+    expect(LEAD_SCREW_MIN_Y + MAX_LEAD_SCREW_TRAVEL).toBeLessThan(VERNIER_TOP_Y - 0.015);
+    expect(LEAD_SCREW_MIN_Y - MAX_LEAD_SCREW_TRAVEL).toBeGreaterThan(0.01);
+    expect(THUMBSCREW_MOUNT_OFFSET + (LEAD_SCREW_MIN_Y - MAX_LEAD_SCREW_TRAVEL)).toBeGreaterThan(
+      CUBE_OUTER_HALF + 0.005
+    );
+    expect(LEAD_SCREW_MAX_Y - MAX_LEAD_SCREW_TRAVEL).toBeGreaterThan(0.095);
+
+    // Verify genuine helical asymmetry (radius varies along azimuth phi at a constant axial slice)
+    const screwGeo = createHelicalLeadScrewGeometry();
+    const sPos = screwGeo.attributes.position as THREE.BufferAttribute;
+    let rMinMid = Infinity;
+    let rMaxMid = -Infinity;
+    const midY = (LEAD_SCREW_MIN_Y + LEAD_SCREW_MAX_Y) * 0.5;
+    for (let i = 0; i < sPos.count; i++) {
+      const y = sPos.getY(i);
+      if (Math.abs(y - midY) < 0.002) {
+        const r = Math.hypot(sPos.getX(i), sPos.getZ(i));
+        if (r < rMinMid) rMinMid = r;
+        if (r > rMaxMid) rMaxMid = r;
+      }
+    }
+    expect(rMaxMid - rMinMid).toBeGreaterThan(0.0025);
+
+    const lockCapGeo = createSlottedLockCapGeometry();
+    expect(lockCapGeo.attributes.position.count).toBeGreaterThan(100);
+
+    screwGeo.dispose();
+    lockCapGeo.dispose();
+    assembly.dispose();
+    dummyMat.dispose();
+  });
+
+  it('maintains exact tilted-plane interior edge distances and bounce-0-to-bounce-1 optical parity at ±3.2°', () => {
+    const normals = Array.from({ length: 6 }, () => new THREE.Vector3());
+    computeMirrorPlaneNormals(MAX_MIRROR_TILT_RAD, -MAX_MIRROR_TILT_RAD, normals);
+
+    // Solve exact intersection line point of two adjacent tilted mirror planes (+X wall [0] and +Z wall [4]) at y = 0:
+    //   n0.x * x + n0.z * z = -CAVITY_HALF
+    //   n4.x * x + n4.z * z = -CAVITY_HALF
+    const det = normals[0].x * normals[4].z - normals[0].z * normals[4].x;
+    expect(Math.abs(det)).toBeGreaterThan(0.5);
+    const xEdge = (-CAVITY_HALF * normals[4].z + CAVITY_HALF * normals[0].z) / det;
+    const zEdge = (-normals[0].x * CAVITY_HALF + normals[4].x * CAVITY_HALF) / det;
+    const trueEdgePt = new THREE.Vector3(xEdge, 0, zEdge);
+
+    // Axis-aligned heuristic (`CAVITY_HALF - midW`) suffers > 35 mm seam drift here, whereas exact
+    // tilted-plane distance (`computeTiltedPlaneEdgeDistances`) locks strictly to 0.0!
+    const exact = computeTiltedPlaneEdgeDistances(trueEdgePt, normals);
+    expect(Math.abs(exact.wallDist)).toBeLessThan(1e-5);
+    expect(Math.abs(exact.edgeDist)).toBeLessThan(1e-5);
+    expect(exact.cornerDist).toBeGreaterThan(0.5);
+
+    // Bounce-0 -> Bounce-1 continuity check at grazing incidence across extreme tilt (zero NaN rays)
+    const grazingOrigins = [
+      new THREE.Vector3(0.54, 0.52, GLASS_PANE_HALF),
+      new THREE.Vector3(-0.54, -0.52, GLASS_PANE_HALF),
+      new THREE.Vector3(GLASS_PANE_HALF, 0.48, -0.45),
+    ];
+    const grazingDirs = [
+      new THREE.Vector3(-0.68, -0.52, -0.51).normalize(),
+      new THREE.Vector3(0.71, 0.44, -0.55).normalize(),
+      new THREE.Vector3(-0.35, -0.62, 0.7).normalize(),
+    ];
+
+    for (let idx = 0; idx < grazingOrigins.length; idx++) {
+      const steps = traceCavityRayCpu(
+        grazingOrigins[idx],
+        grazingDirs[idx],
+        MAX_MIRROR_TILT_RAD,
+        -MAX_MIRROR_TILT_RAD,
+        ECHO_BOUNCE_COUNT
+      );
+      expect(steps.length).toBe(ECHO_BOUNCE_COUNT);
+      for (const s of steps) {
+        expect(Number.isFinite(s.hitPoint.x)).toBe(true);
+        expect(Number.isFinite(s.hitPoint.y)).toBe(true);
+        expect(Number.isFinite(s.hitPoint.z)).toBe(true);
+        expect(Math.abs(s.reflectedDir.length() - 1)).toBeLessThan(1e-5);
+        // Every wall hit satisfies exact tilted-plane boundary `wallDist ≈ 0`
+        const d = computeTiltedPlaneEdgeDistances(s.hitPoint, normals);
+        expect(Math.abs(d.wallDist)).toBeLessThan(1e-4);
+      }
+      // Bounce 0 -> Bounce 1 reflection continuity: outgoing bounce-0 direction feeds bounce-1 seamlessly
+      const b0 = steps[0];
+      const b1 = steps[1];
+      const expectedStepVec = b1.hitPoint.clone().sub(b0.hitPoint).normalize();
+      expect(expectedStepVec.dot(b0.reflectedDir)).toBeGreaterThan(0.999);
+    }
+  });
+
+  it('aligns camera-relative mirror-tilt drags continuously across front, rear, side, and top/bottom orbits', () => {
+    const sens = 0.00026;
+    const views: Array<{
+      name: string;
+      forward: THREE.Vector3;
+      right: THREE.Vector3;
+      up: THREE.Vector3;
+      expectRightSignY: 1 | -1;
+      expectUpSignX: 1 | -1;
+    }> = [
+      {
+        name: 'front +Z',
+        forward: new THREE.Vector3(0, 0, -1),
+        right: new THREE.Vector3(1, 0, 0),
+        up: new THREE.Vector3(0, 1, 0),
+        expectRightSignY: 1,
+        expectUpSignX: 1,
+      },
+      {
+        name: 'rear -Z',
+        forward: new THREE.Vector3(0, 0, 1),
+        right: new THREE.Vector3(-1, 0, 0),
+        up: new THREE.Vector3(0, 1, 0),
+        expectRightSignY: -1,
+        expectUpSignX: 1,
+      },
+      {
+        name: 'side +X',
+        forward: new THREE.Vector3(-1, 0, 0),
+        right: new THREE.Vector3(0, 0, -1),
+        up: new THREE.Vector3(0, 1, 0),
+        expectRightSignY: 1,
+        expectUpSignX: -1,
+      },
+      {
+        name: 'side -X',
+        forward: new THREE.Vector3(1, 0, 0),
+        right: new THREE.Vector3(0, 0, 1),
+        up: new THREE.Vector3(0, 1, 0),
+        expectRightSignY: -1,
+        expectUpSignX: -1,
+      },
+      {
+        name: 'top +Y',
+        forward: new THREE.Vector3(0, -1, 0),
+        right: new THREE.Vector3(1, 0, 0),
+        up: new THREE.Vector3(0, 0, -1),
+        expectRightSignY: -1,
+        expectUpSignX: 1,
+      },
+      {
+        name: 'bottom -Y',
+        forward: new THREE.Vector3(0, 1, 0),
+        right: new THREE.Vector3(1, 0, 0),
+        up: new THREE.Vector3(0, 0, 1),
+        expectRightSignY: -1,
+        expectUpSignX: -1,
+      },
+    ];
+
+    for (const v of views) {
+      // Rightward drag (dx = +100, dy = 0)
+      const [dtxR, dtyR] = projectScreenDragToMirrorTilt(100, 0, v.right, v.up, v.forward, sens);
+      expect(dtxR).toBeCloseTo(0, 8);
+      expect(Math.sign(dtyR)).toBe(v.expectRightSignY);
+      expect(Math.abs(dtyR)).toBeGreaterThan(0.015);
+
+      // Upward drag (dx = 0, dy = -100)
+      const [dtxU, dtyU] = projectScreenDragToMirrorTilt(0, -100, v.right, v.up, v.forward, sens);
+      expect(dtyU).toBeCloseTo(0, 8);
+      expect(Math.sign(dtxU)).toBe(v.expectUpSignX);
+      expect(Math.abs(dtxU)).toBeGreaterThan(0.015);
+    }
+
+    // Continuous non-zero response across all 360° orbit azimuths (zero singularities)
+    for (let deg = 0; deg < 360; deg += 15) {
+      const th = (deg * Math.PI) / 180;
+      const forward = new THREE.Vector3(-Math.sin(th), -0.25, -Math.cos(th)).normalize();
+      const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0, 1, 0)).normalize();
+      const up = new THREE.Vector3().crossVectors(right, forward).normalize();
+      const [dtx, dty] = projectScreenDragToMirrorTilt(60, -60, right, up, forward, sens);
+      expect(Number.isFinite(dtx)).toBe(true);
+      expect(Number.isFinite(dty)).toBe(true);
+      expect(Math.hypot(dtx, dty)).toBeGreaterThan(0.004);
+    }
   });
 });

@@ -1,8 +1,12 @@
 import * as THREE from 'three/webgpu';
 import { SpecimenStage } from '../../core/stage/SpecimenStage';
-import { ECHO_BOUNCE_COUNT, MAX_MIRROR_TILT_RAD } from './optics';
+import {
+  ECHO_BOUNCE_COUNT,
+  MAX_MIRROR_TILT_RAD,
+  projectScreenDragToMirrorTilt,
+} from './optics';
 import { EchoSimulation } from './physics';
-import { buildEchoCubeAssembly } from './geometry';
+import { MAX_LEAD_SCREW_TRAVEL, buildEchoCubeAssembly } from './geometry';
 import { createEchoMaterials, createEchoStudioEnvironment } from './materials';
 
 declare global {
@@ -29,9 +33,11 @@ const _localCam = new THREE.Vector3();
 const _invCubeMatrix = new THREE.Matrix4();
 
 /** Micrometer drag sensitivity (radians of mirror plane tilt per CSS pixel dragged). */
-const MIRROR_TILT_DRAG_SENSITIVITY = 0.00024;
-/** Micrometer axial lead-screw travel amplitude at full tilt (±3.2°). */
-const LEAD_SCREW_TRAVEL = 0.008;
+const MIRROR_TILT_DRAG_SENSITIVITY = 0.00026;
+/** Double-click window separating crisp preset cycling from single-click glass pluck (ms). */
+const DOUBLE_CLICK_WINDOW_MS = 260;
+/** Single-click pluck debounce matching the double-click window without sluggishness (ms). */
+const SINGLE_CLICK_PLUCK_DELAY_MS = 200;
 
 async function mountDay22Echo(): Promise<void> {
   const stage = await SpecimenStage.create({
@@ -103,8 +109,17 @@ async function mountDay22Echo(): Promise<void> {
   let prevDragY = 0;
   let pointerDownTime = 0;
   let lastClickTime = 0;
+  let pendingPluckTimer: ReturnType<typeof setTimeout> | null = null;
   let spacePluckToggle = 1;
   const downHitPoint = new THREE.Vector3();
+  const pendingPluckPoint = new THREE.Vector3();
+
+  function clearPendingPluck(): void {
+    if (pendingPluckTimer !== null) {
+      clearTimeout(pendingPluckTimer);
+      pendingPluckTimer = null;
+    }
+  }
 
   function updateNdc(clientX: number, clientY: number): void {
     const rect = canvas.getBoundingClientRect();
@@ -213,11 +228,20 @@ async function mountDay22Echo(): Promise<void> {
       if (isDraggingMirrorTilt) {
         const dx = ev.clientX - prevDragX;
         const dy = ev.clientY - prevDragY;
-        // Continuous monotonic mirror micro-tilt (horizontal drag sweeps tiltY, vertical drag sweeps tiltX)
-        sim.adjustMirrorTilt(
-          dy * MIRROR_TILT_DRAG_SENSITIVITY,
-          dx * MIRROR_TILT_DRAG_SENSITIVITY
+        stage.camera.getWorldDirection(_camForward);
+        _camRight.crossVectors(_camForward, stage.camera.up).normalize();
+        _camUp.crossVectors(_camRight, _camForward).normalize();
+
+        // Continuous camera-relative monotonic mirror micro-tilt across all 6 faces
+        const [dTiltX, dTiltY] = projectScreenDragToMirrorTilt(
+          dx,
+          dy,
+          _camRight,
+          _camUp,
+          _camForward,
+          MIRROR_TILT_DRAG_SENSITIVITY
         );
+        sim.adjustMirrorTilt(dTiltX, dTiltY);
       }
       prevDragX = ev.clientX;
       prevDragY = ev.clientY;
@@ -257,15 +281,21 @@ async function mountDay22Echo(): Promise<void> {
     const isCleanClick = moveDist < 7 && heldMs < 400;
     if (isCleanClick) {
       const now = performance.now();
-      const isDoubleClick = now - lastClickTime < 340;
-      lastClickTime = now;
+      const isDoubleClick = now - lastClickTime < DOUBLE_CLICK_WINDOW_MS;
+      lastClickTime = isDoubleClick ? 0 : now;
 
       if (isDoubleClick) {
+        clearPendingPluck();
         sim.cyclePreset();
-        sim.pluckCore(0.22 * spacePluckToggle, -0.18 * spacePluckToggle);
+        sim.pluckCore(0.2 * spacePluckToggle, -0.16 * spacePluckToggle);
         spacePluckToggle = -spacePluckToggle;
       } else if (downHitType === 'glass' || downHitType === 'frame' || downHitType === 'thumbscrew') {
-        pluckFromScreenHit(downHitPoint);
+        clearPendingPluck();
+        pendingPluckPoint.copy(downHitPoint);
+        pendingPluckTimer = setTimeout(() => {
+          pendingPluckTimer = null;
+          pluckFromScreenHit(pendingPluckPoint);
+        }, SINGLE_CLICK_PLUCK_DELAY_MS);
       }
     }
 
@@ -302,6 +332,7 @@ async function mountDay22Echo(): Promise<void> {
   window.addEventListener('keydown', onKeyDown);
 
   stage.shell.registerDispose(() => {
+    clearPendingPluck();
     canvas.removeEventListener('pointerdown', onPointerDown);
     canvas.removeEventListener('pointermove', onPointerMove);
     canvas.removeEventListener('pointerup', onPointerUp);
@@ -370,7 +401,7 @@ async function mountDay22Echo(): Promise<void> {
     for (let i = 0; i < assembly.thumbscrews.length; i++) {
       const ts = assembly.thumbscrews[i];
       const angle = ts.axis === 'x' ? sim.screwAngleX : sim.screwAngleY;
-      const travel = (ts.axis === 'x' ? normTiltX : normTiltY) * LEAD_SCREW_TRAVEL;
+      const travel = (ts.axis === 'x' ? normTiltX : normTiltY) * MAX_LEAD_SCREW_TRAVEL;
       ts.rotorGroup.rotation.y = angle * ts.sign;
       ts.rotorGroup.position.y = travel * ts.sign;
     }

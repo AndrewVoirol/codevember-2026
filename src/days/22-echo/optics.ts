@@ -119,6 +119,90 @@ export function evalBounceTransmittanceRgb(
   return [Math.pow(stepR, k), Math.pow(stepG, k), Math.pow(stepB, k)];
 }
 
+export interface TiltedPlaneEdgeDistances {
+  /** Signed distance to the nearest mirror plane (0 on a wall hit). */
+  wallDist: number;
+  /** Exact perpendicular distance to the nearest adjacent tilted mirror edge. */
+  edgeDist: number;
+  /** Exact perpendicular distance to the nearest tilted cube corner vertex. */
+  cornerDist: number;
+}
+
+/**
+ * Evaluates the exact signed interior distances from `point` to all 6 tilted mirror planes
+ * `d_k = dot(point, n_k) + CAVITY_HALF` and returns the 3 smallest values `(wallDist, edgeDist, cornerDist)`.
+ *
+ * Matches the TSL fragment raytracer exactly so interior frame rails, corner gussets, and
+ * optical chamfer strips remain strictly seam-locked across all mirror tilts up to ±3.2°.
+ */
+export function computeTiltedPlaneEdgeDistances(
+  point: THREE.Vector3,
+  normals: readonly THREE.Vector3[]
+): TiltedPlaneEdgeDistances {
+  let d1 = 1e6;
+  let d2 = 1e6;
+  let d3 = 1e6;
+
+  for (let k = 0; k < 6; k++) {
+    const dk = point.dot(normals[k]) + CAVITY_HALF;
+    if (dk < d1) {
+      d3 = d2;
+      d2 = d1;
+      d1 = dk;
+    } else if (dk < d2) {
+      d3 = d2;
+      d2 = dk;
+    } else if (dk < d3) {
+      d3 = dk;
+    }
+  }
+
+  return { wallDist: d1, edgeDist: d2, cornerDist: d3 };
+}
+
+/**
+ * Maps screen-space pointer drag deltas `(dx, dy)` (CSS pixels, `+dx` right, `+dy` down)
+ * smoothly into cube-local mirror micro-tilt increments `(dTiltXRad, dTiltYRad)` aligned
+ * with the active camera orbit orientation across all 6 faces with zero quadrant jumps.
+ */
+export function projectScreenDragToMirrorTilt(
+  dx: number,
+  dy: number,
+  camRight: THREE.Vector3,
+  camUp: THREE.Vector3,
+  camForward: THREE.Vector3,
+  sensitivity: number
+): [number, number] {
+  const wx = camForward.x * camForward.x;
+  const wy = camForward.y * camForward.y;
+  const wz = camForward.z * camForward.z;
+
+  // Exact 1st-bounce apparent echo-shift sensitivity vectors in cube-local space:
+  //   J_tx = (0, 2*wz - 0.9*wx, -2*wy)
+  //   J_ty = (2*wz - 0.9*wy, 0, -2*wx)
+  const jtxY = 2.0 * wz - 0.9 * wx;
+  const jtxZ = -2.0 * wy;
+  const jtyX = 2.0 * wz - 0.9 * wy;
+  const jtyZ = -2.0 * wx;
+
+  const sXRaw = jtxY * camUp.y + jtxZ * camUp.z;
+  const sYRaw = jtyX * camRight.x + jtyZ * camRight.z;
+
+  // Smooth C^infinity regularization prevents dead spots at the 45° saddle azimuth while preserving
+  // exact visual corridor steering polarity on all 6 faces (+X, -X, +Y, -Y, +Z, -Z).
+  const sXEff = sXRaw + 0.32 * camUp.y * (1.0 - Math.min(1.0, Math.abs(sXRaw)));
+  const sYEff = sYRaw + 0.32 * camRight.x * (1.0 - Math.min(1.0, Math.abs(sYRaw)));
+
+  const gainX = sXEff / Math.sqrt(sXEff * sXEff + 0.35);
+  const gainY = sYEff / Math.sqrt(sYEff * sYEff + 0.35);
+
+  // Upward screen drag (-dy > 0) bends the visible echo corridor upward;
+  // rightward screen drag (+dx > 0) bends the visible echo corridor rightward.
+  const dTiltXRad = -dy * gainX * sensitivity;
+  const dTiltYRad = dx * gainY * sensitivity;
+  return [dTiltXRad, dTiltYRad];
+}
+
 export interface TracedBounceStep {
   bounce: number;
   wallIndex: number;
