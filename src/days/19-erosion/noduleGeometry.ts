@@ -514,11 +514,11 @@ export function buildNozzleAssembly(materials: NozzleMaterials): NozzleAssembly 
   group.add(hoseMesh);
 
   // 6. Focused High-Velocity Dolomite Abrasive Jet Plume (local z = 0 -> -1, scaled to exact standoff)
-  // Ordered bottom-to-top from z = -1.0 (impact flare radius 0.038) to z = -0.002 (orifice radius 0.0048)
+  // Ordered bottom-to-top from z = -1.0 (impact flare radius 0.044) to z = -0.002 (orifice radius 0.0048)
   const jetProfile = [
-    new THREE.Vector2(0.038, -1.0),
-    new THREE.Vector2(0.021, -0.55),
-    new THREE.Vector2(0.0095, -0.15),
+    new THREE.Vector2(0.044, -1.0),
+    new THREE.Vector2(0.023, -0.55),
+    new THREE.Vector2(0.0098, -0.15),
     new THREE.Vector2(0.0048, -0.002),
   ];
   const jetGeo = new THREE.LatheGeometry(jetProfile, 24);

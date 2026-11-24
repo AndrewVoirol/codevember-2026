@@ -282,8 +282,8 @@ export class AbrasionParticleSystem {
       slot.vrz = this.rng.signed() * 18.0;
 
       slot.size = isSparkRicochet
-        ? 0.0042 + this.rng.next() * 0.0042
-        : 0.0075 + this.rng.next() * 0.0105;
+        ? 0.0038 + this.rng.next() * 0.0038
+        : 0.0044 + this.rng.next() * 0.0066;
       slot.age = 0;
       slot.life = isSparkRicochet
         ? 0.26 + this.rng.next() * 0.26

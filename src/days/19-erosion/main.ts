@@ -199,7 +199,7 @@ async function mountDay19Erosion(): Promise<void> {
       isBlasting = true;
       isOrbiting = false;
       hasPrevBlastDir = false;
-      clickBurstTimer = 0.085;
+      clickBurstTimer = 0.045;
       _lastHitPos.copy(_rayHit.position);
       _lastHitNormal.copy(_rayHit.normal);
       stage.controls.enabled = false;
@@ -336,6 +336,7 @@ async function mountDay19Erosion(): Promise<void> {
     // 1. Active Air-Abrasion Carving FIRST so nozzle jet, spot highlight & particle plumes
     //    bind to the EXACT post-carve live crater floor (zero stale pre-carve lag!)
     let avgFossilRatio = _rayHit.isFossil ? 1.0 : 0.0;
+    let frameCarvedVol = 0;
     if (activeBlastNow) {
       const rdx = _raycaster.ray.direction.x;
       const rdy = _raycaster.ray.direction.y;
@@ -364,6 +365,7 @@ async function mountDay19Erosion(): Promise<void> {
             rdz
           );
           fossilSum += res.hitFossilRatio;
+          frameCarvedVol += res.carvedVolumeDelta;
         }
         avgFossilRatio = fossilSum / subSteps;
       } else {
@@ -372,13 +374,14 @@ async function mountDay19Erosion(): Promise<void> {
           _rayHit.direction.y,
           _rayHit.direction.z,
           dtSec,
-          1.15,
+          1.0,
           undefined,
           rdx,
           rdy,
           rdz
         );
         avgFossilRatio = res.hitFossilRatio;
+        frameCarvedVol += res.carvedVolumeDelta;
       }
 
       _lastBlastDir.copy(_rayHit.direction);
@@ -428,7 +431,7 @@ async function mountDay19Erosion(): Promise<void> {
       nozzleAssembly.jetMesh.visible = false;
     }
 
-    // 3. Emit rebounding dolomite grit & billowing calcite plumes from exact post-carve floor
+    // 3. Emit rebounding dolomite grit & billowing calcite plumes coupled to live stone abrasion
     if (activeBlastNow) {
       materials.uBlastSpotWorld.value.set(
         _lastHitPos.x,
@@ -436,13 +439,17 @@ async function mountDay19Erosion(): Promise<void> {
         _lastHitPos.z,
         nozzleCtrl.jetActiveAlpha
       );
+      const activeAbrasionScale = Math.min(
+        1.15,
+        0.58 + 0.52 * Math.min(1.0, frameCarvedVol / 0.00055) + 0.30 * avgFossilRatio
+      );
       particles.emitBlast(
         _lastHitPos,
         _lastHitNormal,
         nozzleCtrl.aimDir,
         avgFossilRatio,
         dtSec,
-        1.0
+        activeAbrasionScale
       );
     } else {
       materials.uBlastSpotWorld.value.w *= Math.exp(-dtSec * 16.0);

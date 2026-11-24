@@ -23,9 +23,11 @@ export const FOSSIL_CHALK_CLEAR_DEPTH = 0.042;
 /** Zero artificial excavation floor: limestone blasts completely away down to 0 everywhere */
 export const MIN_CORE_FLOOR_RADIUS = 0.0;
 /** Nominal air-abrasive jet cone half-angle on the unit sphere (radians) */
-export const JET_CONE_RADIUS_RAD = 0.185;
+export const JET_CONE_RADIUS_RAD = 0.142;
 /** Consistent minimum 3D world-space jet radius so center umbilicus carves as cleanly as outer rim */
-export const JET_WORLD_MIN_RADIUS = 0.168;
+export const JET_WORLD_MIN_RADIUS = 0.120;
+/** Visual alpha-cutout scale threshold (matched 1:1 with materials.ts rockCutThreshold) */
+export const ROCK_CUTOUT_SCALE = 0.115;
 
 export interface CarveResult {
   carvedVolumeDelta: number;
@@ -50,7 +52,9 @@ const _bVec = new THREE.Vector3();
 const _probeDir = new THREE.Vector3();
 
 function smoothstep(e0: number, e1: number, x: number): number {
-  const t = Math.max(0, Math.min(1, (x - e0) / Math.max(1e-6, e1 - e0)));
+  const span = e1 - e0;
+  if (Math.abs(span) < 1e-8) return x < e0 ? 0 : 1;
+  const t = Math.max(0, Math.min(1, (x - e0) / span));
   return t * t * (3 - 2 * t);
 }
 
@@ -319,10 +323,11 @@ export class ErosionField {
         this.unfracturedRadius[idx] = r;
         const fR = this.fossilRadius[idx];
 
-        // Per-texel strata & spall-plate abrasion resistance (harder ferruginous laminae step cleanly)
+        // Per-texel strata & spall-plate abrasion resistance centered around ~1.0
+        // (harder ferruginous calcareous benches resist ~2x longer than soft ochre marl seams)
         const ironBand = 0.5 + 0.5 * Math.sin(strataCoord * 1.37 + 0.45);
         const plateNoise = fbm3DCpu(dx * 4.4 + 3.1, dy * 4.4 + 7.4, dz * 4.4 - 2.2, 3.0);
-        this.strataHardness[idx] = 0.58 + 0.44 * ironBand * ironBand + (plateNoise - 0.5) * 0.26;
+        this.strataHardness[idx] = 0.78 + 0.48 * ironBand * ironBand + (plateNoise - 0.5) * 0.26;
 
         // Zero artificial excavation floor: limestone can be blasted 100% away down to r = 0
         // across the center umbilicus, inter-whorl valleys, ribs, and outer collar alike,
@@ -532,12 +537,18 @@ export class ErosionField {
     // Physical 3D world-space jet cone radius stays consistent from center umbilicus to outer rim
     const jetWorldR = Math.max(JET_WORLD_MIN_RADIUS, baseAtHit * jetRadiusRad);
     const maxSpreadRad = Math.min(
-      1.38,
-      Math.max(jetRadiusRad * 1.56, Math.atan2(jetWorldR * 1.65, Math.max(0.18, baseAtHit * 0.78)))
+      1.28,
+      Math.max(jetRadiusRad * 1.56, Math.atan2(jetWorldR * 1.62, Math.max(0.18, baseAtHit * 0.78)))
     );
     const cosLimit = Math.max(0.05, Math.cos(maxSpreadRad));
-    // Brisk, tactile 90-PSI air-abrasive stripping rate so sweeps cleanly clear rock down to zero
-    const baseRate = 7.4 * Math.max(0, dtSec) * Math.max(0, intensity);
+    // Progressive, tactile pneumatic micro-abrasion rate (units/sec on mean hardness ~1.0):
+    // brief taps peel weathered rind cleanly, sweeps sculpt stratified furrows onto golden pyrite ribs,
+    // and sustained holds smoothly widen & wear thick outer rim stone all the way down to zero
+    const baseRate = 1.88 * Math.max(0, dtSec) * Math.max(0, intensity);
+    const sax = this.strataAxis.x;
+    const say = this.strataAxis.y;
+    const saz = this.strataAxis.z;
+    const seedPhase = this.strataSeed * 0.37;
 
     let carvedVolumeDelta = 0;
     let touchedTexels = 0;
@@ -579,25 +590,29 @@ export class ErosionField {
         const ry = dy * rRef - hitRefY;
         const rz = dz * rRef - hitRefZ;
         const along = rx * jx + ry * jy + rz * jz;
-        if (along > -0.58 && along < 0.58) {
+        if (along > -0.52 && along < 0.52) {
           const perpSq = Math.max(0, rx * rx + ry * ry + rz * rz - along * along);
-          const axialPen = Math.max(0, Math.abs(along) - 0.22) * 0.85;
+          const axialPen = Math.max(0, Math.abs(along) - 0.20) * 0.85;
           const dWorld = Math.sqrt(perpSq + axialPen * axialPen) / jetWorldR;
           if (dWorld < normWorld) normWorld = dWorld;
         }
 
         const normR = normWorld;
 
-        // Band-limited mineral fracture modulation so pits spall organically along strata seams
-        const hard = this.strataHardness[idx];
+        // Band-limited mineral fracture + live 3D dipping-strata differential hardness:
+        // softer ochre marl seams yield faster while denser calcareous benches briefly resist into stepped terraces
+        const liveStrataCoord = (dx * sax + dy * say + dz * saz) * oldR * STRATA_BASE_FREQ + seedPhase;
+        const liveBedProfile = evalAperiodicStrataProfileCpu(liveStrataCoord);
+        const hard = Math.max(0.55, this.strataHardness[idx] * (1.0 + liveBedProfile * 0.24));
         const microChip = 0.88 + 0.24 * fbm3DCpu(dx * 6.5, dy * 6.5, dz * 6.5, 2.0);
         const effNormR = normR / (0.88 + 0.20 * microChip);
-        if (effNormR >= 1.48) continue;
+        if (effNormR >= 1.44) continue;
 
-        // Smooth SO(3)-invariant 3D abrasive jet cone falloff (naturally bevels crater rims across
-        // 6-7 icosphere edges with ZERO octahedral x=0/y=0 diamond-corner roof ridges!)
+        // Focused Gaussian micro-abrasive core + smooth outer air-wash halo:
+        // center bores cleanly first right under the carbide stream while outer skirt progressively bevels & widens
+        // with zero hard wall-freeze so sustained holds keep eroding smoothly across every time window!
         const coreJet =
-          Math.exp(-effNormR * effNormR * 1.42) * (1.0 - smoothstep(0.64, 1.48, effNormR));
+          Math.exp(-effNormR * effNormR * 2.25) * (1.0 - smoothstep(0.80, 1.44, effNormR));
         if (coreJet <= 1e-4) continue;
 
         const dOmega = this.solidAngle[idx];
@@ -609,22 +624,29 @@ export class ErosionField {
 
         const prevExp = fR > 0 ? this.evalTexelExposure(idx) : 0;
 
-        // Pure SO(3)-invariant C1 conical jet-shoulder bowl wall:
-        //  - Inside the pressurized jet core (`effNormR <= 0.78`), rock blasts 100% down to `0.0`.
-        //  - Across the feathered outer shoulder (`effNormR ∈ [0.78, 1.48]`), the bowl wall tapers
-        //    smoothly across 6-7 equilateral icosphere triangles -> NEVER squeezes into 1-triangle
-        //    radial hairlines even under sustained static hold, with ZERO octahedral 12/3/6/9 creases!
-        const shoulderFrac = smoothstep(0.78, 1.48, effNormR);
-        const jetWallFloor = Math.max(floorR, shoulderFrac * this.unfracturedRadius[idx]);
-        const effectiveFloor = Math.min(oldR, jetWallFloor);
-
         const smoothEnv = this.smoothFossilEnvelope[idx];
-        const rimPace = 0.72 + 0.56 * (this.baseBoulderRadius[idx] / 0.42);
-        const recessFlushBoost =
-          smoothEnv > 0.04 ? 1.0 + 1.15 * smoothstep(0.055, -0.01, oldR - smoothEnv) : 1.0;
-        const cutAmount = (baseRate * coreJet * microChip * rimPace * recessFlushBoost) / hard;
-        let newR = Math.max(effectiveFloor, oldR - cutAmount);
-        if (newR < 0.004 && effectiveFloor < 0.004) {
+        const unfracR = Math.max(1e-4, this.unfracturedRadius[idx]);
+        const cutFrac = Math.max(0, Math.min(1, 1.0 - oldR / unfracR));
+        // Natural physical abrasion profile:
+        //  - Weathered outer crust peels crisply on first contact (`surfaceBoost`)
+        //  - Deep cavity air-cushion gently moderates deep rim penetration (`depthBrake`) so outer
+        //    rims sculpt steadily layer-by-layer instead of blowing off in chunks
+        //  - Localized inter-rib dust flush (`recessFlushBoost`) peaks strictly near the fossil crest
+        //    so stubborn matrix tucked between pyrite ribs clears cleanly without accelerating deep rim cuts
+        const surfaceBoost = 1.0 + 0.08 * (1.0 - smoothstep(0.0, 0.16, cutFrac));
+        const depthBrake = 1.0 - 0.36 * cutFrac * cutFrac;
+        const rimPace = 0.96;
+        let recessFlushBoost = 1.0;
+        if (smoothEnv > 0.04) {
+          const envDist = (oldR - smoothEnv + 0.012) / 0.048;
+          recessFlushBoost = 1.0 + 0.52 * Math.exp(-envDist * envDist);
+        }
+
+        const cutAmount =
+          (baseRate * coreJet * microChip * rimPace * surfaceBoost * depthBrake * recessFlushBoost) /
+          hard;
+        let newR = Math.max(floorR, oldR - cutAmount);
+        if (newR < 0.004 && floorR < 0.004) {
           newR = 0.0;
         }
         const actualDelta = oldR - newR;
@@ -647,14 +669,14 @@ export class ErosionField {
         }
 
         // Smooth rib-free powdery dolomite chalk bloom on actively blasted limestone rims:
-        // relaxes continuously toward a smooth equilibrium target (zero binary 0 <-> 0.75 cliff under sustained holds!)
+        // relaxes continuously toward a smooth equilibrium target (zero binary cliff under sustained holds!)
         const newScale = newR / Math.max(1e-5, this.baseBoulderRadius[idx]);
         const belowFossilClear =
           smoothEnv > 0.04 ? smoothstep(0.02, -0.045, newR - smoothEnv) : 0.0;
-        const thinRimClear = 1.0 - smoothstep(0.20, 0.34, newScale);
+        const thinRimClear = 1.0 - smoothstep(0.12, 0.24, newScale);
         const clearFactor = Math.max(belowFossilClear, thinRimClear);
-        const targetChalk = (actualDelta > 1e-6 ? 0.62 : 0.32) * (1.0 - clearFactor);
-        const chalkRate = Math.min(1.0, coreJet * dtSec * 6.5);
+        const targetChalk = (actualDelta > 1e-6 ? 0.66 : 0.28) * (1.0 - clearFactor);
+        const chalkRate = Math.min(1.0, coreJet * dtSec * 8.0);
         const nextChalk = Math.max(
           0,
           Math.min(0.75, this.freshChalk[idx] + (targetChalk - this.freshChalk[idx]) * chalkRate)
@@ -674,8 +696,8 @@ export class ErosionField {
       }
     }
 
-    // Isolated 1-texel stray sliver cleanup ONLY (erodedNeighbors >= 6):
-    // Zero grid-space slope diffusion -> 100% mathematically free of octahedral x=0/y=0 creases!
+    // Isolated 1-texel invisible sub-cutout dust sliver cleanup ONLY (oldScale < 0.11 & >= 6 zeroed neighbors):
+    // Never snaps visible surviving rock chunks to 0, and uses zero grid-space slope diffusion!
     if (minIx <= maxIx && minIy <= maxIy) {
       const x0 = Math.max(1, minIx - 1);
       const x1 = Math.min(this.inner, maxIx + 1);
@@ -697,17 +719,17 @@ export class ErosionField {
         for (let ix = x0; ix <= x1; ix++) {
           const idx = row + ix;
           const oldScale = this.spallScratch[idx];
-          if (oldScale <= 0) continue;
+          if (oldScale <= 0 || oldScale >= 0.11) continue;
 
           let erodedNeighbors = 0;
-          if (this.spallScratch[idx - 1] <= 0.18) erodedNeighbors++;
-          if (this.spallScratch[idx + 1] <= 0.18) erodedNeighbors++;
-          if (this.spallScratch[idx - this.size] <= 0.18) erodedNeighbors++;
-          if (this.spallScratch[idx + this.size] <= 0.18) erodedNeighbors++;
-          if (this.spallScratch[idx - this.size - 1] <= 0.18) erodedNeighbors++;
-          if (this.spallScratch[idx - this.size + 1] <= 0.18) erodedNeighbors++;
-          if (this.spallScratch[idx + this.size - 1] <= 0.18) erodedNeighbors++;
-          if (this.spallScratch[idx + this.size + 1] <= 0.18) erodedNeighbors++;
+          if (this.spallScratch[idx - 1] <= 0.08) erodedNeighbors++;
+          if (this.spallScratch[idx + 1] <= 0.08) erodedNeighbors++;
+          if (this.spallScratch[idx - this.size] <= 0.08) erodedNeighbors++;
+          if (this.spallScratch[idx + this.size] <= 0.08) erodedNeighbors++;
+          if (this.spallScratch[idx - this.size - 1] <= 0.08) erodedNeighbors++;
+          if (this.spallScratch[idx - this.size + 1] <= 0.08) erodedNeighbors++;
+          if (this.spallScratch[idx + this.size - 1] <= 0.08) erodedNeighbors++;
+          if (this.spallScratch[idx + this.size + 1] <= 0.08) erodedNeighbors++;
 
           if (erodedNeighbors >= 6) {
             const oldR = this.currentRadius[idx];
@@ -985,7 +1007,13 @@ export class ErosionField {
     const r = Math.hypot(px, py, pz);
     if (r < 1e-6) return -1;
     const inv = 1.0 / r;
-    const surfR = this.sampleCombinedRadius(px * inv, py * inv, pz * inv);
+    const dx = px * inv;
+    const dy = py * inv;
+    const dz = pz * inv;
+    const scale = this.sampleGridBilinear(this.deltaRadius, dx, dy, dz);
+    const rMat = scale >= ROCK_CUTOUT_SCALE ? evalBaseBoulderRadiusCpu(dx, dy, dz) * scale : 0;
+    const rFos = this.sampleGridBilinear(this.fossilRadius, dx, dy, dz);
+    const surfR = rFos > rMat ? rFos : rMat;
     return r - surfR;
   }
 

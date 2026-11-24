@@ -734,7 +734,8 @@ describe('Day 19 - Erosion: Pneumatic Air-Abrasion Fossil Prep Nodule', () => {
       }
     }
 
-    // 4. Brisk excavation rate: 1.6s spiral sweep across front unveils > 12% of total 360-deg ammonite
+    // 4. Progressive excavation rate: deliberate 4-pass spiral sweep across front unveils > 12%
+    //    of total 360-deg ammonite smoothly layer-by-layer without chunk blowout
     const cam = new THREE.PerspectiveCamera(35, 1280 / 800, 0.1, 100);
     cam.position.set(0, 0.14, 4.35);
     cam.lookAt(0, 0, 0);
@@ -749,15 +750,17 @@ describe('Day 19 - Erosion: Pneumatic Air-Abrasion Fossil Prep Nodule', () => {
       isFossil: false,
     };
 
-    for (let step = 0; step < 36; step++) {
-      const a = (step / 36) * Math.PI * 4;
-      const rPx = 28 + (step / 36) * 225;
-      const x = 640 + Math.cos(a) * rPx;
-      const y = 400 + Math.sin(a) * rPx * 0.9;
-      ndc.set((x / 1280) * 2 - 1, -(y / 800) * 2 + 1);
-      rc.setFromCamera(ndc, cam);
-      if (field.raycast(rc.ray.origin, rc.ray.direction, hit)) {
-        field.carveAt(hit.direction.x, hit.direction.y, hit.direction.z, 0.045, 1.0);
+    for (let pass = 0; pass < 4; pass++) {
+      for (let step = 0; step < 48; step++) {
+        const a = (step / 48) * Math.PI * 4;
+        const rPx = 28 + (step / 48) * 225;
+        const x = 640 + Math.cos(a) * rPx;
+        const y = 400 + Math.sin(a) * rPx * 0.9;
+        ndc.set((x / 1280) * 2 - 1, -(y / 800) * 2 + 1);
+        rc.setFromCamera(ndc, cam);
+        if (field.raycast(rc.ray.origin, rc.ray.direction, hit)) {
+          field.carveAt(hit.direction.x, hit.direction.y, hit.direction.z, 0.045, 1.0);
+        }
       }
     }
     expect(field.exposedFraction).toBeGreaterThan(0.12);
@@ -906,10 +909,10 @@ describe('Day 19 - Erosion: Pneumatic Air-Abrasion Fossil Prep Nodule', () => {
       ).toBeLessThan(0.01);
     }
 
-    // 2. Sustained multi-angle full excavation across 360-deg Fibonacci directions blasts EVERY
-    //    limestone texel on the entire sphere all the way down to 0 (zero stuck floor anywhere!)
-    const fibN = 260;
-    for (let pass = 0; pass < 3; pass++) {
+    // 2. Sustained multi-angle full excavation across 360-deg Fibonacci directions (sized to the
+    //    focused precision jet cone) blasts EVERY limestone texel on the entire sphere down to 0!
+    const fibN = 480;
+    for (let pass = 0; pass < 11; pass++) {
       for (let i = 0; i < fibN; i++) {
         const z = 1.0 - (2.0 * (i + 0.5)) / fibN;
         const r = Math.sqrt(Math.max(0, 1 - z * z));
@@ -1027,6 +1030,69 @@ describe('Day 19 - Erosion: Pneumatic Air-Abrasion Fossil Prep Nodule', () => {
     expect(Math.abs(scaleAt178 - scaleAt182)).toBeLessThan(0.05);
     // Rib-free chalk rim (previous binary fR flip had max2degChalkJump = 0.783)
     expect(max2degChalkJump).toBeLessThan(0.45);
+
+    field.dispose();
+    ammoniteGeo.dispose();
+  });
+
+  it('erodes limestone progressively layer-by-layer without chunk blowouts, wall freeze, or dead chalk rims', () => {
+    const { geometry: ammoniteGeo } = buildAmmoniteGeometry(220, 30);
+    const field = new ErosionField(ammoniteGeo, 1);
+
+    // 1. Fresh flank steady hold: 50ms tap must peel a crisp shallow dimple (NEVER blow through!),
+    //    bloom powdery dolomite chalk, and keep monotonically carving across 50ms -> 200ms -> 500ms -> 1000ms
+    const fx = -0.605;
+    const fy = -0.195;
+    const fz = 0.772;
+    const flankR0 = field.sampleMatrixRadius(fx, fy, fz);
+
+    let r50 = 0;
+    let chalk50 = 0;
+    let vol50 = 0;
+    let vol200 = 0;
+    let vol500 = 0;
+    let vol1000 = 0;
+    for (let frame = 1; frame <= 60; frame++) {
+      field.carveAt(fx, fy, fz, 1 / 60, 1.0, undefined, -fx, -fy, -fz);
+      if (frame === 3) {
+        r50 = field.sampleMatrixRadius(fx, fy, fz);
+        chalk50 = field.sampleGridBilinear(field.freshChalk, fx, fy, fz);
+        vol50 = field.totalCarvedVolume;
+      } else if (frame === 12) {
+        vol200 = field.totalCarvedVolume;
+      } else if (frame === 30) {
+        vol500 = field.totalCarvedVolume;
+      } else if (frame === 60) {
+        vol1000 = field.totalCarvedVolume;
+      }
+    }
+
+    // 50ms quick tap leaves > 70% of flank thickness intact (no 1-frame chunk blowout!) and blooms chalk
+    expect(flankR0 - r50).toBeGreaterThan(0.03);
+    expect(r50).toBeGreaterThan(flankR0 * 0.70);
+    expect(chalk50).toBeGreaterThan(0.15);
+    // Continuous progressive erosion across every hold window (never freezes at 180ms!)
+    expect(vol200).toBeGreaterThan(vol50 * 2.2);
+    expect(vol500).toBeGreaterThan(vol200 * 1.25);
+    expect(vol1000).toBeGreaterThan(vol500 * 1.12);
+
+    // 2. Outer rim steady hold: 180ms sculpts a deep visible indentation while staying solid stone (no Pac-Man pop!),
+    //    while sustained 1.2s blasting cleanly wears through the rim to zero
+    field.reset(1);
+    const rx = -0.881;
+    const ry = 0.138;
+    const rz = 0.453;
+    const rimR0 = field.sampleMatrixRadius(rx, ry, rz);
+    let rimR180 = 0;
+    for (let frame = 1; frame <= 72; frame++) {
+      field.carveAt(rx, ry, rz, 1 / 60, 1.0, undefined, -rx, -ry, -rz);
+      if (frame === 11) {
+        rimR180 = field.sampleMatrixRadius(rx, ry, rz);
+      }
+    }
+    expect(rimR180).toBeGreaterThan(rimR0 * 0.35);
+    expect(rimR180).toBeLessThan(rimR0 * 0.85);
+    expect(field.sampleMatrixRadius(rx, ry, rz)).toBeLessThan(0.02);
 
     field.dispose();
     ammoniteGeo.dispose();
