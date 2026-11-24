@@ -1,0 +1,46 @@
+{
+  "day": 19,
+  "slug": "19-erosion",
+  "expectedHeader": "Day 19 - Erosion",
+  "domAudit": {
+    "headerText": "Day 19 - Erosion",
+    "bodyBg": "rgb(33, 37, 41)",
+    "drawerCount": 30
+  },
+  "telemetry": {
+    "frameCount": 362,
+    "avgFrameMs": 8.33,
+    "p95FrameMs": 9.4,
+    "sceneState": {
+      "day": 19,
+      "slug": "19-erosion",
+      "headerLabel": "Day 19 - Erosion",
+      "frameCount": 362,
+      "cameraPos": [
+        0,
+        0.1399999999999997,
+        4.35
+      ],
+      "pointerWorld": [
+        0.32591172057008017,
+        -0.25716557467942147,
+        0.008276593208074168
+      ],
+      "pointerSpeed": 0,
+      "pointerDwellSec": 1.9357,
+      "pointerImpulse": 0.0007
+    }
+  },
+  "metrics": {
+    "specimenCoverageRatio": 0.3261,
+    "interactionMad": 2.724
+  },
+  "gpuErrors": [],
+  "gateFailures": [],
+  "artifacts": {
+    "contactSheet": "screenshots/day-19-erosion-contact-sheet.png",
+    "initial": "screenshots/day-19-erosion-initial.png",
+    "drawer": "screenshots/day-19-erosion-drawer.png"
+  },
+  "passed": true
+}

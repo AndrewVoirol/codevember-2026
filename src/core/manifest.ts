@@ -250,12 +250,12 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
   createDay(
     19,
     'Erosion',
-    'upcoming',
-    'wgsl',
+    'complete',
+    'tsl',
+    'boneCalcite',
     'yellowOchre',
-    'burntSienna',
-    'Stratified sandstone mesa block carved in real time by hydraulic raindrop flow and sediment deposition',
-    'Holding the pointer rains pressurized water onto the crest, incising braided canyons and alluvial fans'
+    'Suspended stratified Bone-Calcite and Yellow-Ochre limestone fossil concretion enclosing a ribbed, chambered pyritized ammonite relic prepared in real time by an articulated satin-brass pneumatic air-abrasion micro-nozzle',
+    'Hold and sweep across the limestone nodule to fire the pressurized dolomite-grit stream and strip soft sedimentary strata down to the gleaming pyritized ammonite ribs; drag empty space to orbit 360°; double-click or press Space to re-encrust a fresh nodule'
   ),
   createDay(
     20,
