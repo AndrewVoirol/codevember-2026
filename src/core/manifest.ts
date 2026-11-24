@@ -310,12 +310,12 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
   createDay(
     25,
     'Veil',
-    'upcoming',
+    'complete',
     'tsl-compute',
     'boneCalcite',
-    'lapisUltramarine',
-    'Gossamer silk organza sheet settling in slow air over an unseen sculpted bust with anisotropic sheen',
-    'Pointer lifts and billows the gossamer cloth via XPBD aerodynamic lift before letting it drape anew'
+    'realgarAmber',
+    'Suspended machined dark-iron and satin-brass studio optical slit-lamp collimator with milled cooling fins, diamond-knurled focus drums, and articulating brass aperture blades projecting a razor-thin volumetric light-and-mist veil driven by a live 128x128 incompressible Navier-Stokes vorticity solver, upstream Beer-Lambert light-shaft shadowing, and 8,192 WebGPU-compute sunlit dust motes illuminated exclusively while piercing the beam plane',
+    'Hover or sweep across the suspended light veil to slice dark openings and shed counter-rotating Kelvin-Helmholtz smoke curls that billow and slowly heal; hold and drag across the curtain to carve a deep turbulent channel with bright sheared amber caustic rims; click the overhead brass slit-lamp housing (or press Space) to cycle aperture geometry seamlessly across Flat Planar Curtain, Graceful Curved S-Veil, and Hollow Elliptical Light Cone; drag empty space to orbit 360°'
   ),
   createDay(
     26,
