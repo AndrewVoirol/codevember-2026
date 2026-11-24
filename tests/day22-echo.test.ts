@@ -2,13 +2,43 @@ import { describe, expect, it } from 'vitest';
 import * as THREE from 'three/webgpu';
 import {
   APERTURE_HALF,
+  BULB_BOT_Y,
+  BULB_MAX_R,
+  BULB_TOP_Y,
   CAVITY_HALF,
+  CEILING_ROSETTE_BOT_Y,
+  CEILING_ROSETTE_TOP_Y,
+  CORD_GRIP_BOT_Y,
+  CORD_GRIP_TOP_Y,
+  CORD_SOCKET_ATTACH_Y,
   CUBE_OUTER_HALF,
+  E27_BASE_BOT_Y,
+  E27_BASE_TOP_Y,
   ECHO_BOUNCE_COUNT,
+  FILAMENT_BOT_R,
+  FILAMENT_BOT_Y,
+  FILAMENT_TOP_R,
+  FILAMENT_TOP_Y,
+  FINIAL_TIP_Y,
+  FINIAL_TOP_Y,
+  GLAND_BOT_Y,
+  GLAND_TOP_Y,
   GLASS_PANE_HALF,
+  GROMMET_BOT_Y,
+  GROMMET_TOP_Y,
+  LAMP_BOUND_RADIUS,
   MAX_MIRROR_TILT_DEG,
   MAX_MIRROR_TILT_RAD,
   MIRROR_PRESETS,
+  PRISM_APEX_Y,
+  PRISM_EQUATOR_R,
+  PRISM_TRUNC_Y,
+  SOCKET_CAP_BOT_Y,
+  SOCKET_INSULATOR_BOT_Y,
+  SOCKET_KNURL_BOT_Y,
+  SOCKET_SKIRT_BOT_Y,
+  SOCKET_TOP_Y,
+  SOCKET_VENT_BOT_Y,
   computeMirrorPlaneNormals,
   computeTiltedPlaneEdgeDistances,
   evalBounceTransmittanceRgb,
@@ -38,9 +68,11 @@ import {
   THUMBSCREW_MOUNT_OFFSET,
   VERNIER_TOP_Y,
   buildEchoCubeAssembly,
+  createBraidedCordGeometry,
   createHelicalLeadScrewGeometry,
   createKnurledDrumGeometry,
   createSlottedLockCapGeometry,
+  createSquirrelCageFilamentGeometry,
 } from '../src/days/22-echo/geometry';
 import { createEchoMaterials } from '../src/days/22-echo/materials';
 
@@ -319,6 +351,18 @@ describe('Day 22 - Echo (Brass-Framed Two-Way Infinity Mirror Cube)', () => {
     expect(mats.vernierBrass.colorNode).toBeTruthy();
     expect(mats.knurledBrass.colorNode).toBeTruthy();
     expect(mats.bluedSteel.colorNode).toBeTruthy();
+    expect(mats.ceramicInsulator.colorNode).toBeTruthy();
+    expect(mats.darkCeramic.colorNode).toBeTruthy();
+    expect(mats.braidedCord.colorNode).toBeTruthy();
+    expect(mats.braidedCord.positionNode).toBeTruthy();
+    expect(mats.ventBaffleGlow.emissiveNode).toBeTruthy();
+    expect(mats.edisonFilament.colorNode).toBeTruthy();
+    expect(mats.filamentAura.colorNode).toBeTruthy();
+    expect(mats.amberBulbGlass.colorNode).toBeTruthy();
+    expect(mats.crystalPrismGlass.colorNode).toBeTruthy();
+    expect(mats.infinityMirror.side).toBe(THREE.BackSide);
+    expect(mats.infinityMirrorFront.side).toBe(THREE.FrontSide);
+    expect(mats.infinityMirrorFront.transparent).toBe(true);
     mats.dispose();
   });
 
@@ -557,5 +601,144 @@ describe('Day 22 - Echo (Brass-Framed Two-Way Infinity Mirror Cube)', () => {
       expect(Number.isFinite(dty)).toBe(true);
       expect(Math.hypot(dtx, dty)).toBeGreaterThan(0.004);
     }
+  });
+
+  it('enforces watertight vertical continuity from top bridge & ceiling rosette through braided cord, Edison socket, prism cage, bulb, filament, and finial with Bounce-0/Bounce-1 parity', () => {
+    const dummyMat = new THREE.MeshBasicMaterial();
+    const assembly = buildEchoCubeAssembly({
+      agedBronze: dummyMat,
+      satinBrass: dummyMat,
+      knurledBrass: dummyMat,
+      bluedSteel: dummyMat,
+      infinityMirror: dummyMat,
+    });
+    assembly.group.updateMatrixWorld(true);
+
+    const getBox = (name: string): THREE.Box3 => {
+      const obj = assembly.group.getObjectByName(name);
+      expect(obj, `missing mesh ${name}`).toBeTruthy();
+      return new THREE.Box3().setFromObject(obj!);
+    };
+
+    // 1. Exterior overhead bridge yoke mortises cleanly into -X and +X top bronze rails (`±0.6113`)
+    const bridgeBox = getBox('TopBridgeYokeBar');
+    expect(bridgeBox.min.x).toBeLessThan(-(RAIL_OFFSET - RAIL_HALF_W) - 0.005);
+    expect(bridgeBox.max.x).toBeGreaterThan(RAIL_OFFSET - RAIL_HALF_W + 0.005);
+    expect(bridgeBox.min.y).toBeGreaterThan(GLASS_PANE_HALF);
+
+    // 2. Interior ceiling rosette -> knurled cord-grip -> brass gland -> ceramic grommet -> braided cord: ZERO air gaps!
+    const rosetteBox = getBox('InteriorCeilingRosette');
+    const colletBox = getBox('CeilingCordGripCollet');
+    const glandBox = getBox('CeilingStrainReliefGland');
+    const grommetBox = getBox('CeilingCeramicGrommet');
+    const cordBox = getBox('BraidedPendantCord');
+
+    expect(rosetteBox.max.y).toBeCloseTo(CEILING_ROSETTE_TOP_Y, 4);
+    expect(rosetteBox.max.y).toBeLessThan(GLASS_PANE_HALF); // sits flush inside +Y glass without z-fighting
+    expect(colletBox.max.y).toBeGreaterThan(rosetteBox.min.y + 0.002);
+    expect(glandBox.max.y).toBeGreaterThan(colletBox.min.y + 0.002);
+    expect(grommetBox.max.y).toBeGreaterThan(glandBox.min.y + 0.002);
+    expect(CORE_ANCHOR_Y).toBeGreaterThan(GROMMET_BOT_Y + 0.004);
+    expect(CORE_ANCHOR_Y).toBeLessThan(GROMMET_TOP_Y - 0.004);
+    expect(cordBox.max.y).toBeCloseTo(CORE_ANCHOR_Y, 4);
+
+    // 3. Braided cord bottom -> Edison socket cord-grip nut -> cap -> vent struts -> knurl -> skirt -> insulator -> E27 -> bulb -> prism -> finial
+    const gripNutBox = getBox('EdisonSocketCordGripNut');
+    const capBox = getBox('EdisonSocketCap');
+    const ventBox = getBox('EdisonSocketVentStruts');
+    const knurlBox = getBox('EdisonSocketKnurledCollar');
+    const skirtBox = getBox('EdisonSocketSkirt');
+    const ceramicBox = getBox('EdisonSocketCeramicRing');
+    const e27Box = getBox('EdisonE27ScrewBase');
+    const galleryBox = getBox('PrismGalleryCrown');
+    const prismBox = getBox('OpticalCrystalPrismPanes');
+    const bulbBox = getBox('VintageST64GlassBulb');
+    const stemBox = getBox('BulbGlassPinchStem');
+    const filamentBox = getBox('EdisonSquirrelCageFilament');
+    const finialBox = getBox('PrismBottomDropFinial');
+
+    // Cord bottom embeds >= 8 mm deep inside socket cord-grip nut
+    expect(cordBox.min.y).toBeLessThan(gripNutBox.max.y - 0.008);
+    expect(cordBox.min.y).toBeGreaterThan(gripNutBox.min.y + 0.005);
+
+    // Every adjacent stage strictly overlaps (zero air gaps anywhere down the vertical chain!)
+    expect(gripNutBox.min.y).toBeLessThan(capBox.max.y - 0.002);
+    expect(capBox.min.y).toBeLessThan(ventBox.max.y - 0.001);
+    expect(ventBox.min.y).toBeLessThan(knurlBox.max.y - 0.001);
+    expect(knurlBox.min.y).toBeLessThan(skirtBox.max.y - 0.001);
+    expect(skirtBox.min.y).toBeLessThan(ceramicBox.max.y - 0.001);
+    expect(ceramicBox.min.y).toBeLessThan(e27Box.max.y - 0.002);
+    expect(e27Box.min.y).toBeLessThan(bulbBox.max.y + 0.002);
+    expect(stemBox.max.y).toBeCloseTo(bulbBox.max.y, 3);
+    expect(galleryBox.min.y).toBeLessThan(prismBox.max.y - 0.004);
+    expect(finialBox.max.y).toBeGreaterThan(prismBox.min.y + 0.004);
+
+    // 4. Squirrel-cage filament fits cleanly inside ST64 amber glass bulb, which fits cleanly inside crystal prism
+    expect(filamentBox.min.y).toBeGreaterThan(bulbBox.min.y + 0.03);
+    expect(filamentBox.max.y).toBeLessThan(bulbBox.max.y - 0.04);
+    expect(FILAMENT_BOT_R).toBeLessThan(BULB_MAX_R - 0.015);
+    expect(FILAMENT_TOP_R).toBeLessThan(BULB_MAX_R - 0.02);
+    // Prism face distance at bulb belly y = -0.052 strictly clears BULB_MAX_R
+    const prismFaceAtBelly = (PRISM_EQUATOR_R / Math.SQRT2) * (1 - 0.052 / PRISM_APEX_Y);
+    expect(prismFaceAtBelly).toBeGreaterThan(BULB_MAX_R + 0.008);
+
+    // 5. Thermal attribute `aHeat` on squirrel-cage filament spans cooler anchor tips -> white-hot mid-spans
+    const filGeo = createSquirrelCageFilamentGeometry();
+    const heatAttr = filGeo.attributes.aHeat as THREE.BufferAttribute;
+    expect(heatAttr).toBeDefined();
+    let minHeat = Infinity;
+    let maxHeat = -Infinity;
+    for (let i = 0; i < heatAttr.count; i++) {
+      const h = heatAttr.getX(i);
+      if (h < minHeat) minHeat = h;
+      if (h > maxHeat) maxHeat = h;
+    }
+    expect(minHeat).toBeLessThan(0.25);
+    expect(maxHeat).toBeGreaterThan(0.95);
+
+    // Verify braided cord GPU Hermite attributes (`aCordS` in [0, 1] and `aCordRadial`)
+    const cordGeo = createBraidedCordGeometry();
+    const sAttr = cordGeo.attributes.aCordS as THREE.BufferAttribute;
+    const radAttr = cordGeo.attributes.aCordRadial as THREE.BufferAttribute;
+    expect(sAttr).toBeDefined();
+    expect(radAttr).toBeDefined();
+    expect(sAttr.count).toBeGreaterThan(500);
+
+    // 6. Bounce-0 to Bounce-1..40 optical parity: raytracer bounding sphere LAMP_BOUND_RADIUS strictly
+    //    encloses every single 3D vertex of lampHeadGroup (cord-grip nut, finial tip, paddle switch, equator bosses) with zero clipping!
+    let maxVertexR = 0;
+    const tmpV = new THREE.Vector3();
+    const coreOrigin = new THREE.Vector3(0, CORE_REST_Y, 0);
+    assembly.lampHeadGroup.traverse((obj: any) => {
+      if (!obj.isMesh || !obj.geometry?.attributes?.position) return;
+      const posAttr = obj.geometry.attributes.position as THREE.BufferAttribute;
+      for (let i = 0; i < posAttr.count; i++) {
+        tmpV.fromBufferAttribute(posAttr, i).applyMatrix4(obj.matrixWorld).sub(coreOrigin);
+        const r = tmpV.length();
+        if (r > maxVertexR) maxVertexR = r;
+      }
+    });
+    expect(maxVertexR).toBeGreaterThan(0.31);
+    expect(LAMP_BOUND_RADIUS).toBeGreaterThan(maxVertexR + 0.015);
+
+    // Shared vertical constants stay mutually ordered for Bounce-1..40 analytical raytracer
+    expect(CEILING_ROSETTE_BOT_Y).toBeLessThan(CORD_GRIP_TOP_Y);
+    expect(CORD_GRIP_BOT_Y).toBeLessThan(GLAND_TOP_Y);
+    expect(GLAND_BOT_Y).toBeLessThan(GROMMET_TOP_Y);
+    expect(CORD_SOCKET_ATTACH_Y).toBeLessThan(SOCKET_TOP_Y);
+    expect(SOCKET_CAP_BOT_Y).toBeGreaterThan(SOCKET_VENT_BOT_Y);
+    expect(SOCKET_VENT_BOT_Y).toBeGreaterThan(SOCKET_KNURL_BOT_Y);
+    expect(SOCKET_KNURL_BOT_Y).toBeGreaterThan(SOCKET_SKIRT_BOT_Y);
+    expect(SOCKET_SKIRT_BOT_Y).toBeGreaterThan(SOCKET_INSULATOR_BOT_Y);
+    expect(E27_BASE_TOP_Y).toBeGreaterThan(E27_BASE_BOT_Y);
+    expect(PRISM_TRUNC_Y).toBeGreaterThan(BULB_TOP_Y);
+    expect(FINIAL_TOP_Y).toBeGreaterThan(-PRISM_TRUNC_Y);
+    expect(FILAMENT_TOP_Y).toBeLessThan(BULB_TOP_Y);
+    expect(FILAMENT_BOT_Y).toBeGreaterThan(BULB_BOT_Y);
+
+    filGeo.dispose();
+    cordGeo.dispose();
+    assembly.dispose();
+    dummyMat.dispose();
   });
 });

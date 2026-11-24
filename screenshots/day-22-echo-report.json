@@ -8,32 +8,32 @@
     "drawerCount": 30
   },
   "telemetry": {
-    "frameCount": 352,
-    "avgFrameMs": 10.48,
-    "p95FrameMs": 19.8,
+    "frameCount": 384,
+    "avgFrameMs": 8.33,
+    "p95FrameMs": 9.8,
     "sceneState": {
       "day": 22,
       "slug": "22-echo",
       "headerLabel": "Day 22 - Echo",
-      "frameCount": 352,
+      "frameCount": 384,
       "cameraPos": [
-        2.380000000000002,
-        1.4600000000000009,
-        3.680000000000002
+        2.36,
+        1.1799999999999988,
+        3.74
       ],
       "pointerWorld": [
-        0.3408401632926532,
-        -0.3123745044996431,
-        -0.09056157520436425
+        0.328894245144987,
+        -0.31728003206978683,
+        -0.10149475359757698
       ],
       "pointerSpeed": 0,
-      "pointerDwellSec": 2.1821,
-      "pointerImpulse": 0.0003
+      "pointerDwellSec": 1.9836,
+      "pointerImpulse": 0.0006
     }
   },
   "metrics": {
-    "specimenCoverageRatio": 0.2733,
-    "interactionMad": 4.382
+    "specimenCoverageRatio": 0.273,
+    "interactionMad": 3.692
   },
   "gpuErrors": [],
   "gateFailures": [],

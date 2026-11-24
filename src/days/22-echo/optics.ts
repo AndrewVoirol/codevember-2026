@@ -20,6 +20,56 @@ export const GLASS_PANE_HALF = 0.598;
 /** Clear inner sight aperture framed by the machined satin-brass retaining bezels. */
 export const APERTURE_HALF = 0.58;
 
+/**
+ * Shared horological geometry constants for the suspended Edison prism lamp
+ * (single source of truth ensuring exact Bounce-0 real-3D to Bounce-1..40 raytracer parity).
+ */
+export const CEILING_ROSETTE_TOP_Y = GLASS_PANE_HALF - 0.0005; // 0.5975 (flush against underside of +Y glass)
+export const CEILING_ROSETTE_BOT_Y = 0.566;
+export const CEILING_ROSETTE_RADIUS = 0.092;
+export const CORD_GRIP_TOP_Y = 0.572;
+export const CORD_GRIP_BOT_Y = 0.528;
+export const GLAND_TOP_Y = 0.531;
+export const GLAND_BOT_Y = 0.508;
+export const GROMMET_TOP_Y = 0.511;
+export const GROMMET_BOT_Y = 0.488;
+
+/** Braided textile pendant cord radius & local socket attachment elevation (in lamp head local +Y). */
+export const CORD_RADIUS = 0.0105;
+export const CORD_SOCKET_ATTACH_Y = 0.304;
+
+/** Vintage Edison lamp socket & prism gallery cage dimensions (in lamp head local +Y, 0 = prism center). */
+export const SOCKET_TOP_Y = 0.316;
+export const SOCKET_CAP_BOT_Y = 0.252;
+export const SOCKET_VENT_BOT_Y = 0.224;
+export const SOCKET_KNURL_BOT_Y = 0.198;
+export const SOCKET_SKIRT_BOT_Y = 0.168;
+export const SOCKET_INSULATOR_BOT_Y = 0.152;
+export const E27_BASE_TOP_Y = 0.16;
+export const E27_BASE_BOT_Y = 0.114;
+
+/** Truncated 8-facet optical crystal prism & brass drop finial dimensions. */
+export const PRISM_EQUATOR_R = 0.132;
+export const PRISM_APEX_Y = 0.194;
+export const PRISM_TRUNC_Y = 0.154;
+export const PRISM_SLAB_Y_RATIO = PRISM_EQUATOR_R / PRISM_APEX_Y;
+export const PRISM_SLAB_NORM_INV = 1 / Math.sqrt(2 + PRISM_SLAB_Y_RATIO * PRISM_SLAB_Y_RATIO);
+export const PRISM_HALF_D = PRISM_EQUATOR_R * PRISM_SLAB_NORM_INV;
+export const FINIAL_TOP_Y = -0.148;
+export const FINIAL_TIP_Y = -0.242;
+
+/** Hand-blown ST64 Edison bulb envelope & 6-loop squirrel-cage filament bounds (local +Y). */
+export const BULB_TOP_Y = 0.118;
+export const BULB_BOT_Y = -0.116;
+export const BULB_MAX_R = 0.056;
+export const FILAMENT_TOP_Y = 0.058;
+export const FILAMENT_BOT_Y = -0.066;
+export const FILAMENT_TOP_R = 0.026;
+export const FILAMENT_BOT_R = 0.035;
+export const FILAMENT_LOOPS = 6;
+/** Bounding sphere radius around `corePos` enclosing socket, cord-grip nut, prism cage, and finial. */
+export const LAMP_BOUND_RADIUS = 0.34;
+
 /** Total interior reflection bounces evaluated per fragment inside the two-way mirror cube. */
 export const ECHO_BOUNCE_COUNT = 40;
 

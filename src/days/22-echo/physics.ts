@@ -1,6 +1,5 @@
 import * as THREE from 'three/webgpu';
 import {
-  CAVITY_HALF,
   MAX_MIRROR_TILT_RAD,
   MIRROR_PRESETS,
   computeMirrorPlaneNormals,
@@ -9,16 +8,16 @@ import {
 const DEG_TO_RAD = Math.PI / 180;
 const RAD_TO_DEG = 180 / Math.PI;
 
-/** Top interior brass ceiling suspension anchor Y coordinate. */
-export const CORE_ANCHOR_Y = CAVITY_HALF - 0.014;
-/** Taut brass suspension wire length so core rests dead-center at y = -0.02. */
-export const CORE_WIRE_LENGTH = 0.674;
-/** Resting Y coordinate of the suspended amber filament & calcite prism core. */
+/** Top interior brass ceiling suspension anchor Y coordinate (buried 8 mm inside ceramic grommet [0.488, 0.511]). */
+export const CORE_ANCHOR_Y = 0.496;
+/** Braided pendant cord + socket pendulum pivot-to-core length so prism rests cleanly centered at y = -0.060. */
+export const CORE_WIRE_LENGTH = 0.556;
+/** Resting Y coordinate of the suspended Edison bulb & crystal prism center. */
 export const CORE_REST_Y = CORE_ANCHOR_Y - CORE_WIRE_LENGTH;
 /** Gravitational acceleration constant for the suspended interior pendulum. */
 export const CORE_GRAVITY = 4.4;
-/** Maximum pendulum swing angle (radians) keeping safe clearance from all 6 mirror panes. */
-export const CORE_MAX_ANGLE_RAD = 0.54;
+/** Maximum pendulum swing angle (radians) keeping generous clearance from all 6 mirror panes. */
+export const CORE_MAX_ANGLE_RAD = 0.46;
 /** Micrometer screw gear ratio (radians of thumbscrew twist per radian of mirror tilt). */
 export const THUMBSCREW_GEAR_RATIO = 28.0;
 

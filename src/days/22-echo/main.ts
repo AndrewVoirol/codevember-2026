@@ -1,5 +1,6 @@
 import * as THREE from 'three/webgpu';
 import { SpecimenStage } from '../../core/stage/SpecimenStage';
+import { MINERAL_PALETTE } from '../../core/palette';
 import {
   ECHO_BOUNCE_COUNT,
   MAX_MIRROR_TILT_RAD,
@@ -16,6 +17,8 @@ declare global {
         mirrorTiltDeg: [number, number];
         corePos: [number, number, number];
         coreVel: [number, number, number];
+        coreAxis: [number, number, number];
+        coreSpin: number;
         bounceCount: number;
         presetIndex: number;
       };
@@ -31,6 +34,13 @@ const _camUp = new THREE.Vector3();
 const _camForward = new THREE.Vector3();
 const _localCam = new THREE.Vector3();
 const _invCubeMatrix = new THREE.Matrix4();
+const _zRef = new THREE.Vector3(0, 0, 1);
+const _cU0 = new THREE.Vector3();
+const _cV0 = new THREE.Vector3();
+const _cU = new THREE.Vector3();
+const _cV = new THREE.Vector3();
+const _negCV = new THREE.Vector3();
+const _lampBasisMat = new THREE.Matrix4();
 
 /** Micrometer drag sensitivity (radians of mirror plane tilt per CSS pixel dragged). */
 const MIRROR_TILT_DRAG_SENSITIVITY = 0.00026;
@@ -42,14 +52,14 @@ const SINGLE_CLICK_PLUCK_DELAY_MS = 200;
 async function mountDay22Echo(): Promise<void> {
   const stage = await SpecimenStage.create({
     day: 22,
-    cameraPosition: [2.38, 1.46, 3.68],
+    cameraPosition: [2.36, 1.18, 3.74],
     fov: 34,
     enableOrbit: true,
     enableShadows: true,
   });
 
   stage.controls.target.set(0, -0.07, 0);
-  stage.controls.minDistance = 2.55;
+  stage.controls.minDistance = 1.8;
   stage.controls.maxDistance = 8.4;
   stage.controls.minPolarAngle = 0.06;
   stage.controls.maxPolarAngle = Math.PI - 0.06;
@@ -95,6 +105,26 @@ async function mountDay22Echo(): Promise<void> {
   const materials = createEchoMaterials();
   const assembly = buildEchoCubeAssembly(materials);
   stage.specimenGroup.add(assembly.group);
+
+  // Subtle incandescent warm filament point light nested inside the swinging Edison bulb
+  // so the brass socket, E27 screw threads, spider gallery claws, edge-came ribs, bottom finial,
+  // braided cloth cord, and ceiling rosette receive real warm amber light as the lamp swings!
+  const filamentLightColor = new THREE.Color(
+    MINERAL_PALETTE.realgarAmber.rInfLinear[0],
+    MINERAL_PALETTE.realgarAmber.rInfLinear[1],
+    MINERAL_PALETTE.realgarAmber.rInfLinear[2]
+  ).lerp(
+    new THREE.Color(
+      MINERAL_PALETTE.boneCalcite.rInfLinear[0],
+      MINERAL_PALETTE.boneCalcite.rInfLinear[1],
+      MINERAL_PALETTE.boneCalcite.rInfLinear[2]
+    ),
+    0.34
+  );
+  const filamentLight = new THREE.PointLight(filamentLightColor, 0.78, 1.05, 2.0);
+  filamentLight.position.set(0, 0.01, 0);
+  filamentLight.castShadow = false;
+  assembly.lampHeadGroup.add(filamentLight);
 
   // Tactile pointer state (empty space -> 360° orbit; cube/thumbscrew/Shift drag -> mirror tilt;
   // click glass -> pluck suspended core; double-click -> snap/cycle canonical mirror presets)
@@ -360,6 +390,12 @@ async function mountDay22Echo(): Promise<void> {
           Number(sim.coreVel.y.toFixed(4)),
           Number(sim.coreVel.z.toFixed(4)),
         ],
+        coreAxis: [
+          Number(sim.coreAxis.x.toFixed(4)),
+          Number(sim.coreAxis.y.toFixed(4)),
+          Number(sim.coreAxis.z.toFixed(4)),
+        ],
+        coreSpin: Number(sim.coreSpinAngle.toFixed(4)),
         bounceCount: ECHO_BOUNCE_COUNT,
         presetIndex: sim.presetIndex,
       };
@@ -369,6 +405,19 @@ async function mountDay22Echo(): Promise<void> {
   // Main animation tick (strictly zero per-frame allocations)
   stage.onTick(({ dtSec, elapsedSec, camera }) => {
     sim.step(dtSec);
+
+    // Sync real 3D swinging Edison Prism Lamp Head transform to match the exact raytracer (cU, cV, cW) basis
+    _cU0.crossVectors(_zRef, sim.coreAxis).normalize();
+    _cV0.crossVectors(sim.coreAxis, _cU0);
+    const cosSpin = Math.cos(sim.coreSpinAngle);
+    const sinSpin = Math.sin(sim.coreSpinAngle);
+    _cU.copy(_cU0).multiplyScalar(cosSpin).addScaledVector(_cV0, sinSpin);
+    _cV.copy(_cV0).multiplyScalar(cosSpin).addScaledVector(_cU0, -sinSpin);
+    _negCV.copy(_cV).negate();
+    _lampBasisMat.makeBasis(_cU, sim.coreAxis, _negCV);
+    assembly.lampHeadGroup.position.copy(sim.corePos);
+    assembly.lampHeadGroup.quaternion.setFromRotationMatrix(_lampBasisMat);
+    filamentLight.intensity = 0.78 * (1.0 + Math.sin(elapsedSec * 4.2) * 0.03 + sim.pluckFlash * 0.55);
 
     // Transform active camera into cube local space for exact 6-face raytracing
     assembly.group.updateMatrixWorld();
