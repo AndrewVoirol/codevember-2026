@@ -350,12 +350,12 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
   createDay(
     29,
     'Portal',
-    'upcoming',
+    'complete',
     'tsl',
     'lapisUltramarine',
-    'verdigrisMalachite',
-    'Suspended obsidian ring framing a non-Euclidean stencil/raymarched aperture into an inverted mineral vault',
-    'Orbiting around the thin ring reveals an interior space larger than the exterior room'
+    'yellowOchre',
+    'Suspended chamfered dark-basalt and machined satin-brass architectural cube with stacked ashlar piers, beveled arched stone spandrels, recessed brass window casings, corner joinery brackets, and cap/base brass compass-rose inlays enclosing four distinct camera-parallax WebGPU TSL SDF worlds sharing one 1.5-unit interior: a sunlit Bone-Calcite travertine colonnade (+Z), a plunging Lapis-Ultramarine cantilevered spiral stairwell (+X), a vaulted Verdigris cistern with a swaying Realgar-Amber lantern over rippling dark water (-Z), and a layered Burnt-Sienna desert slot-canyon rock arch (-X)',
+    'Drag anywhere to orbit 360° (including full vertical pitch to peer down the Lapis spiral stairwell or up at vaulted stone arches) and cross-cut two incompatible full-scale worlds along every 45° basalt-and-brass corner; hover any arched aperture to shift sunlight beams, subterranean depth glow, or cistern water ripples; click any portal face or scroll to dolly right up to the arched stone threshold (click again or scroll out to pull back); double-click or press Space to step 90° around the four worlds'
   ),
   createDay(
     30,
