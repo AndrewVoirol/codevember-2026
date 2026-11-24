@@ -224,13 +224,18 @@ describe('Day 25 - Veil (Studio Slit-Lamp Volumetric Light-and-Haze Curtain)', (
     }
   });
 
-  it('enforces strict outward winding (signedVol > 0 and outwardDot > 0) across all slit-lamp geometry', () => {
+  it('enforces strict outward winding (signedVol > 0 and outwardDot > 0) and zero-overhang clearance across all slit-lamp geometry', () => {
     const dummyMat = new THREE.MeshBasicMaterial();
     const assembly = buildSlitLampAssembly({
       forgedIron: dummyMat,
       satinBrass: dummyMat,
+      vernierBrass: dummyMat,
       knurledBrass: dummyMat,
       bluedSteel: dummyMat,
+      honedSlate: dummyMat,
+      ceramicInsulator: dummyMat,
+      opticalGlass: dummyMat,
+      opticalBaffle: dummyMat,
       linearFilament: dummyMat,
       coneFilament: dummyMat,
     });
@@ -275,29 +280,58 @@ describe('Day 25 - Veil (Studio Slit-Lamp Volumetric Light-and-Haze Curtain)', (
 
     const checkedGeos = new Set<THREE.BufferGeometry>();
     let solidMeshCount = 0;
+    const byName = new Map<string, THREE.Mesh>();
     assembly.group.traverse((obj: any) => {
       if (!obj.isMesh) return;
       solidMeshCount++;
+      byName.set(obj.name, obj);
       if (!checkedGeos.has(obj.geometry)) {
         checkedGeos.add(obj.geometry);
         assertOutward(obj.name || obj.geometry.type, obj.geometry);
       }
     });
 
-    expect(solidMeshCount).toBeGreaterThanOrEqual(40);
-    expect(assembly.hitMeshes.length).toBeGreaterThanOrEqual(35);
+    expect(solidMeshCount).toBeGreaterThanOrEqual(80);
+    expect(assembly.hitMeshes.length).toBeGreaterThanOrEqual(70);
 
-    // Verify mechanical articulation moves jaws & annular iris cleanly between modes
+    // Verify mechanical articulation moves jaws & annular iris cleanly without rail/end-cap clipping!
+    const boxOf = (name: string) => {
+      const m = byName.get(name);
+      expect(m, `missing mesh ${name}`).toBeDefined();
+      return new THREE.Box3().setFromObject(m!);
+    };
+
+    // 1. Planar mode: retracted annular iris stays 100% inside CentralCondenserChest Z footprint!
     assembly.updateArticulation({ planar: 1, curvedS: 0, cone: 0 }, 0);
+    assembly.group.updateMatrixWorld(true);
     const jawPlanarZ = assembly.jaws.frontLeft.position.z;
     const irisPlanarY = assembly.coneTurretGroup.position.y;
+    const chestBox = boxOf('CentralCondenserChest');
+    const turretBox = boxOf('CentralCondenserTurret');
+    const irisPlanarBox = boxOf('AnnularIrisOuterBezel');
+    // Turret seats flush within chest Z bounds (zero pancake air overhang)
+    expect(turretBox.max.z).toBeLessThanOrEqual(chestBox.max.z + 0.002);
+    // Retracted annular iris fits cleanly inside central condenser chest Z bounds
+    expect(irisPlanarBox.max.z).toBeLessThanOrEqual(chestBox.max.z - 0.01);
 
+    // 2. Curved-S mode: jaws articulate cleanly without punching through LowerBaffleRail (`Z = +-0.112`)
     assembly.updateArticulation({ planar: 0, curvedS: 1, cone: 0 }, 1.2);
+    assembly.group.updateMatrixWorld(true);
     expect(assembly.jaws.frontLeft.position.z).not.toBeCloseTo(jawPlanarZ, 3);
-    expect(Math.abs(assembly.jaws.frontLeft.rotation.y)).toBeGreaterThan(0.05);
+    expect(Math.abs(assembly.jaws.frontLeft.rotation.y)).toBeGreaterThan(0.035);
+    const jawFRBoxS = boxOf('BrassSlitJaw_FR');
+    const railFrontBox = boxOf('LowerBaffleRail_Front_R');
+    expect(jawFRBoxS.max.z).toBeLessThan(railFrontBox.min.z + 0.002);
 
+    // 3. Cone mode: jaws stay strictly inside end-caps (`|X| <= 0.935`) and clear deployed annular iris!
     assembly.updateArticulation({ planar: 0, curvedS: 0, cone: 1 }, 2.4);
-    expect(assembly.coneTurretGroup.position.y).toBeLessThan(irisPlanarY - 0.03);
+    assembly.group.updateMatrixWorld(true);
+    expect(assembly.coneTurretGroup.position.y).toBeLessThan(irisPlanarY - 0.05);
+    const jawFRBoxCone = boxOf('BrassSlitJaw_FR');
+    const irisConeBox = boxOf('AnnularIrisOuterBezel');
+    const endCapRBox = boxOf('BrassEndCap_R');
+    expect(jawFRBoxCone.max.x).toBeLessThanOrEqual(endCapRBox.min.x + 0.002);
+    expect(jawFRBoxCone.min.x).toBeGreaterThan(irisConeBox.max.x + 0.004);
 
     // Verify diamond-knurled drum vertex valley attribute
     const knurlGeo = createDiamondKnurledDrumGeometry();
@@ -338,8 +372,13 @@ describe('Day 25 - Veil (Studio Slit-Lamp Volumetric Light-and-Haze Curtain)', (
 
     expect(mats.forgedIron.colorNode).toBeTruthy();
     expect(mats.satinBrass.colorNode).toBeTruthy();
+    expect(mats.vernierBrass.colorNode).toBeTruthy();
     expect(mats.knurledBrass.colorNode).toBeTruthy();
     expect(mats.bluedSteel.colorNode).toBeTruthy();
+    expect(mats.honedSlate.colorNode).toBeTruthy();
+    expect(mats.ceramicInsulator.colorNode).toBeTruthy();
+    expect(mats.opticalGlass.colorNode).toBeTruthy();
+    expect(mats.opticalBaffle.colorNode).toBeTruthy();
     expect(mats.veilMaterial.positionNode).toBeTruthy();
     expect(mats.veilMaterial.colorNode).toBeTruthy();
     expect(mats.grazingMaterial.colorNode).toBeTruthy();

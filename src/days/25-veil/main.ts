@@ -29,9 +29,12 @@ declare global {
   }
 }
 
-// Pre-allocated zero-GC scratch objects for pointer raycasting
+// Pre-allocated zero-GC scratch objects for pointer raycasting & cursor-focused zoom
 const _raycaster = new THREE.Raycaster();
 const _ndc = new THREE.Vector2();
+const _lampHitPt = new THREE.Vector3();
+const _desiredTarget = new THREE.Vector3(0, 0.04, 0);
+const _defaultTarget = new THREE.Vector3(0, 0.04, 0);
 const _veilHit: VeilRayHit = {
   u: 0.5,
   v: 0.5,
@@ -49,10 +52,11 @@ const _veilHit: VeilRayHit = {
  *     counter-rotating Kelvin-Helmholtz smoke curls that billow and slowly heal.
  *   - Hold & drag across the curtain -> carves a deep dark turbulent channel with sheared
  *     golden caustic rims and entrained swirling dust motes.
- *   - Click the machined overhead brass slit-lamp housing (or press Space) -> seamlessly
+ *   - Click the machined overhead brass & iron slit-lamp housing (or press Space) -> seamlessly
  *     cycles aperture geometry between Flat Planar Curtain, Graceful Curved S-Veil, and
- *     Hollow Elliptical Light Cone while physically articulating the brass slit jaws.
- *   - Drag empty Chalky Slate space -> orbits smoothly 360° around the razor-thin light veil.
+ *     Hollow Elliptical Light Cone while physically articulating the brass slit jaws & vernier drums.
+ *   - Scroll to zoom right up to the lamp hardware (cursor-focused when hovering the projector)
+ *     and drag empty Chalky Slate space to orbit 360° (right-drag pans; double-click resets view).
  */
 export async function bootDay25Veil(): Promise<SpecimenStage> {
   const stage = await SpecimenStage.create({
@@ -63,45 +67,53 @@ export async function bootDay25Veil(): Promise<SpecimenStage> {
     enableShadows: true,
   });
 
-  stage.controls.target.set(0, 0.04, 0);
-  stage.controls.minDistance = 2.4;
+  // Allow crisp millimeter-range macro zoom-in on the slit-lamp metalwork & stone inlays
+  stage.camera.near = 0.04;
+  stage.camera.updateProjectionMatrix();
+
+  stage.controls.target.copy(_defaultTarget);
+  stage.controls.enablePan = true;
+  stage.controls.screenSpacePanning = true;
+  stage.controls.minDistance = 0.72;
   stage.controls.maxDistance = 8.8;
-  stage.controls.minPolarAngle = 0.08;
-  stage.controls.maxPolarAngle = Math.PI - 0.08;
+  stage.controls.minPolarAngle = 0.06;
+  stage.controls.maxPolarAngle = Math.PI - 0.06;
   stage.controls.update();
 
-  // Studio softbox PMREM IBL so dark forged iron & satin brass read crisp on #212529
+  // Enveloping studio cyclorama + 7-scrim PMREM IBL so gunmetal iron, brushed & engraved brass,
+  // honed dark slate, glazed steatite ceramic, and blued steel read crisply at every zoom level
   const studioEnv = createVeilStudioEnvironment(stage.renderer);
   stage.scene.environment = studioEnv.texture;
-  stage.scene.environmentIntensity = 1.22;
+  stage.scene.environmentIntensity = 1.24;
 
-  // Harmonize studio lights & tighten shadow frustum around the overhead brass slit-lamp
+  // Harmonize studio lights & sharpen 2048x2048 shadow map tightly around the overhead slit-lamp
   let dirLightIdx = 0;
   for (const child of stage.scene.children) {
     if (child instanceof THREE.DirectionalLight) {
       if (dirLightIdx === 0) {
-        child.position.set(-2.5, 4.4, 3.6);
-        child.intensity = 1.65;
-        child.shadow.mapSize.set(1024, 1024);
-        const d = 1.8;
+        child.position.set(-2.4, 4.5, 3.6);
+        child.intensity = 1.72;
+        child.shadow.mapSize.set(2048, 2048);
+        const d = 1.45;
         child.shadow.camera.left = -d;
         child.shadow.camera.right = d;
         child.shadow.camera.top = d;
         child.shadow.camera.bottom = -d;
         child.shadow.camera.near = 0.8;
-        child.shadow.camera.far = 11.0;
-        child.shadow.bias = -0.0003;
+        child.shadow.camera.far = 10.5;
+        child.shadow.bias = -0.00022;
+        child.shadow.normalBias = 0.008;
         child.shadow.camera.updateProjectionMatrix();
       } else if (dirLightIdx === 1) {
-        child.position.set(3.6, 1.4, 2.4);
-        child.intensity = 0.62;
+        child.position.set(3.6, 1.5, 2.5);
+        child.intensity = 0.68;
       } else if (dirLightIdx === 2) {
-        child.position.set(-1.2, 3.2, -3.8);
-        child.intensity = 1.38;
+        child.position.set(-1.2, 3.4, -3.8);
+        child.intensity = 1.42;
       }
       dirLightIdx++;
     } else if (child instanceof THREE.HemisphereLight) {
-      child.intensity = 0.52;
+      child.intensity = 0.56;
     }
   }
 
@@ -110,7 +122,7 @@ export async function bootDay25Veil(): Promise<SpecimenStage> {
   const aperture = new ApertureModeController('planar');
   const materials = createVeilMaterials(fluid.dataTexture);
 
-  // 1. Machined Overhead Brass & Dark-Iron Optical Slit-Lamp Housing
+  // 1. Machined Overhead Brass, Iron & Slate Optical Slit-Lamp Housing
   const slitLamp = buildSlitLampAssembly(materials);
   slitLamp.group.renderOrder = 0;
   stage.specimenGroup.add(slitLamp.group);
@@ -123,7 +135,7 @@ export async function bootDay25Veil(): Promise<SpecimenStage> {
   veilMesh.renderOrder = 2;
   stage.specimenGroup.add(veilMesh);
 
-  // 3. Grazing Cross-Section Edge Ribbon (preserves beam cross-section at 90° side profile)
+  // 3. Grazing Cross-Section Edge Ribbon (preserves beam cross-section at 90 deg side profile)
   const grazingGeo = buildGrazingCrossSectionGeometry(48);
   const grazingMesh = new THREE.Mesh(grazingGeo, materials.grazingMaterial);
   grazingMesh.name = 'GrazingBeamCrossSection';
@@ -136,7 +148,7 @@ export async function bootDay25Veil(): Promise<SpecimenStage> {
   stage.specimenGroup.add(motes.sprite);
   motes.runInit(stage.renderer);
 
-  // Pointer & keyboard interaction state
+  // Pointer, zoom-focus & keyboard interaction state
   const canvas = stage.shell.canvas;
   const bootTimeMs = performance.now();
   let hoverUnlocked = false;
@@ -144,12 +156,16 @@ export async function bootDay25Veil(): Promise<SpecimenStage> {
   let firstPointerY = NaN;
 
   let hoveredTarget: 'none' | 'lamp' | 'veil' = 'none';
+  let hasLampHit = false;
   let downTarget: 'none' | 'lamp' | 'veil' | 'space' = 'none';
   let isSlicingVeil = false;
   let activePointerId: number | null = null;
   let downX = 0;
   let downY = 0;
   let downTimeMs = 0;
+
+  // Smooth zoom-focus target glide (only active during wheel zoom toward lamp or double-click reset)
+  let focusGlideStrength = 0;
 
   let hasPrevVeilHit = false;
   let prevVeilU = 0.5;
@@ -170,7 +186,13 @@ export async function bootDay25Veil(): Promise<SpecimenStage> {
   const raycastLamp = (): boolean => {
     _raycaster.setFromCamera(_ndc, stage.camera);
     const hits = _raycaster.intersectObjects(slitLamp.hitMeshes, false);
-    return hits.length > 0;
+    if (hits.length > 0) {
+      _lampHitPt.copy(hits[0].point);
+      hasLampHit = true;
+      return true;
+    }
+    hasLampHit = false;
+    return false;
   };
 
   const raycastVeil = (): boolean => {
@@ -208,7 +230,6 @@ export async function bootDay25Veil(): Promise<SpecimenStage> {
         );
       }
     } else if (isDrag) {
-      // Initial press directly onto the veil parts a crisp localized swirling dimple
       fluid.injectPointerSweep(
         _veilHit.u,
         _veilHit.v,
@@ -237,7 +258,11 @@ export async function bootDay25Veil(): Promise<SpecimenStage> {
   };
 
   const onPointerDown = (ev: PointerEvent): void => {
-    if (ev.button !== 0) return;
+    if (ev.button !== 0) {
+      // Right-click / middle-click pan overrides any automatic target glide
+      focusGlideStrength = 0;
+      return;
+    }
     hoverUnlocked = true;
     downX = ev.clientX;
     downY = ev.clientY;
@@ -300,7 +325,6 @@ export async function bootDay25Veil(): Promise<SpecimenStage> {
       return;
     }
 
-    // Do not disturb the mist while orbiting empty space
     if (ev.buttons !== 0) {
       hasPrevVeilHit = false;
       return;
@@ -361,6 +385,44 @@ export async function bootDay25Veil(): Promise<SpecimenStage> {
     hasPrevVeilHit = false;
   };
 
+  /**
+   * Cursor-aware zoom focus:
+   *  - Scrolling IN (`deltaY < 0`) while hovering the slit-lamp (or upper studio half) smoothly
+   *    steers the orbit target onto the hovered lamp point so zooming in frames the brass, iron,
+   *    slate & vernier hardware directly instead of clipping the projector off the top edge!
+   *  - Scrolling OUT (`deltaY > 0`) gently returns focus toward the full-specimen center `(0, 0.04, 0)`.
+   */
+  const onWheel = (ev: WheelEvent): void => {
+    if (!updateNdc(ev.clientX, ev.clientY)) return;
+    if (ev.deltaY < 0) {
+      if (raycastLamp() && hasLampHit) {
+        _desiredTarget.set(
+          Math.max(-0.98, Math.min(0.98, _lampHitPt.x)),
+          Math.max(1.14, Math.min(1.52, _lampHitPt.y)),
+          Math.max(-0.22, Math.min(0.22, _lampHitPt.z))
+        );
+        focusGlideStrength = 1.0;
+      } else if (_ndc.y > 0.24) {
+        // Upper-third zoom gesture aims naturally toward the overhead projector centerpiece
+        _desiredTarget.set(Math.max(-0.85, Math.min(0.85, _ndc.x * 1.1)), 1.34, 0);
+        focusGlideStrength = 0.85;
+      }
+    } else if (ev.deltaY > 0) {
+      const dist = stage.camera.position.distanceTo(stage.controls.target);
+      if (dist > 3.2) {
+        _desiredTarget.copy(_defaultTarget);
+        focusGlideStrength = 0.85;
+      }
+    }
+  };
+
+  const onDoubleClick = (ev: MouseEvent): void => {
+    if (!updateNdc(ev.clientX, ev.clientY)) return;
+    if (raycastLamp()) return; // Do not hijack rapid clicks on the lamp mode switcher
+    _desiredTarget.copy(_defaultTarget);
+    focusGlideStrength = 1.0;
+  };
+
   const onKeyDown = (ev: KeyboardEvent): void => {
     if (ev.code === 'Space') {
       ev.preventDefault();
@@ -373,6 +435,8 @@ export async function bootDay25Veil(): Promise<SpecimenStage> {
   window.addEventListener('pointerup', onPointerUp, { passive: true });
   window.addEventListener('pointercancel', onPointerCancel, { passive: true });
   canvas.addEventListener('pointerleave', onPointerLeave, { passive: true });
+  canvas.addEventListener('wheel', onWheel, { passive: true });
+  canvas.addEventListener('dblclick', onDoubleClick);
   window.addEventListener('keydown', onKeyDown);
 
   // Read-only verification telemetry hook
@@ -389,6 +453,17 @@ export async function bootDay25Veil(): Promise<SpecimenStage> {
   // Main per-frame simulation & WebGPU compute tick (zero per-frame allocations)
   stage.onTick(({ dtSec, elapsedSec, renderer }) => {
     const dt = Math.min(0.05, Math.max(0.001, dtSec));
+
+    // Smooth cursor-focused zoom target glide + bounded specimen pan envelope
+    if (focusGlideStrength > 0.001) {
+      const alpha = 1 - Math.exp(-dt * 5.8);
+      stage.controls.target.lerp(_desiredTarget, alpha * focusGlideStrength);
+      focusGlideStrength *= Math.exp(-dt * 2.4);
+      if (focusGlideStrength < 0.015) focusGlideStrength = 0;
+    }
+    stage.controls.target.x = Math.max(-1.05, Math.min(1.05, stage.controls.target.x));
+    stage.controls.target.y = Math.max(-0.65, Math.min(1.56, stage.controls.target.y));
+    stage.controls.target.z = Math.max(-0.45, Math.min(0.45, stage.controls.target.z));
 
     // 1. Advance aperture morph weights & brass slit-lamp mechanical articulation
     aperture.step(dt);
@@ -427,6 +502,8 @@ export async function bootDay25Veil(): Promise<SpecimenStage> {
     window.removeEventListener('pointerup', onPointerUp);
     window.removeEventListener('pointercancel', onPointerCancel);
     canvas.removeEventListener('pointerleave', onPointerLeave);
+    canvas.removeEventListener('wheel', onWheel);
+    canvas.removeEventListener('dblclick', onDoubleClick);
     window.removeEventListener('keydown', onKeyDown);
     stage.scene.environment = null;
     studioEnv.dispose();

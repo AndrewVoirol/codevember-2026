@@ -205,6 +205,20 @@ export class ApertureModeController {
       this.weights.cone *= inv;
     }
 
+    // Snap cleanly to exact target weights once converged (< 0.0025 residual) so Cone mode
+    // closes its u = 0 | 1 seam 100% watertight without an asymptotic dark slit!
+    const targetWeight =
+      this.modeIndex === 0
+        ? this.weights.planar
+        : this.modeIndex === 1
+          ? this.weights.curvedS
+          : this.weights.cone;
+    if (targetWeight > 0.9975) {
+      this.weights.planar = t0;
+      this.weights.curvedS = t1;
+      this.weights.cone = t2;
+    }
+
     const drumAlpha = 1 - Math.exp(-dt * 8.0);
     this.drumAngleRad += (this.targetDrumAngleRad - this.drumAngleRad) * drumAlpha;
     this.transitionPulse *= Math.exp(-dt * 3.8);
