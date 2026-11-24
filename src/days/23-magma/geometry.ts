@@ -10,9 +10,11 @@ import {
   CORE_HALF_W,
   CORE_WIDTH,
   DIKE_SEAM_X,
+  EMBER_COUNT,
   MAX_LOBES,
   OVERBURDEN_BOTTOM_Y,
   OVERBURDEN_HEIGHT,
+  ROCK_CHIP_COUNT,
   SILL_BED_Y,
   SLAB_COLUMNS,
   STRATA_TIERS,
@@ -23,7 +25,7 @@ import {
 } from './tectonicSolver';
 import { type MagmaMaterials } from './materials';
 
-export const EMBER_COUNT = 36;
+export { EMBER_COUNT, ROCK_CHIP_COUNT };
 
 export interface PressFrameAssembly {
   group: THREE.Group;
@@ -67,6 +69,8 @@ export interface MagmaSystemAssembly {
   sillMeshes: THREE.Mesh[];
   lobeInstancedMesh: THREE.InstancedMesh;
   lobeThermalAttr: THREE.InstancedBufferAttribute;
+  rockChipInstancedMesh: THREE.InstancedMesh;
+  rockChipToneAttr: THREE.InstancedBufferAttribute;
   emberInstancedMesh: THREE.InstancedMesh;
   emberHeatAttr: THREE.InstancedBufferAttribute;
   dispose: () => void;
@@ -1138,14 +1142,15 @@ export function buildLateralClampAssemblies(materials: MagmaMaterials): LateralC
  * cleavage edges (zero mushy pillow rounding) and 3D object-space petrography attributes.
  */
 function createFacetedRockSlabGeometry(tier: number, col: number, slabIndex: number): THREE.BufferGeometry {
-  // Higher tessellation (14x10x12) yields crisp chiseled edges & sharp volcanic fracture cleavage
-  const geo = new THREE.BoxGeometry(1, 1, 1, 14, 10, 12);
+  // Higher tessellation (18x12x14) yields crisp chiseled fracture lips, bedding ledges & basalt cleavage facets
+  const geo = new THREE.BoxGeometry(1, 1, 1, 18, 12, 14);
   const posAttr = geo.attributes.position as THREE.BufferAttribute;
   const count = posAttr.count;
 
   const restPosArr = new Float32Array(count * 3);
   const stratumArr = new Float32Array(count);
   const fractureMaskArr = new Float32Array(count);
+  const slipMaskArr = new Float32Array(count);
   const slabIdxArr = new Float32Array(count);
 
   const restCenterX = 0.5 * (COLUMN_BOUNDARIES_X[col] + COLUMN_BOUNDARIES_X[col + 1]);
@@ -1155,6 +1160,7 @@ function createFacetedRockSlabGeometry(tier: number, col: number, slabIndex: num
   const hasRightFracture = col < SLAB_COLUMNS - 1;
   const hasBottomBedding = tier > 0;
   const hasTopBedding = tier < STRATA_TIERS - 1;
+  const isTuff = tier === 1;
 
   for (let i = 0; i < count; i++) {
     const ux = posAttr.getX(i); // [-0.5, +0.5]
@@ -1179,34 +1185,62 @@ function createFacetedRockSlabGeometry(tier: number, col: number, slabIndex: num
     // Tight crisp hairline seam inset & subtle mineral edge chamfer (preserves sharp cleaved corners!)
     const gapInsetX = 0.0022;
     const gapInsetY = 0.0020;
-    const edgeProximityX = Math.max(0, Math.abs(ux) * 2 - 0.92) / 0.08;
-    const edgeProximityY = Math.max(0, Math.abs(uy) * 2 - 0.92) / 0.08;
-    const edgeProximityZ = Math.max(0, Math.abs(uz) * 2 - 0.92) / 0.08;
+    const edgeProximityX = Math.max(0, Math.abs(ux) * 2 - 0.90) / 0.10;
+    const edgeProximityY = Math.max(0, Math.abs(uy) * 2 - 0.90) / 0.10;
+    const edgeProximityZ = Math.max(0, Math.abs(uz) * 2 - 0.90) / 0.10;
     const cornerBevel =
       (edgeProximityX * edgeProximityY + edgeProximityY * edgeProximityZ + edgeProximityX * edgeProximityZ) *
-      0.0026;
+      0.0028;
 
     if (hasLeftFracture && tx < 0.015) xWorld += gapInsetX;
     if (hasRightFracture && tx > 0.985) xWorld -= gapInsetX;
     if (hasBottomBedding && ty < 0.015) yWorld += gapInsetY;
     if (hasTopBedding && ty > 0.985) yWorld -= gapInsetY;
 
-    // Stepped angular volcanic cleavage relief on exposed front/back/top faces
+    // Strict press-contact boundary guards so outer X platen seats & Tier-0 chamber-roof seating stay invariant!
+    const onLeftPressEdge = !hasLeftFracture ? Math.max(0, 1 - tx / 0.10) : 0;
+    const onRightPressEdge = !hasRightFracture ? Math.max(0, 1 - (1 - tx) / 0.10) : 0;
+    const onChamberFloorEdge = tier === 0 ? Math.max(0, 1 - ty / 0.10) : 0;
+    const pressSafeFade = (1 - onLeftPressEdge) * (1 - onRightPressEdge) * (1 - onChamberFloorEdge);
+
+    // Chiseled fracture-lip chip notches right along internal dike & sill mouths (never boxy extruded edges!)
+    const nearLeftFrac = hasLeftFracture ? Math.max(0, 1 - tx / 0.12) : 0;
+    const nearRightFrac = hasRightFracture ? Math.max(0, 1 - (1 - tx) / 0.12) : 0;
+    const nearBotBed = hasBottomBedding ? Math.max(0, 1 - ty / 0.14) : 0;
+    const nearTopBed = hasTopBedding ? Math.max(0, 1 - (1 - ty) / 0.14) : 0;
+    const nearInternalLip = Math.max(nearLeftFrac, nearRightFrac, nearBotBed, nearTopBed);
+
     const isOuterZ = Math.abs(uz) > 0.49;
     const isTopCrest = tier === STRATA_TIERS - 1 && ty > 0.98;
-    const n1 = rockSmoothNoise(xWorld * 6.2 + 1.3, yWorld * 6.8 + 2.7, zWorld * 6.2 + 0.9) - 0.5;
-    const n2 = rockSmoothNoise(xWorld * 15.5 + 4.1, yWorld * 14.2 + 0.6, zWorld * 15.5 + 3.3) - 0.5;
-    // Slight angular terrace quantization gives real chiseled stone fracture planes instead of soft lumps
-    const rawCleave = n1 * 0.016 + n2 * 0.007;
-    const cleave = rawCleave * 0.65 + Math.round(rawCleave * 90) / 90 * 0.35;
+    const n1 = rockSmoothNoise(xWorld * 6.4 + 1.3, yWorld * 6.8 + 2.7, zWorld * 6.4 + 0.9) - 0.5;
+    const n2 = rockSmoothNoise(xWorld * 16.5 + 4.1, yWorld * 15.2 + 0.6, zWorld * 16.5 + 3.3) - 0.5;
+    const nChip = rockSmoothNoise(xWorld * 24.0 + 7.2, yWorld * 22.0 + 3.1, zWorld * 24.0 + 5.8);
 
-    const interiorFade = (1 - 0.45 * edgeProximityX) * (1 - 0.45 * edgeProximityY);
+    // Angular volcanic basalt columnar jointing terraces vs. laminated pyroclastic tuff bedding ledges
+    const colPrism = isTuff
+      ? (rockSmoothNoise(xWorld * 3.8 + 2.1, yWorld * 28.0 + 1.4, zWorld * 3.8 + 4.2) - 0.5) * 0.011
+      : (rockSmoothNoise(xWorld * 11.5 + 3.7, yWorld * 3.6 + 1.1, zWorld * 11.5 + 2.9) - 0.5) * 0.014;
+    const rawCleave = n1 * 0.022 + n2 * 0.010 + colPrism;
+    const cleave = rawCleave * 0.58 + (Math.round(rawCleave * 85) / 85) * 0.42;
+
+    // Micro-chipped irregular recession right on internal fault/bedding lips (crisp spalled edge bevel!)
+    const lipChipRecess = nearInternalLip * Math.max(0, nChip - 0.42) * 0.018;
 
     if (isOuterZ) {
-      zWorld += Math.sign(uz) * cleave * interiorFade;
+      // Allow crisp chiseled fracture relief right up to internal seam lips; fade only at outer press platen edges!
+      const zShift = (cleave - lipChipRecess) * pressSafeFade;
+      zWorld += Math.sign(uz) * zShift;
     }
     if (isTopCrest) {
-      yWorld += cleave * 0.95 * interiorFade;
+      const yShift = (cleave * 0.98 - lipChipRecess * 0.72) * (1 - onLeftPressEdge) * (1 - onRightPressEdge);
+      yWorld += yShift;
+    }
+    // Slight inward chip recess along internal vertical dike walls so parted rock silhouettes look ragged & chiseled
+    if (hasLeftFracture && tx < 0.03) {
+      xWorld += Math.max(0, nChip - 0.46) * 0.009 * (1 - onChamberFloorEdge);
+    }
+    if (hasRightFracture && tx > 0.97) {
+      xWorld -= Math.max(0, nChip - 0.46) * 0.009 * (1 - onChamberFloorEdge);
     }
 
     const lx = xWorld - restCenterX;
@@ -1216,7 +1250,7 @@ function createFacetedRockSlabGeometry(tier: number, col: number, slabIndex: num
 
     posAttr.setXYZ(i, lx * shrink, ly * shrink, lz * shrink);
 
-    // Continuous 3D core rest coordinates for zero-stretch object-space petrography
+    // Continuous 3D core rest coordinates for zero-stretch object-space petrography & branching fractures
     restPosArr[i * 3] = xWorld;
     restPosArr[i * 3 + 1] = yWorld;
     restPosArr[i * 3 + 2] = zWorld;
@@ -1230,11 +1264,14 @@ function createFacetedRockSlabGeometry(tier: number, col: number, slabIndex: num
     const onTopBed = hasTopBedding && ty > 0.95 ? 1.0 : 0.0;
     const onChamberRoof = tier === 0 && ty < 0.06 ? 0.85 : 0.0;
     fractureMaskArr[i] = Math.max(onLeftFrac, onRightFrac, onBotBed, onTopBed, onChamberRoof);
+    // Dedicated vertical fault-wall slickenside mask (strictly parted vertical dike walls!)
+    slipMaskArr[i] = Math.max(onLeftFrac, onRightFrac);
   }
 
   geo.setAttribute('aRestPos', new THREE.BufferAttribute(restPosArr, 3));
   geo.setAttribute('aStratum', new THREE.BufferAttribute(stratumArr, 1));
   geo.setAttribute('aFractureMask', new THREE.BufferAttribute(fractureMaskArr, 1));
+  geo.setAttribute('aSlipMask', new THREE.BufferAttribute(slipMaskArr, 1));
   geo.setAttribute('aSlabIdx', new THREE.BufferAttribute(slabIdxArr, 1));
   geo.computeVertexNormals();
   return geo;
@@ -1370,11 +1407,12 @@ function sampleTierArchY(
  * coordinates in `userData.unitCoords` for zero-allocation per-frame fracture conformation.
  */
 function createDikeWedgeGeometry(seamIdx: number): THREE.BufferGeometry {
-  const geo = new THREE.BoxGeometry(1, 1, 1, 2, 18, 10);
+  // Higher tessellation (6x24x14) supports convex viscous magma meniscus pillowing across open cleft mouths!
+  const geo = new THREE.BoxGeometry(1, 1, 1, 6, 24, 14);
   const pos = geo.attributes.position as THREE.BufferAttribute;
   const unitCoords = new Float32Array(pos.count * 3);
   const colBoundaryIdx = seamIdx === 0 ? 2 : seamIdx === 1 ? 1 : 3;
-  const depthSpan = CORE_DEPTH - 0.024;
+  const depthSpan = CORE_DEPTH - 0.026;
 
   for (let i = 0; i < pos.count; i++) {
     const ux = pos.getX(i); // [-0.5, +0.5]
@@ -1384,7 +1422,7 @@ function createDikeWedgeGeometry(seamIdx: number): THREE.BufferGeometry {
     unitCoords[i * 3 + 1] = uy;
     unitCoords[i * 3 + 2] = uz;
 
-    // Initial rest pose following the exact uncrushed jagged evalColumnSeamX contour!
+    // Initial rest pose strictly inside (-CORE_HALF_D, +CORE_HALF_D) following jagged evalColumnSeamX!
     const zWorld = uz * depthSpan;
     const yWorld = CHAMBER_ROOF_Y - 0.02 + uy * (OVERBURDEN_HEIGHT * 0.55);
     const xSeam = evalColumnSeamX(colBoundaryIdx, Math.max(OVERBURDEN_BOTTOM_Y, yWorld), zWorld);
@@ -1399,15 +1437,17 @@ function createDikeWedgeGeometry(seamIdx: number): THREE.BufferGeometry {
 
 /**
  * Zero-allocation per-frame update conforming a vertical magma dike mesh directly to the
- * exact jagged `evalColumnSeamX` walls & live parted positions of its flanking rock slabs.
- * Eliminates straight-plane clipping, hollow seam air gaps, and protruding shark-fin tips!
+ * exact jagged `evalColumnSeamX` walls & live parted positions of its flanking rock slabs,
+ * swelling a plump viscous convex lava meniscus proud of exposed cleft mouths when pressurized!
  */
 export function updateDikeGeometry(
   geo: THREE.BufferGeometry,
   seamIdx: number,
   height: number,
   veinThickness: number,
-  slabs: ReadonlyArray<RockSlabState>
+  slabs: ReadonlyArray<RockSlabState>,
+  oozeBulge01 = 0,
+  flowTimeSec = 0
 ): void {
   const unitCoords = geo.userData.unitCoords as Float32Array | undefined;
   if (!unitCoords) return;
@@ -1422,7 +1462,7 @@ export function updateDikeGeometry(
   const sR2 = slabs[2 * SLAB_COLUMNS + rightCol];
   const crestDy = 0.5 * (sL2.dy + sR2.dy);
 
-  const depthSpan = CORE_DEPTH - 0.024;
+  const depthSpan = CORE_DEPTH - 0.022;
   const yStart = CHAMBER_ROOF_Y - 0.028;
 
   for (let i = 0; i < pos.count; i++) {
@@ -1430,7 +1470,7 @@ export function updateDikeGeometry(
     const uy = unitCoords[i * 3 + 1]; // [0, 1]
     const uz = unitCoords[i * 3 + 2]; // [-0.5, +0.5]
 
-    const zRecessed = uz * depthSpan * (1.0 - 0.012 * uy);
+    const zRecessed = uz * depthSpan * (1.0 - 0.010 * uy);
     // Cap dike top cleanly at the local basalt crest surface (zero midair shark-fin spikes!)
     const localCrestTop = evalBeddingPlaneY(STRATA_TIERS, baseX, zRecessed) + crestDy - 0.002;
     const yEnd = Math.min(localCrestTop, CHAMBER_ROOF_Y + height + crestDy * 0.45);
@@ -1443,10 +1483,30 @@ export function updateDikeGeometry(
     const actualGap = Math.max(0.004, xWallR - xWallL);
 
     // Fill the full real fracture gap + 4mm wall-lap seal (zero black gaps!) with hydraulic tip taper
-    const tipTaper = uy > 0.86 ? 1.0 - 0.58 * ((uy - 0.86) / 0.14) : 1.0;
-    const halfWidth = Math.max(actualGap * 0.5 + 0.005, veinThickness * 0.46) * tipTaper;
+    const tipTaper = uy > 0.86 ? 1.0 - 0.54 * ((uy - 0.86) / 0.14) : 1.0;
+    const halfWidth = Math.max(actualGap * 0.5 + 0.005, veinThickness * 0.48) * tipTaper;
 
-    pos.setXYZ(i, xMid + ux * 2.0 * halfWidth, yWorld, zRecessed);
+    // Convex viscous lava meniscus bulging organically proud of the exposed front/back fissure mouth
+    // Strictly tapers to 0 at rock walls (|ux|=0.5) & near chamber floor/tip so zero floating edges!
+    const archX = Math.max(0, Math.cos(ux * Math.PI));
+    const endMaskZ = Math.max(0, (Math.abs(uz) - 0.36) / 0.14);
+    const verticalEnv = Math.min(1, uy * 4.5) * tipTaper;
+    const ropySwell = 0.72 + 0.28 * Math.sin(uy * 16.5 - flowTimeSec * 0.85 + seamIdx * 2.1);
+    const meniscusOut =
+      endMaskZ *
+      archX *
+      verticalEnv *
+      ropySwell *
+      Math.min(0.022, actualGap * 0.36 + 0.009 * oozeBulge01);
+    const zFinal = zRecessed + Math.sign(uz) * meniscusOut;
+
+    // Slight top crest pillow crown when dike approaches/breaches the upper basalt lip
+    const crestCrown =
+      uy > 0.94 && oozeBulge01 > 0.1
+        ? archX * ((uy - 0.94) / 0.06) * Math.min(0.012, actualGap * 0.22)
+        : 0;
+
+    pos.setXYZ(i, xMid + ux * 2.0 * halfWidth, yWorld + crestCrown, zFinal);
   }
 
   pos.needsUpdate = true;
@@ -1458,10 +1518,11 @@ export function updateDikeGeometry(
  * unit `(uX, uY, uZ)` coordinates for zero-allocation arched bedding conformation.
  */
 function createSillLensGeometry(sillIdx = 0): THREE.BufferGeometry {
-  const geo = new THREE.BoxGeometry(2, 1, CORE_DEPTH - 0.024, 24, 2, 10);
+  // Higher vertical & lateral resolution (28x6x14) for plump pillowing sill lips along bedding planes
+  const geo = new THREE.BoxGeometry(2, 1, CORE_DEPTH - 0.026, 28, 6, 14);
   const pos = geo.attributes.position as THREE.BufferAttribute;
   const unitCoords = new Float32Array(pos.count * 3);
-  const depthSpan = CORE_DEPTH - 0.024;
+  const depthSpan = CORE_DEPTH - 0.026;
   const halfDepth = depthSpan * 0.5;
 
   for (let i = 0; i < pos.count; i++) {
@@ -1490,13 +1551,16 @@ function createSillLensGeometry(sillIdx = 0): THREE.BufferGeometry {
  *  - Undulating `evalBeddingPlaneY` stratigraphy
  *  - Live anticlinal dome arch & slab tilt between lower & upper strata tiers
  *  - Actual outer rock flank boundaries (zero rigid flat tongues poking out the sides!)
+ *  - Viscous convex lava meniscus swelling out of exposed front/back bedding mouths!
  */
 export function updateSillGeometry(
   geo: THREE.BufferGeometry,
   sillIdx: number,
   halfWidth: number,
   sillThickness: number,
-  slabs: ReadonlyArray<RockSlabState>
+  slabs: ReadonlyArray<RockSlabState>,
+  oozeBulge01 = 0,
+  flowTimeSec = 0
 ): void {
   const unitCoords = geo.userData.unitCoords as Float32Array | undefined;
   if (!unitCoords) return;
@@ -1514,7 +1578,7 @@ export function updateSillGeometry(
   const maxRockX = Math.min(COLUMN_BOUNDARIES_X[4] + rightBelow.dx, COLUMN_BOUNDARIES_X[4] + rightAbove.dx) - 0.022;
   const safeHalfW = Math.max(0.04, Math.min(halfWidth, Math.min(-minRockX, maxRockX)));
 
-  const depthSpan = CORE_DEPTH - 0.024;
+  const depthSpan = CORE_DEPTH - 0.022;
   const halfDepth = depthSpan * 0.5;
 
   for (let i = 0; i < pos.count; i++) {
@@ -1537,7 +1601,31 @@ export function updateSillGeometry(
     const midY = bedY + 0.5 * (dyBelow + dyAbove);
     // Fill actual arched cavity + 5mm bedding-wall lap seal, pinched cleanly at tips
     const localThickness = Math.max(actualBedGap + 0.008, sillThickness) * lensFactor * zEdgeTaper;
-    pos.setXYZ(i, xWorld, midY + uy * localThickness, zWorld);
+
+    // Convex viscous meniscus pillowing slightly proud across open front/back sill mouth
+    // Rounded smoothly along both vertical arch (archY) and lateral tips (latRound) -> zero sharp box corners!
+    const archY = Math.max(0, Math.cos(uy * Math.PI));
+    const latRound = Math.max(0, Math.cos(r * Math.PI * 0.49));
+    const endMaskZ = Math.max(0, (Math.abs(uz) - 0.34) / 0.16);
+    const ropyBead = 0.72 + 0.28 * Math.sin(ux * 10.5 - flowTimeSec * 0.7 + sillIdx * 1.9);
+    const meniscusOut =
+      endMaskZ *
+      archY *
+      latRound *
+      lensFactor *
+      ropyBead *
+      Math.min(0.022, localThickness * 0.32 + 0.008 * oozeBulge01);
+    // Gentle round-edge pinch along top/bottom front sill rim so exposed lava looks plump & viscous
+    const rimBevelZ = endMaskZ * (1.0 - archY) * Math.min(0.014, localThickness * 0.24);
+    // Subtle gravitational sag right at the protruding lip
+    const lipSag = endMaskZ * archY * latRound * Math.min(0.007, meniscusOut * 0.35);
+
+    pos.setXYZ(
+      i,
+      xWorld,
+      midY + uy * localThickness - lipSag,
+      zWorld + Math.sign(uz) * (meniscusOut - rimBevelZ)
+    );
   }
 
   pos.needsUpdate = true;
@@ -1577,9 +1665,9 @@ function weldIndexedGeometry(rawGeo: THREE.BufferGeometry): THREE.BufferGeometry
 }
 
 /**
- * Creates a smooth watertight sculpted viscoplastic pahoehoe lava pillow / tongue geometry
+ * Creates a smooth watertight sculpted viscoplastic pahoehoe lava pillow / braided tongue geometry
  * (welded indexed subdivision-4 icosahedron -> silky-smooth glossy obsidian glass normals,
- * flat rock-hugging underside, zero faceted polyhedron seams, zero polar harmonics).
+ * slumped rock-hugging contact skirt, bulbous advancing toe & arcuate transverse ropy folds).
  */
 function createPahoehoeLobeGeometry(): THREE.BufferGeometry {
   const geo = weldIndexedGeometry(new THREE.IcosahedronGeometry(1.0, 4));
@@ -1590,20 +1678,27 @@ function createPahoehoeLobeGeometry(): THREE.BufferGeometry {
     let y = pos.getY(i);
     let z = pos.getZ(i);
 
-    // Flatten underside snugly so extruded pillows hug & drape over rock ledges cleanly
+    // Flattened rock-hugging base with subtly flared viscous contact skirt so pillows slump onto rock
+    const baseSkirt = Math.exp(-Math.pow((y + 0.08) / 0.28, 2)) * 0.10;
     if (y < 0) {
-      y *= 0.34;
+      y *= 0.30;
     } else {
-      y = Math.pow(y, 0.90);
+      y = Math.pow(y, 0.86);
     }
 
-    // Gentle low-frequency organic billow + subtle arcuate ropy flow swell along tongue axis
-    const n1 = rockSmoothNoise(x * 1.6 + 1.4, y * 2.2 + 2.2, z * 1.6 + 0.7) - 0.5;
-    const ropeRipple = Math.sin(z * 6.5 + x * x * 3.0) * 0.032 * Math.max(0, y + 0.2);
-    const disp = 1.0 + n1 * 0.16 + ropeRipple;
+    // Organic viscous billow + deep arcuate braided transverse pahoehoe cord folds (zero polar harmonics!)
+    const n1 = rockSmoothNoise(x * 1.7 + 1.4, y * 2.2 + 2.2, z * 1.7 + 0.7) - 0.5;
+    const upperMask = Math.max(0, Math.min(1, (y + 0.15) * 1.15));
+    const arcCoord = z * 9.4 + x * x * 4.4 + n1 * 2.8;
+    const ropePrimary = Math.sin(arcCoord) * 0.044;
+    const ropeBraided = Math.sin(arcCoord * 1.78 + x * 2.1) * 0.018;
+    // Plump bulbous advancing lava toe swell toward +Z front rim
+    const toeSwell = Math.max(0, z) * 0.14 * (1 - Math.abs(y) * 0.45);
+    const disp = 1.0 + n1 * 0.18 + (ropePrimary + ropeBraided) * upperMask + baseSkirt;
 
     // Gentle viscous tongue elongation along +Z
-    z *= 1.24;
+    z = z * (1.26 + toeSwell * 0.45);
+    x = x * (1.0 + toeSwell * 0.32);
     pos.setXYZ(i, x * disp, y * disp, z * disp);
   }
   geo.computeVertexNormals();
@@ -1614,15 +1709,37 @@ function createPahoehoeLobeGeometry(): THREE.BufferGeometry {
  * Creates a cleaved angular dark basalt xenolith rock chunk floating inside the chamber.
  */
 function createXenolithGeometry(seed: number): THREE.BufferGeometry {
-  const geo = new THREE.IcosahedronGeometry(0.078, 2);
+  const geo = new THREE.IcosahedronGeometry(0.080, 2);
   const pos = geo.attributes.position as THREE.BufferAttribute;
   for (let i = 0; i < pos.count; i++) {
     const x = pos.getX(i);
     const y = pos.getY(i);
     const z = pos.getZ(i);
-    const n = rockSmoothNoise(x * 15 + seed, y * 15 + seed * 1.7, z * 15 + seed * 0.6);
-    const sc = 0.80 + n * 0.38;
-    pos.setXYZ(i, x * sc * 1.28, y * sc * 0.72, z * sc * 0.88);
+    const n1 = rockSmoothNoise(x * 14 + seed, y * 14 + seed * 1.7, z * 14 + seed * 0.6);
+    const n2 = rockSmoothNoise(x * 29 + seed * 2.3, y * 29 + seed * 0.9, z * 29 + seed * 1.4);
+    const raw = 0.76 + n1 * 0.36 + (n2 - 0.5) * 0.14;
+    // Slight angular cleavage quantization for sharp submerged basalt roof-clasts
+    const sc = raw * 0.70 + (Math.round(raw * 14) / 14) * 0.30;
+    pos.setXYZ(i, x * sc * 1.30, y * sc * 0.70, z * sc * 0.88);
+  }
+  geo.computeVertexNormals();
+  return geo;
+}
+
+/**
+ * Creates a watertight angular cleaved volcanic rock spall chip geometry (signedVol > 0)
+ * for instanced basalt/tuff fault-lip debris tumbling off widening fractures.
+ */
+function createRockChipGeometry(): THREE.BufferGeometry {
+  const geo = new THREE.IcosahedronGeometry(1.0, 1);
+  const pos = geo.attributes.position as THREE.BufferAttribute;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i);
+    const y = pos.getY(i);
+    const z = pos.getZ(i);
+    const n = rockSmoothNoise(x * 4.2 + 2.3, y * 4.2 + 5.1, z * 4.2 + 1.7);
+    const sc = 0.72 + n * 0.52;
+    pos.setXYZ(i, x * sc * 1.32, y * sc * 0.64, z * sc * 0.95);
   }
   geo.computeVertexNormals();
   return geo;
@@ -1692,7 +1809,7 @@ export function buildMagmaSystemAssembly(materials: MagmaMaterials): MagmaSystem
     sillMeshes.push(mesh);
   }
 
-  // 5. 24 Instanced Smooth Ropy Viscoplastic Pahoehoe Magma Lobes (1 draw call!)
+  // 5. MAX_LOBES Instanced Smooth Braided Ropy Viscoplastic Pahoehoe Magma Lobes (1 draw call!)
   const lobeGeo = track(createPahoehoeLobeGeometry());
   const lobeThermalData = new Float32Array(MAX_LOBES * 4);
   const lobeThermalAttr = new THREE.InstancedBufferAttribute(lobeThermalData, 4);
@@ -1711,8 +1828,29 @@ export function buildMagmaSystemAssembly(materials: MagmaMaterials): MagmaSystem
   lobeInstancedMesh.instanceMatrix.needsUpdate = true;
   group.add(lobeInstancedMesh);
 
-  // 6. 36 Restrained Rising Eruptive Volcanic Ash / Ember Sparks
-  const emberGeo = track(new THREE.OctahedronGeometry(0.011, 0));
+  // 5b. ROCK_CHIP_COUNT Pre-Allocated Dislodged Angular Basalt & Yellow-Ochre Tuff Fault-Lip Chips (1 draw call!)
+  const rockChipGeo = track(createRockChipGeometry());
+  const rockChipToneData = new Float32Array(ROCK_CHIP_COUNT);
+  const rockChipToneAttr = new THREE.InstancedBufferAttribute(rockChipToneData, 1);
+  rockChipGeo.setAttribute('aChipTone', rockChipToneAttr);
+
+  const rockChipInstancedMesh = new THREE.InstancedMesh(
+    rockChipGeo,
+    materials.rockChip ?? materials.stratifiedRockCore,
+    ROCK_CHIP_COUNT
+  );
+  rockChipInstancedMesh.name = 'FaultLipRockChips';
+  rockChipInstancedMesh.castShadow = true;
+  rockChipInstancedMesh.receiveShadow = true;
+  rockChipInstancedMesh.frustumCulled = false;
+  for (let i = 0; i < ROCK_CHIP_COUNT; i++) {
+    rockChipInstancedMesh.setMatrixAt(i, hiddenMat);
+  }
+  rockChipInstancedMesh.instanceMatrix.needsUpdate = true;
+  group.add(rockChipInstancedMesh);
+
+  // 6. EMBER_COUNT Restrained Rising Eruptive Volcanic Ash / Ember Sparks (1 draw call!)
+  const emberGeo = track(new THREE.OctahedronGeometry(0.010, 0));
   const emberHeatData = new Float32Array(EMBER_COUNT);
   const emberHeatAttr = new THREE.InstancedBufferAttribute(emberHeatData, 1);
   emberGeo.setAttribute('aEmberHeat', emberHeatAttr);
@@ -1735,6 +1873,8 @@ export function buildMagmaSystemAssembly(materials: MagmaMaterials): MagmaSystem
     sillMeshes,
     lobeInstancedMesh,
     lobeThermalAttr,
+    rockChipInstancedMesh,
+    rockChipToneAttr,
     emberInstancedMesh,
     emberHeatAttr,
     dispose: () => {

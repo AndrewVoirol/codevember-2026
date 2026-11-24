@@ -7,10 +7,13 @@ import {
   COLUMN_BOUNDARIES_X,
   CORE_HALF_D,
   CORE_HALF_W,
+  EMBER_COUNT,
   MAX_HEAVE_DISPLACEMENT,
   MAX_PISTON_TRAVEL,
   OVERBURDEN_BOTTOM_Y,
   OVERBURDEN_HEIGHT,
+  OVERBURDEN_TOP_Y,
+  ROCK_CHIP_COUNT,
   SLAB_COLUMNS,
   SLAB_COUNT,
   STRATA_TIERS,
@@ -278,6 +281,7 @@ describe('Day 23 - Pressurized Tectonic Magma-Intrusion Block', () => {
       dikeMagma: dummyMat,
       sillMagma: dummyMat,
       pahoehoeLobe: dummyMat,
+      rockChip: dummyMat,
       emberSpark: dummyMat,
     };
 
@@ -398,6 +402,7 @@ describe('Day 23 - Pressurized Tectonic Magma-Intrusion Block', () => {
       dikeMagma: dummyMat,
       sillMagma: dummyMat,
       pahoehoeLobe: dummyMat,
+      rockChip: dummyMat,
       emberSpark: dummyMat,
     };
 
@@ -548,6 +553,7 @@ describe('Day 23 - Pressurized Tectonic Magma-Intrusion Block', () => {
       dikeMagma: dummyMat,
       sillMagma: dummyMat,
       pahoehoeLobe: dummyMat,
+      rockChip: dummyMat,
       emberSpark: dummyMat,
     };
 
@@ -604,6 +610,7 @@ describe('Day 23 - Pressurized Tectonic Magma-Intrusion Block', () => {
       dikeMagma: dummyMat,
       sillMagma: dummyMat,
       pahoehoeLobe: dummyMat,
+      rockChip: dummyMat,
       emberSpark: dummyMat,
     };
     const magma = buildMagmaSystemAssembly(mats);
@@ -682,6 +689,7 @@ describe('Day 23 - Pressurized Tectonic Magma-Intrusion Block', () => {
       dikeMagma: dummyMat,
       sillMagma: dummyMat,
       pahoehoeLobe: dummyMat,
+      rockChip: dummyMat,
       emberSpark: dummyMat,
     };
 
@@ -741,6 +749,143 @@ describe('Day 23 - Pressurized Tectonic Magma-Intrusion Block', () => {
     frame.dispose();
     piston.dispose();
     clamps.dispose();
+    magma.dispose();
+    dummyMat.dispose();
+  });
+
+  it('verifies branching hairline crack pressure response, multi-vent lobe surface anchoring, press clearance, and zero-allocation particle updates', () => {
+    // 1. Hairline fracture openness & inside-out thermal illumination respond cleanly to pressure & quench
+    const solver = new TectonicMagmaSolver({
+      initialPressure: 0.08,
+      initialCompression: -0.72,
+      preWarmSec: 0.5,
+    });
+    const lowOpen = solver.hairlineCrackOpenness;
+    const lowHeat = solver.hairlineCrackHeat;
+
+    // Capture pre-allocated object identities for strict zero-allocation verification
+    const chipRefs = solver.rockChips.slice();
+    const emberRefs = solver.embers.slice();
+    const lobeRefs = solver.lobes.slice();
+    expect(chipRefs.length).toBe(ROCK_CHIP_COUNT);
+    expect(emberRefs.length).toBe(EMBER_COUNT);
+
+    // Pump sharply into high-pressure extensional rifting
+    solver.setTargetPressure(0.94);
+    let sawDislodgedChips = false;
+    let sawRisingEmbers = false;
+    for (let i = 0; i < 240; i++) {
+      solver.step(1 / 60);
+      const st = solver.getState();
+      if (st.activeRockChips > 0) sawDislodgedChips = true;
+      if (st.activeEmbers > 0) sawRisingEmbers = true;
+    }
+
+    const highOpen = solver.hairlineCrackOpenness;
+    const highHeat = solver.hairlineCrackHeat;
+    expect(highOpen).toBeGreaterThan(lowOpen + 0.45);
+    expect(highHeat).toBeGreaterThan(lowHeat + 0.45);
+    expect(sawDislodgedChips).toBe(true);
+    expect(sawRisingEmbers).toBe(true);
+
+    // Verify both crest-dike AND face-dike oozing pillows spawn and stay anchored inside press bounds
+    let crestCount = 0;
+    let faceCount = 0;
+    const extMaxPressX = CORE_HALF_W + solver.platenOffset;
+    for (let i = 0; i < solver.lobes.length; i++) {
+      const l = solver.lobes[i];
+      expect(l).toBe(lobeRefs[i]);
+      if (!l.active) continue;
+      if (l.ventType === 'crest-dike') crestCount++;
+      if (l.ventType === 'face-dike') faceCount++;
+      expect(Math.abs(l.posX)).toBeLessThanOrEqual(extMaxPressX);
+      expect(l.posY).toBeGreaterThanOrEqual(CHAMBER_ROOF_Y + 0.05);
+      expect(l.posY).toBeLessThanOrEqual(OVERBURDEN_TOP_Y + MAX_HEAVE_DISPLACEMENT + 0.032);
+      expect(Math.abs(l.posZ)).toBeLessThanOrEqual(CORE_HALF_D + 0.025);
+    }
+    expect(crestCount).toBeGreaterThanOrEqual(1);
+    expect(faceCount).toBeGreaterThanOrEqual(1);
+
+    // Verify compressional sill switching spawns flank-sill oozing beads cleanly inside tightened platens
+    solver.setTargetCompression(0.92);
+    for (let i = 0; i < 240; i++) {
+      solver.step(1 / 60);
+    }
+    let flankCount = 0;
+    const compMaxPressX = CORE_HALF_W + solver.platenOffset;
+    for (let i = 0; i < solver.lobes.length; i++) {
+      const l = solver.lobes[i];
+      if (!l.active) continue;
+      if (l.ventType === 'flank-sill') flankCount++;
+      expect(Math.abs(l.posX)).toBeLessThanOrEqual(compMaxPressX);
+      expect(l.posY).toBeLessThanOrEqual(OVERBURDEN_TOP_Y + MAX_HEAVE_DISPLACEMENT + 0.032);
+    }
+    expect(flankCount).toBeGreaterThanOrEqual(1);
+
+    // Verify zero object replacement across all particle pools
+    for (let i = 0; i < ROCK_CHIP_COUNT; i++) {
+      expect(solver.rockChips[i]).toBe(chipRefs[i]);
+    }
+    for (let i = 0; i < EMBER_COUNT; i++) {
+      expect(solver.embers[i]).toBe(emberRefs[i]);
+    }
+
+    // Quench & settle: hairline heat drops sharply, permanent dark micro-crack scar persists, embers extinguish!
+    solver.quenchAndReset(false);
+    for (let i = 0; i < 180; i++) {
+      solver.step(1 / 60);
+    }
+    expect(solver.hairlineCrackHeat).toBeLessThan(0.14);
+    expect(solver.hairlineCrackOpenness).toBeGreaterThan(0.18);
+    expect(solver.getState().activeEmbers).toBe(0);
+    expect(Math.abs(solver.gaugeNeedleAngle)).toBeLessThanOrEqual(2.31);
+
+    // Verify rock slabs expose finite aSlipMask (vertical slickenside fault-wall mask) & outward-wound rock chips
+    const dummyMat = new THREE.MeshBasicMaterial();
+    const mats: any = {
+      forgedPressIron: dummyMat,
+      machinedThreadSteel: dummyMat,
+      satinBrass: dummyMat,
+      gaugeDial: dummyMat,
+      quartzGlass: dummyMat,
+      stratifiedRockCore: dummyMat,
+      xenolithBasalt: dummyMat,
+      chamberMagma: dummyMat,
+      dikeMagma: dummyMat,
+      sillMagma: dummyMat,
+      pahoehoeLobe: dummyMat,
+      rockChip: dummyMat,
+      emberSpark: dummyMat,
+    };
+    const rock = buildRockCoreAssembly(mats);
+    let totalSlipVerts = 0;
+    for (let i = 0; i < rock.slabMeshes.length; i++) {
+      const slipAttr = rock.slabMeshes[i].geometry.attributes.aSlipMask as THREE.BufferAttribute;
+      expect(slipAttr).toBeDefined();
+      for (let v = 0; v < slipAttr.count; v++) {
+        const val = slipAttr.getX(v);
+        expect(Number.isFinite(val)).toBe(true);
+        if (val > 0.5) totalSlipVerts++;
+      }
+    }
+    expect(totalSlipVerts).toBeGreaterThan(100);
+
+    // Pressurized dike meniscus swells cleanly proud of recessed rest plane while capping below basalt crest
+    const magma = buildMagmaSystemAssembly(mats);
+    expect(magma.rockChipInstancedMesh.count).toBe(ROCK_CHIP_COUNT);
+    const ext2 = new TectonicMagmaSolver({ initialPressure: 0.92, initialCompression: -0.85, preWarmSec: 2.5 });
+    const d0 = ext2.dikes[0];
+    updateDikeGeometry(magma.dikeMeshes[0].geometry, 0, d0.height, Math.max(d0.aperture * 1.18, 0.02), ext2.slabs, 1.0, 1.0);
+    const dPos = magma.dikeMeshes[0].geometry.attributes.position as THREE.BufferAttribute;
+    let maxZ = -Infinity;
+    for (let v = 0; v < dPos.count; v++) {
+      const z = dPos.getZ(v);
+      if (z > maxZ) maxZ = z;
+    }
+    expect(maxZ).toBeGreaterThan(CORE_HALF_D - 0.008);
+    expect(maxZ).toBeLessThan(CORE_HALF_D + 0.022);
+
+    rock.dispose();
     magma.dispose();
     dummyMat.dispose();
   });

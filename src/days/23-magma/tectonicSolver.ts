@@ -64,7 +64,9 @@ export const MAX_PLATEN_EXTENSION = 0.125; // Max outward clamp travel at compre
 export const MAX_PLATEN_COMPRESSION = 0.016; // Max inward elastic clamp preload at compression = +1 (realistic rock strain)
 export const MAX_PISTON_TRAVEL = 0.155; // Vertical hydraulic piston stroke into lower chamber (keeps upper half blazing with melt)
 export const ACME_THREAD_PITCH = 0.048; // Exact helical lead pitch (4.8 cm axial travel per revolution)
-export const MAX_LOBES = 24;
+export const MAX_LOBES = 44;
+export const ROCK_CHIP_COUNT = 44;
+export const EMBER_COUNT = 48;
 
 export type StressRegime = 'extensional' | 'transitional' | 'compressional';
 
@@ -127,7 +129,7 @@ export interface RockSlabState {
 export interface MagmaLobeState {
   index: number;
   active: boolean;
-  ventType: 'crest-dike' | 'flank-sill';
+  ventType: 'crest-dike' | 'face-dike' | 'flank-sill';
   ventIndex: number;
   /** Rest anchor relative to its parent vent before slab heave/offset */
   localOffsetX: number;
@@ -151,6 +153,8 @@ export interface MagmaLobeState {
   yaw: number;
   /** Pitch droop along crest/flank */
   pitch: number;
+  /** Roll tilt along face/slope */
+  roll: number;
   /** Internal molten core temperature [0, 1] */
   coreTemp: number;
   /** Outer skin temperature [0, 1] (cools faster -> glossy black obsidian) */
@@ -162,6 +166,43 @@ export interface MagmaLobeState {
   /** Age in simulation seconds */
   ageSec: number;
   /** Deterministic per-lobe shader seed */
+  seed: number;
+}
+
+export interface RockChipState {
+  active: boolean;
+  x: number;
+  y: number;
+  z: number;
+  vx: number;
+  vy: number;
+  vz: number;
+  rotX: number;
+  rotY: number;
+  rotZ: number;
+  vRotX: number;
+  vRotY: number;
+  vRotZ: number;
+  age: number;
+  life: number;
+  scale: number;
+  /** 0 = dark vesicular basalt chip, 1 = banded yellow-ochre tuff chip */
+  stratumTone: number;
+  bounces: number;
+}
+
+export interface EmberMoteState {
+  active: boolean;
+  x: number;
+  y: number;
+  z: number;
+  vx: number;
+  vy: number;
+  vz: number;
+  age: number;
+  life: number;
+  heat: number;
+  scale: number;
   seed: number;
 }
 
@@ -178,6 +219,10 @@ export interface Day23Telemetry {
   maxSillThickness: number;
   avgLobeCrustTemp: number;
   quenchedObsidianFraction: number;
+  hairlineCrackOpenness: number;
+  activeRockChips: number;
+  activeEmbers: number;
+  gaugeNeedleAngle: number;
   simTimeSec: number;
 }
 
@@ -300,12 +345,15 @@ export function evalColumnSeamX(seamIdx: number, y: number, z: number): number {
   if (seamIdx >= SLAB_COLUMNS) return COLUMN_BOUNDARIES_X[SLAB_COLUMNS];
   const base = COLUMN_BOUNDARIES_X[seamIdx];
   const phase = seamIdx * 2.17;
-  // Natural stepped rock-cleavage zig-zag along height and depth (bounded +/-0.032m)
+  // Natural stepped rock-cleavage zig-zag along height and depth (bounded +/-0.042m)
   const yNorm = (y - OVERBURDEN_BOTTOM_Y) / OVERBURDEN_HEIGHT;
   const jagY =
     Math.sin(yNorm * Math.PI * 3.0 + phase) * 0.022 +
-    Math.sin(yNorm * Math.PI * 7.0 + phase * 1.9) * 0.008;
-  const jagZ = Math.sin(z * 4.3 + phase * 0.7) * 0.012;
+    Math.sin(yNorm * Math.PI * 7.0 + phase * 1.9) * 0.0085 +
+    Math.sin(yNorm * Math.PI * 13.0 + phase * 2.7) * 0.0042;
+  const jagZ =
+    Math.sin(z * 4.3 + phase * 0.7) * 0.0115 +
+    Math.cos(z * 9.1 - phase * 1.4) * 0.0036;
   return base + jagY + jagZ;
 }
 
@@ -363,6 +411,16 @@ export class TectonicMagmaSolver {
   clampScrewAngle = 0;
   /** Instantaneous pressure rate dP/dt used to trigger live obsidian re-cracking */
   pressureSurge = 0;
+  /** Secondary branching hairline pressure-crack dilation state in [0, 1] */
+  hairlineCrackOpenness = 0;
+  /** Peak hairline fracture scar retained in rock even after depressurization */
+  hairlineCrackPeak = 0;
+  /** Radiant blackbody heat glowing inside radiating secondary hairline fissures [0, 1] */
+  hairlineCrackHeat = 0;
+  /** Expressive Bourdon pressure-gauge needle angle (radians) with spring inertia & peak flutter */
+  gaugeNeedleAngle = 2.18;
+  /** Bourdon needle angular velocity (rad/s) */
+  private gaugeNeedleVel = 0;
   /** Elapsed simulation time (seconds) */
   simTimeSec = 0;
 
@@ -370,10 +428,18 @@ export class TectonicMagmaSolver {
   readonly sills: SillState[];
   readonly slabs: RockSlabState[];
   readonly lobes: MagmaLobeState[];
+  readonly rockChips: RockChipState[];
+  readonly embers: EmberMoteState[];
 
   private prevPressure: number;
+  private readonly prevDikeApertures: Float32Array = new Float32Array(3);
+  private readonly prevSillThicknesses: Float32Array = new Float32Array(2);
   private lobeSpawnCursor = 0;
   private lobeSpawnCooldown = 0;
+  private chipSpawnCursor = 0;
+  private chipSpawnAcc = 0;
+  private emberSpawnCursor = 0;
+  private emberSpawnAcc = 0;
   private isPumpingHold = false;
   private holdPumpRate = 0;
 
@@ -381,6 +447,7 @@ export class TectonicMagmaSolver {
     this.chamberPressure = clamp(options.initialPressure ?? 0.56, 0, 1);
     this.targetPressure = this.chamberPressure;
     this.prevPressure = this.chamberPressure;
+    this.gaugeNeedleAngle = 2.18 - this.chamberPressure * 4.36;
     this.tectonicCompression = clamp(options.initialCompression ?? -0.32, -1, 1);
     this.targetCompression = this.tectonicCompression;
     this.sillFraction = computeSillFraction(this.tectonicCompression);
@@ -458,12 +525,57 @@ export class TectonicMagmaSolver {
         radiusZ: 0.06,
         yaw: 0,
         pitch: 0,
+        roll: 0,
         coreTemp: 0,
         crustTemp: 0,
         crackIntensity: 0,
         wrinkle: 0,
         ageSec: 0,
         seed: (i + 1) * 1.371,
+      });
+    }
+
+    // Pre-allocated pool of angular dislodged volcanic basalt/tuff spall chips
+    this.rockChips = [];
+    for (let i = 0; i < ROCK_CHIP_COUNT; i++) {
+      this.rockChips.push({
+        active: false,
+        x: 0,
+        y: -10,
+        z: 0,
+        vx: 0,
+        vy: 0,
+        vz: 0,
+        rotX: 0,
+        rotY: 0,
+        rotZ: 0,
+        vRotX: 0,
+        vRotY: 0,
+        vRotZ: 0,
+        age: 0,
+        life: 1,
+        scale: 0,
+        stratumTone: 0,
+        bounces: 0,
+      });
+    }
+
+    // Pre-allocated pool of rising incandescent ember motes
+    this.embers = [];
+    for (let i = 0; i < EMBER_COUNT; i++) {
+      this.embers.push({
+        active: false,
+        x: 0,
+        y: OVERBURDEN_TOP_Y,
+        z: 0,
+        vx: 0,
+        vy: 0,
+        vz: 0,
+        age: 0,
+        life: 1,
+        heat: 0,
+        scale: 0,
+        seed: (i + 1) * 2.137,
       });
     }
 
@@ -474,6 +586,9 @@ export class TectonicMagmaSolver {
       for (let s = 0; s < steps; s++) {
         this.step(1 / 60);
       }
+      // Settle Bourdon needle smoothly onto initial boot pressure without artificial initial whip
+      this.gaugeNeedleAngle = 2.18 - this.chamberPressure * 4.36;
+      this.gaugeNeedleVel = 0;
     }
   }
 
@@ -545,6 +660,17 @@ export class TectonicMagmaSolver {
         l.coreTemp = Math.min(l.coreTemp, 0.24);
         l.crackIntensity = 0;
         l.wrinkle = Math.min(1, l.wrinkle + 0.35);
+      }
+    }
+
+    // Cool secondary hairline cracks immediately toward quenched dark mineral scars & snuff embers
+    this.hairlineCrackHeat *= 0.16;
+    this.emberSpawnAcc = 0;
+    for (let i = 0; i < this.embers.length; i++) {
+      const e = this.embers[i];
+      if (e.active) {
+        e.heat *= 0.25;
+        e.age = Math.max(e.age, e.life * 0.72);
       }
     }
   }
@@ -663,7 +789,7 @@ export class TectonicMagmaSolver {
         d.quenchedObsidian = Math.max(0, d.quenchedObsidian - dt * 0.45);
       }
 
-      d.breachedCrest = d.height >= OVERBURDEN_HEIGHT * 0.86 && d.aperture > 0.016 && P > 0.32;
+      d.breachedCrest = d.height >= OVERBURDEN_HEIGHT * 0.78 && d.aperture > 0.015 && P > 0.32;
       if (d.height > maxDikeH) maxDikeH = d.height;
     }
     this.activeDikeHeight = clamp(maxDikeH, 0, OVERBURDEN_HEIGHT + 0.06);
@@ -877,53 +1003,145 @@ export class TectonicMagmaSolver {
     }
     this.heaveDisplacement = clamp(maxHeave, 0, MAX_HEAVE_DISPLACEMENT);
 
+    // 6b. Secondary Hairline Pressure-Crack Network Dilation, Internal Radiance & Bourdon Needle Dynamics
+    const maxAperture = Math.max(this.dikes[0].aperture, this.dikes[1].aperture, this.dikes[2].aperture);
+    const maxSillT = Math.max(this.sills[0].thickness, this.sills[1].thickness);
+    const fractureDrive = clamp(
+      P * 0.56 +
+        (maxAperture / 0.082) * 0.42 +
+        (maxSillT / 0.11) * 0.36 +
+        this.pressureSurge * 0.34,
+      0,
+      1
+    );
+    if (fractureDrive > this.hairlineCrackPeak) {
+      this.hairlineCrackPeak = Math.min(1, this.hairlineCrackPeak + (fractureDrive - this.hairlineCrackPeak) * (1 - Math.exp(-dt * 4.2)));
+    }
+    const crackFloor = Math.min(0.42, this.hairlineCrackPeak * 0.42);
+    const targetOpen = Math.max(crackFloor, fractureDrive);
+    const openRate = targetOpen > this.hairlineCrackOpenness ? 5.2 : 1.8;
+    this.hairlineCrackOpenness = clamp(
+      this.hairlineCrackOpenness + (targetOpen - this.hairlineCrackOpenness) * (1 - Math.exp(-dt * openRate)),
+      0,
+      1
+    );
+
+    const activeIntrusionTemp = Math.max(
+      this.dikes[0].temperature,
+      this.dikes[1].temperature,
+      this.dikes[2].temperature,
+      this.sills[0].temperature,
+      this.sills[1].temperature
+    );
+    const targetCrackHeat = clamp(
+      activeIntrusionTemp * (0.48 + 0.52 * P) + this.pressureSurge * 0.38,
+      0,
+      1
+    );
+    const heatRate = targetCrackHeat > this.hairlineCrackHeat ? 4.8 : 2.1;
+    this.hairlineCrackHeat = clamp(
+      this.hairlineCrackHeat + (targetCrackHeat - this.hairlineCrackHeat) * (1 - Math.exp(-dt * heatRate)),
+      0,
+      1
+    );
+
+    // Expressive Bourdon pressure gauge needle (underdamped spring + hydraulic peak flutter)
+    const targetGaugeAngle = 2.18 - P * 4.36;
+    const flutterAmp = (this.pressureSurge * 0.042 + Math.max(0, P - 0.62) * 0.036) * (0.6 + 0.4 * Math.sin(this.simTimeSec * 19.3));
+    const flutter = Math.sin(this.simTimeSec * 43.7) * flutterAmp;
+    const gaugeAcc = (targetGaugeAngle + flutter - this.gaugeNeedleAngle) * 86.0 - this.gaugeNeedleVel * 12.2;
+    this.gaugeNeedleVel += gaugeAcc * dt;
+    this.gaugeNeedleAngle = clamp(this.gaugeNeedleAngle + this.gaugeNeedleVel * dt, -2.30, 2.30);
+
     // 7. Extruding, Cooling & Re-Cracking Viscoplastic Pahoehoe Magma Lobes
     this.updatePahoehoeLobes(dt);
+
+    // 8. Dislodged Angular Basalt/Tuff Spall Chips & Drifting Incandescent Embers (Zero Alloc)
+    this.updateRockChips(dt);
+    this.updateEmbers(dt);
+
+    // Snapshot apertures/thicknesses for next tick's fault-widening spall detection
+    for (let i = 0; i < 3; i++) this.prevDikeApertures[i] = this.dikes[i].aperture;
+    for (let i = 0; i < 2; i++) this.prevSillThicknesses[i] = this.sills[i].thickness;
   }
 
   private updatePahoehoeLobes(dt: number): void {
     const P = this.chamberPressure;
     this.lobeSpawnCooldown = Math.max(0, this.lobeSpawnCooldown - dt);
 
-    // Spawn fresh magma tongues when active dikes breach the top crest OR pressurized
-    // compressional sills break out along the front/back bedding-plane fissures
+    // Spawn fresh viscous magma tongues across 3 physical vent families:
+    //  1. Crest dike pahoehoe spillovers draping over upper basalt lips
+    //  2. Front/back vertical dike face-mouth magma pillows bulging proud of clefts
+    //  3. Compressional horizontal sill bedding-plane flank beads & overhanging tongues
     if (this.lobeSpawnCooldown <= 0 && P > 0.34) {
       let spawned = false;
+      let activeCrestLobes = 0;
+      let activeFaceLobes = 0;
+      let activeFlankLobes = 0;
+      for (let k = 0; k < this.lobes.length; k++) {
+        const lk = this.lobes[k];
+        if (!lk.active) continue;
+        if (lk.ventType === 'crest-dike') activeCrestLobes++;
+        else if (lk.ventType === 'face-dike') activeFaceLobes++;
+        else activeFlankLobes++;
+      }
 
-      // Priority 1: Extensional crest dike eruptions
-      for (let i = 0; i < this.dikes.length; i++) {
-        const d = this.dikes[i];
-        if (d.breachedCrest && d.temperature > 0.42) {
-          this.spawnLobe('crest-dike', i);
-          spawned = true;
-          break;
+      // Interleave 2-3 sparse slumped vertical face-cleft ooze drips organically alongside rich crest spillovers
+      const wantSparseFaceDrip = activeFaceLobes < 3 && this.lobeSpawnCursor % 5 === 2;
+      if (wantSparseFaceDrip) {
+        for (let i = 0; i < this.dikes.length; i++) {
+          const d = this.dikes[i];
+          if (d.height > 0.40 && d.aperture > 0.016 && d.temperature > 0.42) {
+            this.spawnLobe('face-dike', i);
+            spawned = true;
+            break;
+          }
         }
       }
 
-      // Priority 2: Compressional bedding-plane sill side-ooze blisters (organic sparse distribution, max 6 active)
-      if (!spawned) {
-        let activeFlankLobes = 0;
-        for (let k = 0; k < this.lobes.length; k++) {
-          if (this.lobes[k].active && this.lobes[k].ventType === 'flank-sill') {
-            activeFlankLobes++;
+      // Priority 1: Extensional crest dike braided pahoehoe spillovers (star of the top basalt lip!)
+      if (!spawned && activeCrestLobes < 22) {
+        for (let i = 0; i < this.dikes.length; i++) {
+          const d = this.dikes[i];
+          if (d.breachedCrest && d.temperature > 0.38) {
+            this.spawnLobe('crest-dike', i);
+            spawned = true;
+            break;
           }
         }
-        if (activeFlankLobes < 6) {
-          for (let i = 0; i < this.sills.length; i++) {
-            const s = this.sills[i];
-            if (s.thickness > 0.032 && s.halfWidth > 0.44 && s.temperature > 0.44) {
-              this.spawnLobe('flank-sill', i);
-              spawned = true;
-              break;
-            }
+      }
+
+      // Priority 2: Sparse slumped front/rear vertical dike fissure-lip tongues (max 4 organically spaced drips, NEVER stacked beads!)
+      if (!spawned && activeFaceLobes < 4) {
+        for (let i = 0; i < this.dikes.length; i++) {
+          const d = this.dikes[i];
+          if (d.height > 0.40 && d.aperture > 0.016 && d.temperature > 0.42) {
+            this.spawnLobe('face-dike', i);
+            spawned = true;
+            break;
+          }
+        }
+      }
+
+      // Priority 3: Compressional bedding-plane sill side-ooze pillows & dripping flank beads
+      if (!spawned && activeFlankLobes < 12) {
+        for (let i = 0; i < this.sills.length; i++) {
+          const s = this.sills[i];
+          if (s.thickness > 0.024 && s.halfWidth > 0.34 && s.temperature > 0.40) {
+            this.spawnLobe('flank-sill', i);
+            spawned = true;
+            break;
           }
         }
       }
 
       if (spawned) {
-        this.lobeSpawnCooldown = clamp(0.68 - P * 0.34, 0.28, 0.72);
+        this.lobeSpawnCooldown = clamp(0.56 - P * 0.28, 0.22, 0.62);
       }
     }
+
+    const maxPressX = CORE_HALF_W + this.platenOffset - 0.045;
+    const maxPressY = OVERBURDEN_TOP_Y + MAX_HEAVE_DISPLACEMENT + 0.028;
 
     // Update all active extruded lobes: anchor tracking, viscous spread, blackbody cooling & re-cracking
     for (let i = 0; i < this.lobes.length; i++) {
@@ -943,16 +1161,27 @@ export class TectonicMagmaSolver {
         const d = this.dikes[lobe.ventIndex];
         ventOverpressure = d.breachedCrest ? clamp((P - 0.30) * 1.4, 0, 1) : 0;
         ventTemp = d.temperature;
-        // Anchor directly onto the upper basalt cap slab directly beneath this lobe
         const col = lobe.localOffsetX < -0.35 ? 0 : lobe.localOffsetX < 0 ? 1 : lobe.localOffsetX < 0.35 ? 2 : 3;
         const slab = this.slabs[2 * SLAB_COLUMNS + col];
         parentSlabDy = slab.dy;
         parentSlabDx = slab.dx;
-        // Account for slab anticlinal roll slope so lobe stays seated flush on tilted basalt crest
         parentRotSlopeY = Math.sin(slab.rotZ) * (lobe.localOffsetX - slab.restCenterX);
+      } else if (lobe.ventType === 'face-dike') {
+        const d = this.dikes[lobe.ventIndex];
+        const colBoundaryIdx = lobe.ventIndex === 0 ? 2 : lobe.ventIndex === 1 ? 1 : 3;
+        const yRel = clamp(lobe.localOffsetY, 0.14, OVERBURDEN_HEIGHT - 0.08);
+        const tierIdx = yRel < 0.29 ? 0 : yRel < 0.58 ? 1 : 2;
+        const sL = this.slabs[tierIdx * SLAB_COLUMNS + (colBoundaryIdx - 1)];
+        const sR = this.slabs[tierIdx * SLAB_COLUMNS + colBoundaryIdx];
+        ventOverpressure =
+          d.height >= yRel && d.aperture > 0.010 ? clamp((P - 0.28) * 1.38 * (1 - this.sillFraction * 0.55), 0, 1) : 0;
+        ventTemp = d.temperature;
+        parentSlabDx = 0.5 * (sL.dx + sR.dx);
+        parentSlabDy = 0.5 * (sL.dy + sR.dy);
+        parentRotSlopeY = 0;
       } else {
         const s = this.sills[lobe.ventIndex];
-        ventOverpressure = s.thickness > 0.022 ? clamp((P - 0.26) * 1.35 * this.sillFraction, 0, 1) : 0;
+        ventOverpressure = s.thickness > 0.020 ? clamp((P - 0.26) * 1.35 * this.sillFraction, 0, 1) : 0;
         ventTemp = s.temperature;
         const tierBelow = lobe.ventIndex;
         const tierAbove = lobe.ventIndex + 1;
@@ -967,25 +1196,43 @@ export class TectonicMagmaSolver {
       // Viscous inflation & sluggish gravitational pahoehoe creep while hot and fed
       const fluidity = smoothstep(0.18, 0.85, lobe.coreTemp);
       if (ventOverpressure > 0.05 && lobe.growth < 1.0) {
-        const growStep = (0.38 + 0.52 * ventOverpressure) * (0.35 + 0.65 * fluidity) * dt;
+        const growStep = (0.40 + 0.54 * ventOverpressure) * (0.35 + 0.65 * fluidity) * dt;
         lobe.growth = Math.min(1.0, lobe.growth + growStep);
-        // Subtle viscous flow creep outward along the rock crest or face (stays grounded in seam)
-        lobe.localOffsetX += lobe.flowX * growStep * 0.042;
-        lobe.localOffsetY += lobe.flowY * growStep * 0.014;
-        lobe.localOffsetZ += lobe.flowZ * growStep * 0.022;
+        if (lobe.ventType === 'face-dike') {
+          // Sag gently downward & pillow slightly proud over the vertical cleft lip
+          lobe.localOffsetY = clamp(lobe.localOffsetY + lobe.flowY * growStep * 0.026, 0.12, OVERBURDEN_HEIGHT - 0.05);
+          lobe.localOffsetZ += lobe.flowZ * growStep * 0.016;
+          lobe.localOffsetX += lobe.flowX * growStep * 0.014;
+        } else {
+          lobe.localOffsetX += lobe.flowX * growStep * 0.048;
+          lobe.localOffsetY += lobe.flowY * growStep * 0.016;
+          lobe.localOffsetZ += lobe.flowZ * growStep * 0.026;
+        }
       }
 
-      // Sync world coordinates strictly to the moving overburden slab so lobes never float
+      // Sync world coordinates strictly to the moving overburden slab & press envelope (zero floating/clipping!)
       if (lobe.ventType === 'crest-dike') {
         const baseY = evalBeddingPlaneY(STRATA_TIERS, lobe.localOffsetX, lobe.localOffsetZ);
-        lobe.posX = clamp(lobe.localOffsetX + parentSlabDx, -CORE_HALF_W + 0.05, CORE_HALF_W - 0.05);
-        lobe.posY = baseY + parentSlabDy + parentRotSlopeY + lobe.localOffsetY;
-        lobe.posZ = clamp(lobe.localOffsetZ, -CORE_HALF_D + 0.06, CORE_HALF_D - 0.06);
+        lobe.posX = clamp(lobe.localOffsetX + parentSlabDx, -maxPressX, maxPressX);
+        lobe.posY = clamp(baseY + parentSlabDy + parentRotSlopeY + lobe.localOffsetY, OVERBURDEN_TOP_Y - 0.03, maxPressY);
+        lobe.posZ = clamp(lobe.localOffsetZ, -CORE_HALF_D + 0.05, CORE_HALF_D - 0.05);
+      } else if (lobe.ventType === 'face-dike') {
+        const colBoundaryIdx = lobe.ventIndex === 0 ? 2 : lobe.ventIndex === 1 ? 1 : 3;
+        const d = this.dikes[lobe.ventIndex];
+        const zSign = lobe.localOffsetZ >= 0 ? 1 : -1;
+        const zFace = zSign * CORE_HALF_D;
+        const yRest = OVERBURDEN_BOTTOM_Y + lobe.localOffsetY;
+        const seamX = evalColumnSeamX(colBoundaryIdx, yRest, zFace);
+        // When compressional clamping seals the vertical dike shut, tuck face drips cleanly back into the seam!
+        const closedPinch = this.sillFraction > 0.60 && d.aperture < 0.014 ? 0.022 : 0;
+        lobe.posX = clamp(seamX + lobe.localOffsetX + parentSlabDx, -maxPressX, maxPressX);
+        lobe.posY = clamp(yRest + parentSlabDy, CHAMBER_ROOF_Y + 0.07, maxPressY - 0.03);
+        lobe.posZ = clamp(lobe.localOffsetZ - zSign * closedPinch, -(CORE_HALF_D + 0.016), CORE_HALF_D + 0.016);
       } else {
         const bedY = evalBeddingPlaneY(lobe.ventIndex + 1, lobe.localOffsetX, lobe.localOffsetZ);
-        lobe.posX = clamp(lobe.localOffsetX + parentSlabDx, -CORE_HALF_W + 0.08, CORE_HALF_W - 0.08);
-        lobe.posY = bedY + parentSlabDy + parentRotSlopeY + lobe.localOffsetY;
-        lobe.posZ = clamp(lobe.localOffsetZ, -(CORE_HALF_D + 0.018), CORE_HALF_D + 0.018);
+        lobe.posX = clamp(lobe.localOffsetX + parentSlabDx, -maxPressX, maxPressX);
+        lobe.posY = clamp(bedY + parentSlabDy + parentRotSlopeY + lobe.localOffsetY, CHAMBER_ROOF_Y + 0.07, maxPressY - 0.03);
+        lobe.posZ = clamp(lobe.localOffsetZ, -(CORE_HALF_D + 0.022), CORE_HALF_D + 0.022);
       }
 
       // Live Cooling & Obsidian Re-Cracking Dynamics:
@@ -993,24 +1240,24 @@ export class TectonicMagmaSolver {
       // while core stays warmer longer; a fresh pressure surge fractures the dark obsidian skin!
       const freshFeed = ventOverpressure * ventTemp;
       const surgeCrack =
-        (this.pressureSurge * 1.45 + Math.max(0, freshFeed - lobe.crustTemp) * 0.95) *
+        (this.pressureSurge * 1.48 + Math.max(0, freshFeed - lobe.crustTemp) * 0.96) *
         smoothstep(0.02, 0.48, 0.55 - lobe.crustTemp);
 
       if (surgeCrack > 0.04 && P > 0.35) {
-        lobe.crackIntensity = Math.min(1.0, lobe.crackIntensity + surgeCrack * dt * 3.6);
+        lobe.crackIntensity = Math.min(1.0, lobe.crackIntensity + surgeCrack * dt * 3.8);
         lobe.coreTemp = Math.min(0.96, lobe.coreTemp + surgeCrack * dt * 0.85);
-        lobe.wrinkle = Math.min(1.0, lobe.wrinkle + dt * 0.28);
+        lobe.wrinkle = Math.min(1.0, lobe.wrinkle + dt * 0.30);
       } else {
         lobe.crackIntensity *= Math.exp(-dt * 0.72);
       }
 
       // Outer crust cools strongly into glossy volcanic obsidian over ~4-6s when unpressurized,
-      // while staying smoldering cinnabar/blistered while hot pressurized magma actively feeds the vent
-      const crustFloor = clamp(freshFeed * (0.50 - lobe.growth * 0.16) + 0.02, 0.02, 0.92);
+      // while forming dramatic tearing dark crust islands over hot glowing seams when fed
+      const crustFloor = clamp(freshFeed * (0.48 - lobe.growth * 0.16) + 0.02, 0.02, 0.90);
       const crustCoolRate =
-        (0.115 + 0.24 * lobe.crustTemp * lobe.crustTemp) * (1.0 - 0.35 * freshFeed);
+        (0.118 + 0.24 * lobe.crustTemp * lobe.crustTemp) * (1.0 - 0.35 * freshFeed);
       if (freshFeed > lobe.crustTemp && lobe.growth < 0.72) {
-        lobe.crustTemp += (freshFeed * 0.92 - lobe.crustTemp) * (1 - Math.exp(-dt * 2.2));
+        lobe.crustTemp += (freshFeed * 0.90 - lobe.crustTemp) * (1 - Math.exp(-dt * 2.2));
       } else if (lobe.crustTemp < crustFloor) {
         lobe.crustTemp += (crustFloor - lobe.crustTemp) * (1 - Math.exp(-dt * 1.8));
       } else {
@@ -1018,7 +1265,7 @@ export class TectonicMagmaSolver {
       }
 
       // Core cools more slowly than crust so fresh cracks reveal glowing cinnabar-amber interior
-      const coreFloor = clamp(freshFeed * 0.72 + 0.03, 0.03, 0.98);
+      const coreFloor = clamp(freshFeed * 0.74 + 0.03, 0.03, 0.98);
       const coreCoolRate = (0.062 + 0.14 * lobe.coreTemp * lobe.coreTemp) * (1.0 - 0.65 * freshFeed);
       if (freshFeed > lobe.coreTemp && lobe.growth < 0.85) {
         lobe.coreTemp += (freshFeed - lobe.coreTemp) * (1 - Math.exp(-dt * 1.8));
@@ -1030,13 +1277,13 @@ export class TectonicMagmaSolver {
 
       // Accumulate ropy pahoehoe skin wrinkles as viscous melt cools
       if (lobe.crustTemp > 0.08 && lobe.crustTemp < 0.75) {
-        lobe.wrinkle = Math.min(1.0, lobe.wrinkle + dt * 0.12);
+        lobe.wrinkle = Math.min(1.0, lobe.wrinkle + dt * 0.14);
       }
     }
   }
 
-  private spawnLobe(ventType: 'crest-dike' | 'flank-sill', ventIndex: number): void {
-    // Prefer an unused slot; if full, recycle the oldest fully quenched lobe
+  private spawnLobe(ventType: 'crest-dike' | 'face-dike' | 'flank-sill', ventIndex: number): void {
+    // Prefer an unused slot; if full, recycle the oldest lobe
     let slotIdx = -1;
     for (let i = 0; i < this.lobes.length; i++) {
       if (!this.lobes[i].active) {
@@ -1059,55 +1306,295 @@ export class TectonicMagmaSolver {
     const s1 = hashUnit(this.lobeSpawnCursor * 3.17 + ventIndex * 11.3);
     const s2 = hashUnit(this.lobeSpawnCursor * 7.41 + slotIdx * 5.9);
     const s3 = hashUnit(this.lobeSpawnCursor * 13.7 + ventIndex * 2.3);
+    const s4 = hashUnit(this.lobeSpawnCursor * 19.1 + slotIdx * 3.7);
 
     lobe.active = true;
     lobe.ventType = ventType;
     lobe.ventIndex = ventIndex;
     lobe.ageSec = 0;
-    lobe.growth = 0.18;
-    lobe.coreTemp = clamp(0.84 + 0.15 * this.chamberPressure, 0.75, 0.99);
-    lobe.crustTemp = clamp(0.68 + 0.22 * this.chamberPressure, 0.58, 0.94);
-    lobe.crackIntensity = 0.65;
-    lobe.wrinkle = 0.15 + s3 * 0.22;
+    lobe.growth = 0.22;
+    lobe.coreTemp = clamp(0.86 + 0.14 * this.chamberPressure, 0.76, 0.99);
+    lobe.crustTemp = clamp(0.66 + 0.22 * this.chamberPressure, 0.56, 0.92);
+    lobe.crackIntensity = 0.72;
+    lobe.wrinkle = 0.20 + s3 * 0.24;
 
     if (ventType === 'crest-dike') {
       const seamX = DIKE_SEAM_X[ventIndex];
-      const zPos = (s1 - 0.5) * (CORE_DEPTH - 0.24);
+      // Bias slightly forward on early lobes so rich braided crest pillows visibly drape toward the front basalt lip!
+      const zPos =
+        this.lobeSpawnCursor % 4 === 1
+          ? 0.26 + s1 * 0.22
+          : (s1 - 0.5) * (CORE_DEPTH - 0.16);
       const side = s2 > 0.5 ? 1 : -1;
-      lobe.localOffsetX = seamX + side * (0.015 + s3 * 0.042);
-      // Slightly seated into the crest seam so growing pillows never float above basalt
-      lobe.localOffsetY = -0.004 + s2 * 0.008;
+      // Compound braided toe sizes: broad low-slung parent pillows + budding satellite pahoehoe toes
+      // Keep central crest spillovers cleanly clear of the two brass heave-follower feet at (x=±0.25, z=0.28)
+      const isSatellite = s4 > 0.56;
+      const rawOffsetX = seamX + side * (isSatellite ? 0.048 + s3 * 0.056 : 0.012 + s3 * 0.034);
+      const nearFollowerFoot = Math.abs(Math.abs(rawOffsetX) - 0.25) < 0.095 && Math.abs(zPos - 0.28) < 0.11;
+      lobe.localOffsetX = nearFollowerFoot ? seamX + side * 0.045 : rawOffsetX;
+      lobe.localOffsetY = -0.005 + s2 * 0.008;
       lobe.localOffsetZ = zPos;
-      lobe.flowX = side * (0.65 + s3 * 0.45);
-      lobe.flowY = -0.05;
-      lobe.flowZ = (s2 - 0.5) * 0.5;
-      lobe.radiusX = 0.072 + s1 * 0.064;
-      lobe.radiusY = 0.032 + s2 * 0.022;
-      lobe.radiusZ = 0.092 + s3 * 0.072;
+      lobe.flowX = side * (0.64 + s3 * 0.42);
+      lobe.flowY = -0.04;
+      lobe.flowZ = zPos > 0.34 ? 0.34 + s2 * 0.22 : (s2 - 0.5) * 0.46;
+      lobe.radiusX = isSatellite ? 0.066 + s1 * 0.046 : 0.102 + s1 * 0.068;
+      lobe.radiusY = isSatellite ? 0.028 + s2 * 0.016 : 0.040 + s2 * 0.024;
+      lobe.radiusZ = isSatellite ? 0.082 + s3 * 0.050 : 0.116 + s3 * 0.074;
       lobe.yaw = Math.atan2(lobe.flowX, lobe.flowZ);
-      lobe.pitch = -0.08 - s3 * 0.12;
+      lobe.pitch = -0.06 - s3 * 0.12;
+      lobe.roll = side * (0.04 + s4 * 0.07);
+      lobe.posX = lobe.localOffsetX;
+      lobe.posY = OVERBURDEN_TOP_Y + lobe.localOffsetY;
+      lobe.posZ = lobe.localOffsetZ;
+    } else if (ventType === 'face-dike') {
+      const d = this.dikes[ventIndex];
+      const frontOrBack = s2 > 0.34 ? 1 : -1;
+      // Anchor organically near bedding intersections where pressurized dikes swell into slumped downward lava tongues
+      const ledgeBand = (this.lobeSpawnCursor % 2 === 0 ? 0.56 : 0.29) + (s1 - 0.5) * 0.08;
+      const yRel = clamp(ledgeBand, 0.22, Math.max(0.26, Math.min(d.height - 0.08, OVERBURDEN_HEIGHT - 0.09)));
+      const sideBias = (s3 - 0.5) * 0.010;
+      lobe.localOffsetX = sideBias;
+      lobe.localOffsetY = yRel;
+      // Deeply fused into the cleft mouth so it reads as an elongated slumped viscous lava tongue (never a loose bead!)
+      lobe.localOffsetZ = frontOrBack * (CORE_HALF_D - 0.020);
+      lobe.flowX = sideBias * 0.8;
+      lobe.flowY = -0.82 - s4 * 0.28;
+      lobe.flowZ = frontOrBack * (0.28 + s3 * 0.14);
+      lobe.radiusX = 0.036 + s1 * 0.020;
+      lobe.radiusY = 0.058 + s2 * 0.028;
+      lobe.radiusZ = 0.024 + s3 * 0.012;
+      lobe.yaw = (s3 - 0.5) * 0.16;
+      lobe.pitch = frontOrBack * (0.32 + s4 * 0.18);
+      lobe.roll = (s1 - 0.5) * 0.12;
+      const colBoundaryIdx = ventIndex === 0 ? 2 : ventIndex === 1 ? 1 : 3;
+      lobe.posX = evalColumnSeamX(colBoundaryIdx, OVERBURDEN_BOTTOM_Y + yRel, frontOrBack * CORE_HALF_D) + sideBias;
+      lobe.posY = OVERBURDEN_BOTTOM_Y + yRel;
+      lobe.posZ = lobe.localOffsetZ;
     } else {
       const sill = this.sills[ventIndex];
-      const frontOrBack = s2 > 0.34 ? 1 : -1;
-      // Spread irregularly across central-to-mid sill span, alternating lower/upper sills cleanly
-      const xPos = (s1 - 0.5) * Math.min(CORE_WIDTH - 0.36, sill.halfWidth * 1.55);
+      const frontOrBack = s2 > 0.30 ? 1 : -1;
+      const xPos = (s1 - 0.5) * Math.min(CORE_WIDTH - 0.34, sill.halfWidth * 1.62);
       lobe.localOffsetX = xPos;
-      lobe.localOffsetY = -0.008 + (s3 - 0.5) * 0.010;
-      // Tucked into the open bedding lip so molten tongues ooze out of the fissure instead of floating on the face
-      lobe.localOffsetZ = frontOrBack * (CORE_HALF_D - 0.008);
-      lobe.flowX = (s1 - 0.5) * 0.28;
-      lobe.flowY = -0.58;
-      lobe.flowZ = frontOrBack * 0.42;
-      lobe.radiusX = 0.078 + s1 * 0.068;
-      lobe.radiusY = 0.026 + s2 * 0.018;
-      lobe.radiusZ = 0.038 + s3 * 0.026;
-      lobe.yaw = (s1 - 0.5) * 0.32;
-      lobe.pitch = frontOrBack * (0.24 + s3 * 0.22);
+      lobe.localOffsetY = -0.006 + (s3 - 0.5) * 0.010;
+      lobe.localOffsetZ = frontOrBack * (CORE_HALF_D - 0.006);
+      lobe.flowX = (s1 - 0.5) * 0.30;
+      lobe.flowY = -0.62 - s4 * 0.26;
+      lobe.flowZ = frontOrBack * 0.46;
+      lobe.radiusX = 0.084 + s1 * 0.068;
+      lobe.radiusY = 0.028 + s2 * 0.020;
+      lobe.radiusZ = 0.038 + s3 * 0.024;
+      lobe.yaw = (s1 - 0.5) * 0.34;
+      lobe.pitch = frontOrBack * (0.28 + s3 * 0.24);
+      lobe.roll = (s4 - 0.5) * 0.16;
+      lobe.posX = lobe.localOffsetX;
+      lobe.posY = SILL_BED_Y[ventIndex];
+      lobe.posZ = lobe.localOffsetZ;
+    }
+  }
+
+  /**
+   * Zero-allocation physical spall chip update: dislodges tiny angular basalt & yellow-ochre
+   * tuff chips whenever vertical dikes or horizontal sills actively widen, tumbling them down
+   * onto the lower steel base platen deck with gravity & damped bounce.
+   */
+  private updateRockChips(dt: number): void {
+    let dikeOpenRate = 0;
+    let widestDike = 0;
+    for (let i = 0; i < 3; i++) {
+      const dv = Math.max(0, (this.dikes[i].aperture - this.prevDikeApertures[i]) / dt);
+      if (dv > dikeOpenRate) {
+        dikeOpenRate = dv;
+        widestDike = i;
+      }
+    }
+    let sillOpenRate = 0;
+    let widestSill = 0;
+    for (let i = 0; i < 2; i++) {
+      const sv = Math.max(0, (this.sills[i].thickness - this.prevSillThicknesses[i]) / dt);
+      if (sv > sillOpenRate) {
+        sillOpenRate = sv;
+        widestSill = i;
+      }
     }
 
-    lobe.posX = lobe.localOffsetX;
-    lobe.posY = ventType === 'crest-dike' ? OVERBURDEN_TOP_Y + lobe.localOffsetY : SILL_BED_Y[ventIndex];
-    lobe.posZ = lobe.localOffsetZ;
+    const spallDrive = dikeOpenRate * 46.0 + sillOpenRate * 38.0 + this.pressureSurge * 12.0;
+    if (spallDrive > 0.35 && this.chamberPressure > 0.22) {
+      this.chipSpawnAcc += dt * Math.min(28.0, spallDrive);
+      while (this.chipSpawnAcc >= 1.0) {
+        this.chipSpawnAcc -= 1.0;
+        const chip = this.rockChips[this.chipSpawnCursor];
+        this.chipSpawnCursor = (this.chipSpawnCursor + 1) % ROCK_CHIP_COUNT;
+
+        const seed = this.simTimeSec * 37.3 + this.chipSpawnCursor * 13.1;
+        const r1 = hashUnit(seed + 1.1);
+        const r2 = hashUnit(seed + 4.7);
+        const r3 = hashUnit(seed + 9.3);
+        const r4 = hashUnit(seed + 15.9);
+        const frontSign = r2 > 0.28 ? 1 : -1;
+
+        chip.active = true;
+        chip.age = 0;
+        chip.life = 1.65 + r1 * 1.15;
+        chip.bounces = 0;
+        chip.scale = 0.0085 + r3 * 0.011;
+
+        if (sillOpenRate > dikeOpenRate && this.sills[widestSill].halfWidth > 0.18) {
+          const s = this.sills[widestSill];
+          const xSpawn = (r1 - 0.5) * Math.min(CORE_WIDTH - 0.26, s.halfWidth * 1.7);
+          const bedY = evalBeddingPlaneY(widestSill + 1, xSpawn, frontSign * CORE_HALF_D);
+          chip.x = xSpawn;
+          chip.y = bedY + this.heaveDisplacement * 0.55 + (r4 - 0.5) * 0.025;
+          chip.z = frontSign * (CORE_HALF_D + 0.014);
+          chip.vx = (r1 - 0.5) * 0.22;
+          chip.vy = 0.06 + r3 * 0.16;
+          chip.vz = frontSign * (0.20 + r4 * 0.26);
+          // Sill 0 borders lower basalt/tuff; sill 1 borders tuff/upper basalt
+          chip.stratumTone = r4 > 0.42 ? 1.0 : 0.0;
+        } else {
+          const d = this.dikes[widestDike];
+          const colBoundaryIdx = widestDike === 0 ? 2 : widestDike === 1 ? 1 : 3;
+          const yRel = 0.12 + r1 * Math.max(0.18, Math.min(d.height, OVERBURDEN_HEIGHT));
+          const yWorld = OVERBURDEN_BOTTOM_Y + yRel;
+          const seamX = evalColumnSeamX(colBoundaryIdx, yWorld, frontSign * CORE_HALF_D);
+          chip.x = seamX + (r3 - 0.5) * 0.032;
+          chip.y = yWorld + this.heaveDisplacement * 0.45;
+          chip.z = frontSign * (CORE_HALF_D + 0.014);
+          chip.vx = (r3 - 0.5) * 0.26;
+          chip.vy = 0.08 + r4 * 0.22;
+          chip.vz = frontSign * (0.18 + r1 * 0.28);
+          // Match exact stratigraphic tier color: middle tier (y in [0.07, 0.36]) spawns ochre tuff chips!
+          chip.stratumTone = yWorld > TIER_BOUNDARIES_Y[1] && yWorld < TIER_BOUNDARIES_Y[2] ? 1.0 : 0.0;
+        }
+
+        chip.rotX = r1 * Math.PI * 2;
+        chip.rotY = r2 * Math.PI * 2;
+        chip.rotZ = r3 * Math.PI * 2;
+        chip.vRotX = (r1 - 0.5) * 11.0;
+        chip.vRotY = (r2 - 0.5) * 11.0;
+        chip.vRotZ = (r4 - 0.5) * 11.0;
+      }
+    }
+
+    // Integrate active rock chips with gravity & clean bounce on lower steel platen deck
+    const deckFloorY = CHAMBER_BOTTOM_Y + 0.016;
+    for (let i = 0; i < ROCK_CHIP_COUNT; i++) {
+      const chip = this.rockChips[i];
+      if (!chip.active) continue;
+
+      chip.age += dt;
+      if (chip.age >= chip.life) {
+        chip.active = false;
+        continue;
+      }
+
+      chip.vy -= 3.65 * dt;
+      chip.x += chip.vx * dt;
+      chip.y += chip.vy * dt;
+      chip.z += chip.vz * dt;
+      chip.rotX += chip.vRotX * dt;
+      chip.rotY += chip.vRotY * dt;
+      chip.rotZ += chip.vRotZ * dt;
+
+      // Bounce on lower base platen deck (x in [-1.38, 1.38], z in [-0.66, 0.66])
+      if (
+        chip.y < deckFloorY &&
+        Math.abs(chip.x) < 1.36 &&
+        Math.abs(chip.z) < 0.66 &&
+        chip.vy < 0
+      ) {
+        chip.y = deckFloorY;
+        chip.vy = -chip.vy * 0.24;
+        chip.vx *= 0.56;
+        chip.vz *= 0.56;
+        chip.vRotX *= 0.45;
+        chip.vRotY *= 0.45;
+        chip.vRotZ *= 0.45;
+        chip.bounces++;
+        if (Math.abs(chip.vy) < 0.05) {
+          chip.vy = 0;
+          chip.vRotX *= 0.2;
+          chip.vRotY *= 0.2;
+          chip.vRotZ *= 0.2;
+        }
+      }
+
+      // Cull chips that fall cleanly past the press base
+      if (chip.y < CHAMBER_BOTTOM_Y - 0.85) {
+        chip.active = false;
+      }
+    }
+  }
+
+  /**
+   * Zero-allocation drifting incandescent ember update: rises lazily from active breached
+   * crest fissures while pressurized and fades smoothly out when quenched.
+   */
+  private updateEmbers(dt: number): void {
+    const P = this.chamberPressure;
+    const d0 = this.dikes[0];
+    const d1 = this.dikes[1];
+    const d2 = this.dikes[2];
+    const crestErupting = d0.breachedCrest || d1.breachedCrest || d2.breachedCrest;
+    const activeFrontVent = d0.height > 0.56 && d0.aperture > 0.024 && d0.temperature > 0.46;
+
+    if ((crestErupting || activeFrontVent) && P > 0.36) {
+      const rate = (crestErupting ? 8.5 : 4.2) + P * 9.5;
+      this.emberSpawnAcc += dt * rate;
+      while (this.emberSpawnAcc >= 1.0) {
+        this.emberSpawnAcc -= 1.0;
+        const ep = this.embers[this.emberSpawnCursor];
+        this.emberSpawnCursor = (this.emberSpawnCursor + 1) % EMBER_COUNT;
+
+        const seed = this.simTimeSec * 47.1 + this.emberSpawnCursor * 19.3;
+        const r1 = hashUnit(seed + 0.7);
+        const r2 = hashUnit(seed + 5.3);
+        const r3 = hashUnit(seed + 11.9);
+
+        let dikeIdx = 0;
+        if (d1.breachedCrest && r3 < 0.28) dikeIdx = 1;
+        else if (d2.breachedCrest && r3 > 0.72) dikeIdx = 2;
+
+        ep.active = true;
+        ep.age = 0;
+        ep.life = 1.05 + r1 * 1.15;
+        ep.seed = seed;
+        ep.x = DIKE_SEAM_X[dikeIdx] + (r1 - 0.5) * 0.14;
+        if (crestErupting) {
+          ep.y = OVERBURDEN_TOP_Y + this.heaveDisplacement + 0.028;
+          ep.z = (r2 - 0.5) * (CORE_HALF_D * 1.42);
+        } else {
+          ep.y = OVERBURDEN_BOTTOM_Y + d0.height * (0.65 + r2 * 0.32);
+          ep.z = CORE_HALF_D + 0.025;
+        }
+        ep.vx = (r1 - 0.5) * 0.16;
+        ep.vy = 0.22 + r3 * 0.28;
+        ep.vz = (r2 - 0.5) * 0.16;
+        ep.heat = 0.74 + r3 * 0.24;
+        ep.scale = 0.48 + r1 * 0.72;
+      }
+    }
+
+    const quenchDecay = P < 0.12 ? 2.6 : 1.0;
+    for (let i = 0; i < EMBER_COUNT; i++) {
+      const ep = this.embers[i];
+      if (!ep.active) continue;
+
+      ep.age += dt * quenchDecay;
+      if (ep.age >= ep.life) {
+        ep.active = false;
+        ep.heat = 0;
+        continue;
+      }
+
+      // Gentle buoyant thermal swirl rising off the hot basalt crest
+      const swirl = this.simTimeSec * 2.8 + ep.seed;
+      ep.vx += Math.cos(swirl) * 0.16 * dt;
+      ep.vz += Math.sin(swirl * 1.13) * 0.14 * dt;
+      ep.vy = Math.max(0.06, ep.vy - 0.08 * dt);
+      ep.x += ep.vx * dt;
+      ep.y += ep.vy * dt;
+      ep.z += ep.vz * dt;
+    }
   }
 
   /** Returns the current geological stress regime classification. */
@@ -1140,6 +1627,15 @@ export class TectonicMagmaSolver {
       if (l.crustTemp < 0.20) quenchedCount++;
     }
 
+    let chipCount = 0;
+    for (let i = 0; i < this.rockChips.length; i++) {
+      if (this.rockChips[i].active) chipCount++;
+    }
+    let emberCount = 0;
+    for (let i = 0; i < this.embers.length; i++) {
+      if (this.embers[i].active) emberCount++;
+    }
+
     const maxSillThick = Math.max(this.sills[0].thickness, this.sills[1].thickness);
 
     return {
@@ -1155,6 +1651,10 @@ export class TectonicMagmaSolver {
       maxSillThickness: Number(maxSillThick.toFixed(4)),
       avgLobeCrustTemp: lobeCount > 0 ? Number((sumCrustTemp / lobeCount).toFixed(4)) : 0,
       quenchedObsidianFraction: lobeCount > 0 ? Number((quenchedCount / lobeCount).toFixed(4)) : 0,
+      hairlineCrackOpenness: Number(this.hairlineCrackOpenness.toFixed(4)),
+      activeRockChips: chipCount,
+      activeEmbers: emberCount,
+      gaugeNeedleAngle: Number(this.gaugeNeedleAngle.toFixed(4)),
       simTimeSec: Number(this.simTimeSec.toFixed(3)),
     };
   }

@@ -3,10 +3,9 @@ import { SpecimenStage } from '../../core/stage/SpecimenStage';
 import {
   CHAMBER_BOTTOM_Y,
   CHAMBER_ROOF_Y,
-  CORE_HALF_D,
-  DIKE_SEAM_X,
+  EMBER_COUNT,
   MAX_LOBES,
-  OVERBURDEN_TOP_Y,
+  ROCK_CHIP_COUNT,
   SLAB_COLUMNS,
   STRATA_TIERS,
   TectonicMagmaSolver,
@@ -16,7 +15,6 @@ import {
 import { createMagmaStudioEnvironment } from './studioEnv';
 import { createMagmaMaterials } from './materials';
 import {
-  EMBER_COUNT,
   buildHydraulicPistonAssembly,
   buildLateralClampAssemblies,
   buildMagmaSystemAssembly,
@@ -35,20 +33,6 @@ declare global {
 }
 
 type HitKind = 'none' | 'piston' | 'chamber' | 'core' | 'leftClamp' | 'rightClamp';
-
-interface EmberParticle {
-  x: number;
-  y: number;
-  z: number;
-  vx: number;
-  vy: number;
-  vz: number;
-  age: number;
-  life: number;
-  heat: number;
-  scale: number;
-  active: boolean;
-}
 
 // Pre-allocated scratch math objects (strictly zero per-frame allocations inside onTick)
 const _raycaster = new THREE.Raycaster();
@@ -133,10 +117,12 @@ async function mountDay23Magma(): Promise<void> {
   stage.specimenGroup.add(crestGlowLight);
 
   // Core geomechanics solver & GPU scene assemblies
+  // Boot pressurized in extensional rifting so radiating hairline fractures, swelling vertical dikes
+  // and braided pahoehoe crest/face spillovers are immediately visible on Frame 0!
   const sim = new TectonicMagmaSolver({
-    initialPressure: 0.58,
-    initialCompression: -0.34,
-    preWarmSec: 2.6,
+    initialPressure: 0.78,
+    initialCompression: -0.54,
+    preWarmSec: 3.8,
   });
   const materials = createMagmaMaterials();
 
@@ -151,26 +137,6 @@ async function mountDay23Magma(): Promise<void> {
   stage.specimenGroup.add(lateralClamps.group);
   stage.specimenGroup.add(rockCore.group);
   stage.specimenGroup.add(magmaSystem.group);
-
-  // Pre-allocated restrained volcanic ember pool for active crest eruptions
-  const embers: EmberParticle[] = [];
-  for (let i = 0; i < EMBER_COUNT; i++) {
-    embers.push({
-      x: 0,
-      y: OVERBURDEN_TOP_Y,
-      z: 0,
-      vx: 0,
-      vy: 0,
-      vz: 0,
-      age: 0,
-      life: 1,
-      heat: 0,
-      scale: 0,
-      active: false,
-    });
-  }
-  let emberCursor = 0;
-  let emberSpawnAcc = 0;
 
   // -------------------------------------------------------------------------
   // Tactile Pointer & Keyboard Interaction Controller
@@ -288,9 +254,9 @@ async function mountDay23Magma(): Promise<void> {
             !hasDraggedBeyondDeadzone &&
             (activeDrag === 'piston' || activeDrag === 'chamber' || activeDrag === 'core')
           ) {
-            sim.setHoldPump(true, 0.44);
+            sim.setHoldPump(true, 0.50);
           }
-        }, 120);
+        }, 115);
       } else {
         canvas.style.cursor = 'ew-resize';
       }
@@ -313,12 +279,12 @@ async function mountDay23Magma(): Promise<void> {
 
       if (activeDrag === 'piston' || activeDrag === 'chamber' || activeDrag === 'core') {
         // Dragging vertically upward pumps hydraulic magma pressure upward; downward relieves
-        sim.nudgePressure(-dy / 220);
+        sim.nudgePressure(-dy / 190);
       } else if (activeDrag === 'leftClamp' || activeDrag === 'rightClamp') {
         // Dragging inward toward the center increases compression; outward opens extensional tension
         const projAlongWorldX = projectDragAlongWorldX(dx, dy);
         const sideSign = activeDrag === 'leftClamp' ? 1 : -1;
-        const deltaCompression = (projAlongWorldX * sideSign) / 170;
+        const deltaCompression = (projAlongWorldX * sideSign) / 145;
         sim.nudgeCompression(deltaCompression);
       }
       return;
@@ -439,8 +405,8 @@ async function mountDay23Magma(): Promise<void> {
     lateralClamps.rightScrewWheelGroup.position.x = sim.platenOffset;
     lateralClamps.rightScrewWheelGroup.rotation.x = sim.clampScrewAngle;
 
-    // 4. Update Diegetic Bourdon Pressure Gauge Needle (-125° at P=0 -> +125° CW at P=1)
-    pressFrame.gaugeNeedleGroup.rotation.z = 2.18 - sim.chamberPressure * 4.36;
+    // 4. Update Expressive Diegetic Bourdon Pressure Gauge Needle (spring inertia + hydraulic surge flutter)
+    pressFrame.gaugeNeedleGroup.rotation.z = sim.gaugeNeedleAngle;
 
     // 5. Update 12 Interlocking Stratified Basalt & Ochre-Tuff Rock Slabs
     let tier0AvgDy = 0;
@@ -471,16 +437,17 @@ async function mountDay23Magma(): Promise<void> {
       pressFrame.heaveGaugeRods[i].position.y = baseTopY + crownSlab.dy + slopeY + 0.002;
     }
 
-    // 6. Update 3 Seam-Conforming Vertical Magma Dikes (exact jagged fracture gap fit!)
+    // 6. Update 3 Seam-Conforming Vertical Magma Dikes (jagged fracture fit + viscous convex meniscus bulge!)
     for (let i = 0; i < sim.dikes.length; i++) {
       const d = sim.dikes[i];
       const mesh = magmaSystem.dikeMeshes[i];
       const visibleH = d.height;
-      const veinThickness = Math.max(d.aperture * 1.15, d.quenchedObsidian * 0.016);
+      const veinThickness = Math.max(d.aperture * 1.18, d.quenchedObsidian * 0.017);
+      const oozeBulge = Math.max(0, Math.min(1, sim.chamberPressure * (0.45 + 0.55 * d.temperature)));
 
       if (visibleH > 0.018 && veinThickness > 0.004) {
         mesh.visible = true;
-        updateDikeGeometry(mesh.geometry, i, visibleH, veinThickness, sim.slabs);
+        updateDikeGeometry(mesh.geometry, i, visibleH, veinThickness, sim.slabs, oozeBulge, elapsedSec);
       } else {
         mesh.visible = false;
       }
@@ -491,21 +458,22 @@ async function mountDay23Magma(): Promise<void> {
     for (let i = 0; i < sim.sills.length; i++) {
       const s = sim.sills[i];
       const mesh = magmaSystem.sillMeshes[i];
-      const sillThick = Math.max(s.thickness * 1.12, s.quenchedObsidian * 0.012);
+      const sillThick = Math.max(s.thickness * 1.15, s.quenchedObsidian * 0.013);
       const hasOpenBedding = s.thickness > 0.014;
       const hasQuenchedCompressionalSill =
         s.quenchedObsidian > 0.40 && s.halfWidth > 0.26 && maxDikeAperture < 0.016;
       const sillActive = s.halfWidth > 0.06 && (hasOpenBedding || hasQuenchedCompressionalSill);
+      const sillBulge = Math.max(0, Math.min(1, sim.chamberPressure * (0.45 + 0.55 * s.temperature)));
 
       if (sillActive) {
         mesh.visible = true;
-        updateSillGeometry(mesh.geometry, i, s.halfWidth, sillThick, sim.slabs);
+        updateSillGeometry(mesh.geometry, i, s.halfWidth, sillThick, sim.slabs, sillBulge, elapsedSec);
       } else {
         mesh.visible = false;
       }
     }
 
-    // 8. Update 24 Instanced Smooth Ropy Viscoplastic Pahoehoe Magma Lobes (1 draw call, zero alloc)
+    // 8. Update MAX_LOBES Instanced Smooth Braided Ropy Pahoehoe Magma Lobes (1 draw call, zero alloc)
     const thermalArr = magmaSystem.lobeThermalAttr.array as Float32Array;
     for (let i = 0; i < MAX_LOBES; i++) {
       const lobe = sim.lobes[i];
@@ -513,7 +481,7 @@ async function mountDay23Magma(): Promise<void> {
         const g = lobe.growth;
         const swell = 0.35 + 0.65 * g;
         _pos.set(lobe.posX, lobe.posY, lobe.posZ);
-        _euler.set(lobe.pitch, lobe.yaw, 0, 'YXZ');
+        _euler.set(lobe.pitch, lobe.yaw, lobe.roll, 'YXZ');
         _quat.setFromEuler(_euler);
         _scale.set(lobe.radiusX * swell, lobe.radiusY * swell, lobe.radiusZ * swell);
         _mat4.compose(_pos, _quat, _scale);
@@ -540,68 +508,56 @@ async function mountDay23Magma(): Promise<void> {
     magmaSystem.lobeInstancedMesh.instanceMatrix.needsUpdate = true;
     magmaSystem.lobeThermalAttr.needsUpdate = true;
 
-    // 9. Update Restrained Rising Volcanic Ash / Spatter Ember Motes During Active Eruptions
-    const crestErupting = sim.dikes[0].breachedCrest || sim.dikes[1].breachedCrest || sim.dikes[2].breachedCrest;
-    if (crestErupting && sim.chamberPressure > 0.42) {
-      emberSpawnAcc += dtSec * (7.0 + sim.chamberPressure * 10.0);
-      while (emberSpawnAcc >= 1.0) {
-        emberSpawnAcc -= 1.0;
-        const ep = embers[emberCursor];
-        emberCursor = (emberCursor + 1) % EMBER_COUNT;
-        const dikeIdx = sim.dikes[0].breachedCrest ? 0 : sim.dikes[1].breachedCrest ? 1 : 2;
-        const h1 = Math.sin(elapsedSec * 73.1 + emberCursor * 19.3) * 43758.5453;
-        const r1 = h1 - Math.floor(h1);
-        const h2 = Math.sin(elapsedSec * 41.7 + emberCursor * 11.7) * 29183.173;
-        const r2 = h2 - Math.floor(h2);
-        const h3 = Math.sin(elapsedSec * 91.3 + emberCursor * 5.3) * 18421.719;
-        const r3 = h3 - Math.floor(h3);
-
-        ep.active = true;
-        ep.age = 0;
-        ep.life = 0.85 + r1 * 0.95;
-        ep.x = DIKE_SEAM_X[dikeIdx] + (r1 - 0.5) * 0.14;
-        ep.y = OVERBURDEN_TOP_Y + sim.heaveDisplacement + 0.03;
-        ep.z = (r2 - 0.5) * (CORE_HALF_D * 1.45);
-        ep.vx = (r1 - 0.5) * 0.24;
-        ep.vy = 0.34 + r3 * 0.38;
-        ep.vz = (r2 - 0.5) * 0.22;
-        ep.heat = 0.72 + r3 * 0.26;
-        ep.scale = 0.55 + r1 * 0.85;
+    // 8b. Sync ROCK_CHIP_COUNT Dislodged Angular Basalt & Yellow-Ochre Tuff Spall Chips (1 draw call, zero alloc)
+    const chipToneArr = magmaSystem.rockChipToneAttr.array as Float32Array;
+    for (let i = 0; i < ROCK_CHIP_COUNT; i++) {
+      const chip = sim.rockChips[i];
+      if (chip.active) {
+        const u = chip.age / Math.max(0.05, chip.life);
+        const fadeScale = u > 0.78 ? Math.max(0, 1 - (u - 0.78) / 0.22) : 1;
+        const sc = chip.scale * fadeScale;
+        _pos.set(chip.x, chip.y, chip.z);
+        _euler.set(chip.rotX, chip.rotY, chip.rotZ, 'YXZ');
+        _quat.setFromEuler(_euler);
+        _scale.set(sc, sc, sc);
+        _mat4.compose(_pos, _quat, _scale);
+        magmaSystem.rockChipInstancedMesh.setMatrixAt(i, _mat4);
+        chipToneArr[i] = chip.stratumTone;
+      } else {
+        _pos.set(0, -10, 0);
+        _quat.identity();
+        _scale.set(0, 0, 0);
+        _mat4.compose(_pos, _quat, _scale);
+        magmaSystem.rockChipInstancedMesh.setMatrixAt(i, _mat4);
+        chipToneArr[i] = 0;
       }
     }
+    magmaSystem.rockChipInstancedMesh.instanceMatrix.needsUpdate = true;
+    magmaSystem.rockChipToneAttr.needsUpdate = true;
 
+    // 9. Sync EMBER_COUNT Drifting Incandescent Volcanic Embers from Solver (1 draw call, zero alloc)
     const emberHeatArr = magmaSystem.emberHeatAttr.array as Float32Array;
     for (let i = 0; i < EMBER_COUNT; i++) {
-      const ep = embers[i];
+      const ep = sim.embers[i];
       if (ep.active) {
-        ep.age += dtSec;
-        if (ep.age >= ep.life) {
-          ep.active = false;
-          ep.heat = 0;
-        } else {
-          ep.vy -= 0.16 * dtSec;
-          ep.x += ep.vx * dtSec;
-          ep.y += ep.vy * dtSec;
-          ep.z += ep.vz * dtSec;
-          const u = ep.age / ep.life;
-          const curHeat = ep.heat * Math.max(0, 1 - u * 1.15);
-          const sc = ep.scale * (1 - u * 0.55);
-          _pos.set(ep.x, ep.y, ep.z);
-          _euler.set(ep.age * 3.1, ep.age * 4.2, 0, 'YXZ');
-          _quat.setFromEuler(_euler);
-          _scale.set(sc, sc, sc);
-          _mat4.compose(_pos, _quat, _scale);
-          magmaSystem.emberInstancedMesh.setMatrixAt(i, _mat4);
-          emberHeatArr[i] = curHeat;
-          continue;
-        }
+        const u = ep.age / Math.max(0.05, ep.life);
+        const curHeat = ep.heat * Math.max(0, 1 - u * 1.15);
+        const sc = ep.scale * (1 - u * 0.55);
+        _pos.set(ep.x, ep.y, ep.z);
+        _euler.set(ep.age * 3.1, ep.age * 4.2, 0, 'YXZ');
+        _quat.setFromEuler(_euler);
+        _scale.set(sc, sc, sc);
+        _mat4.compose(_pos, _quat, _scale);
+        magmaSystem.emberInstancedMesh.setMatrixAt(i, _mat4);
+        emberHeatArr[i] = curHeat;
+      } else {
+        _pos.set(0, -10, 0);
+        _quat.identity();
+        _scale.set(0, 0, 0);
+        _mat4.compose(_pos, _quat, _scale);
+        magmaSystem.emberInstancedMesh.setMatrixAt(i, _mat4);
+        emberHeatArr[i] = 0;
       }
-      _pos.set(0, -10, 0);
-      _quat.identity();
-      _scale.set(0, 0, 0);
-      _mat4.compose(_pos, _quat, _scale);
-      magmaSystem.emberInstancedMesh.setMatrixAt(i, _mat4);
-      emberHeatArr[i] = 0;
     }
     magmaSystem.emberInstancedMesh.instanceMatrix.needsUpdate = true;
     magmaSystem.emberHeatAttr.needsUpdate = true;
@@ -616,6 +572,7 @@ async function mountDay23Magma(): Promise<void> {
     const maxDikeTemp = Math.max(d0.temperature, d1.temperature, d2.temperature);
     const maxSillTemp = Math.max(s0.temperature, s1.temperature);
     const maxHeat = Math.max(maxDikeTemp, maxSillTemp, sim.chamberPressure * 0.72);
+    const maxSillThick = Math.max(s0.thickness, s1.thickness);
 
     materials.uTime.value = elapsedSec;
     materials.uChamberState.value.set(
@@ -636,6 +593,12 @@ async function mountDay23Magma(): Promise<void> {
       s1.halfWidth,
       maxSillTemp,
       Math.max(s0.reCrackPulse, s1.reCrackPulse)
+    );
+    materials.uFractureState.value.set(
+      sim.hairlineCrackOpenness,
+      sim.hairlineCrackHeat,
+      Math.min(1, maxDikeAperture / 0.085),
+      Math.min(1, maxSillThick / 0.115)
     );
 
     const hAlpha = Math.min(1, dtSec * 14);
