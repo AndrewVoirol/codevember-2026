@@ -46,6 +46,9 @@ export interface Day24TelemetryState {
   maxRodDrift: number;
   activeGrabId: number | null;
   simTime: number;
+  reweaving?: boolean;
+  reweaveProgress?: number;
+  dustActiveCount?: number;
 }
 
 export interface RodBodyRecord {
@@ -64,6 +67,9 @@ export interface EggBodyRecord {
   readonly collider: RAPIER_NS.Collider;
   drop: number;
 }
+
+export const REWEAVE_DURATION_SEC = 0.85;
+export const MAX_DUST_MOTES = 64;
 
 const GRAVITY_Y = -9.81;
 const FALLEN_DROP_THRESHOLD = 0.16;
@@ -108,6 +114,599 @@ function rotateVecByQuatOut(
 }
 
 /**
+ * Zero-allocation shortest-arc quaternion slerp written directly into `out` at `offset`.
+ */
+function slerpQuatInto(
+  ax: number,
+  ay: number,
+  az: number,
+  aw: number,
+  bx: number,
+  by: number,
+  bz: number,
+  bw: number,
+  t: number,
+  out: Float32Array,
+  offset: number
+): void {
+  let dot = ax * bx + ay * by + az * bz + aw * bw;
+  let tx = bx;
+  let ty = by;
+  let tz = bz;
+  let tw = bw;
+  if (dot < 0) {
+    dot = -dot;
+    tx = -tx;
+    ty = -ty;
+    tz = -tz;
+    tw = -tw;
+  }
+
+  let s0: number;
+  let s1: number;
+  if (dot > 0.9995) {
+    s0 = 1 - t;
+    s1 = t;
+  } else {
+    const theta = Math.acos(Math.min(1, dot));
+    const sinTheta = Math.sin(theta);
+    s0 = Math.sin((1 - t) * theta) / sinTheta;
+    s1 = Math.sin(t * theta) / sinTheta;
+  }
+
+  const rx = ax * s0 + tx * s1;
+  const ry = ay * s0 + ty * s1;
+  const rz = az * s0 + tz * s1;
+  const rw = aw * s0 + tw * s1;
+  const invLen = 1 / (Math.hypot(rx, ry, rz, rw) || 1);
+  out[offset + 0] = rx * invLen;
+  out[offset + 1] = ry * invLen;
+  out[offset + 2] = rz * invLen;
+  out[offset + 3] = rw * invLen;
+}
+
+/**
+ * Quintic C^2 smootherstep: zero velocity and zero acceleration at both u = 0 and u = 1.
+ */
+function quinticEase(u: number): number {
+  const c = u <= 0 ? 0 : u >= 1 ? 1 : u;
+  return c * c * c * (10 + c * (-15 + 6 * c));
+}
+
+/**
+ * Pure, zero-allocation choreographed spiral re-weave controller (`~0.85 s`).
+ * Restores Tier 0 -> Tier 4 dowels along bottom-to-top arched spiral paths followed by
+ * the 3 river-pebble eggs settling gently into the birch oculus, handing off to Rapier
+ * at exact zero-velocity analytical equilibrium on completion.
+ */
+export class NestReweaveController {
+  readonly durationSec: number;
+  readonly rodCount: number;
+  readonly eggCount: number;
+
+  readonly rodCurrentPos: Float32Array;
+  readonly rodCurrentQuat: Float32Array;
+  readonly eggCurrentPos: Float32Array;
+  readonly eggCurrentQuat: Float32Array;
+
+  private readonly rodStartPos: Float32Array;
+  private readonly rodStartQuat: Float32Array;
+  private readonly rodTargetPos: Float32Array;
+  private readonly rodTargetQuat: Float32Array;
+  private readonly rodArcLift: Float32Array;
+  private readonly rodRadialBreath: Float32Array;
+  private readonly rodStartTime: Float32Array;
+  private readonly rodEndTime: Float32Array;
+
+  private readonly eggStartPos: Float32Array;
+  private readonly eggStartQuat: Float32Array;
+  private readonly eggTargetPos: Float32Array;
+  private readonly eggTargetQuat: Float32Array;
+  private readonly eggArcLift: Float32Array;
+  private readonly eggStartTime: Float32Array;
+  private readonly eggEndTime: Float32Array;
+
+  private active = false;
+  private elapsedSec = 0;
+
+  constructor(layout: ReciprocalDomeLayout, durationSec = REWEAVE_DURATION_SEC) {
+    this.durationSec = durationSec;
+    this.rodCount = layout.rods.length;
+    this.eggCount = layout.eggs.length;
+
+    this.rodStartPos = new Float32Array(this.rodCount * 3);
+    this.rodStartQuat = new Float32Array(this.rodCount * 4);
+    this.rodTargetPos = new Float32Array(this.rodCount * 3);
+    this.rodTargetQuat = new Float32Array(this.rodCount * 4);
+    this.rodCurrentPos = new Float32Array(this.rodCount * 3);
+    this.rodCurrentQuat = new Float32Array(this.rodCount * 4);
+    this.rodArcLift = new Float32Array(this.rodCount);
+    this.rodRadialBreath = new Float32Array(this.rodCount);
+    this.rodStartTime = new Float32Array(this.rodCount);
+    this.rodEndTime = new Float32Array(this.rodCount);
+
+    this.eggStartPos = new Float32Array(this.eggCount * 3);
+    this.eggStartQuat = new Float32Array(this.eggCount * 4);
+    this.eggTargetPos = new Float32Array(this.eggCount * 3);
+    this.eggTargetQuat = new Float32Array(this.eggCount * 4);
+    this.eggCurrentPos = new Float32Array(this.eggCount * 3);
+    this.eggCurrentQuat = new Float32Array(this.eggCount * 4);
+    this.eggArcLift = new Float32Array(this.eggCount);
+    this.eggStartTime = new Float32Array(this.eggCount);
+    this.eggEndTime = new Float32Array(this.eggCount);
+
+    // Precompute staggered bottom-to-top spiral schedule normalized to `durationSec` (0.85 s)
+    const tierBaseStart = [0.0, 0.11, 0.23, 0.33, 0.42];
+    const tierAzimuthSpan = [0.15, 0.14, 0.11, 0.10, 0.10];
+    const tierMoveDur = [0.40, 0.39, 0.37, 0.36, 0.34];
+    const scale = durationSec / 0.85;
+
+    for (let i = 0; i < this.rodCount; i++) {
+      const spec = layout.rods[i];
+      const t = Math.min(4, spec.tier);
+      const tierCount = layout.tiers[t]?.count ?? 8;
+      const frac = spec.indexInTier / Math.max(1, tierCount);
+      const tStart = (tierBaseStart[t] + frac * tierAzimuthSpan[t]) * scale;
+      const tEnd = Math.min(durationSec * 0.94, tStart + tierMoveDur[t] * scale);
+
+      this.rodStartTime[i] = tStart;
+      this.rodEndTime[i] = tEnd;
+
+      this.rodTargetPos[i * 3 + 0] = spec.center[0];
+      this.rodTargetPos[i * 3 + 1] = spec.center[1];
+      this.rodTargetPos[i * 3 + 2] = spec.center[2];
+      this.rodTargetQuat[i * 4 + 0] = spec.quat.x;
+      this.rodTargetQuat[i * 4 + 1] = spec.quat.y;
+      this.rodTargetQuat[i * 4 + 2] = spec.quat.z;
+      this.rodTargetQuat[i * 4 + 3] = spec.quat.w;
+
+      this.rodCurrentPos[i * 3 + 0] = spec.center[0];
+      this.rodCurrentPos[i * 3 + 1] = spec.center[1];
+      this.rodCurrentPos[i * 3 + 2] = spec.center[2];
+      this.rodCurrentQuat[i * 4 + 0] = spec.quat.x;
+      this.rodCurrentQuat[i * 4 + 1] = spec.quat.y;
+      this.rodCurrentQuat[i * 4 + 2] = spec.quat.z;
+      this.rodCurrentQuat[i * 4 + 3] = spec.quat.w;
+    }
+
+    for (let e = 0; e < this.eggCount; e++) {
+      const spec = layout.eggs[e];
+      const tStart = (0.48 + e * 0.045) * scale;
+      const tEnd = Math.min(durationSec, tStart + 0.28 * scale);
+      this.eggStartTime[e] = tStart;
+      this.eggEndTime[e] = tEnd;
+
+      this.eggTargetPos[e * 3 + 0] = spec.pos[0];
+      this.eggTargetPos[e * 3 + 1] = spec.pos[1];
+      this.eggTargetPos[e * 3 + 2] = spec.pos[2];
+      this.eggTargetQuat[e * 4 + 0] = spec.rot.x;
+      this.eggTargetQuat[e * 4 + 1] = spec.rot.y;
+      this.eggTargetQuat[e * 4 + 2] = spec.rot.z;
+      this.eggTargetQuat[e * 4 + 3] = spec.rot.w;
+
+      this.eggCurrentPos[e * 3 + 0] = spec.pos[0];
+      this.eggCurrentPos[e * 3 + 1] = spec.pos[1];
+      this.eggCurrentPos[e * 3 + 2] = spec.pos[2];
+      this.eggCurrentQuat[e * 4 + 0] = spec.rot.x;
+      this.eggCurrentQuat[e * 4 + 1] = spec.rot.y;
+      this.eggCurrentQuat[e * 4 + 2] = spec.rot.z;
+      this.eggCurrentQuat[e * 4 + 3] = spec.rot.w;
+    }
+  }
+
+  isActive(): boolean {
+    return this.active;
+  }
+
+  getProgress(): number {
+    if (!this.active) return 0;
+    return Math.min(1, this.elapsedSec / Math.max(1e-4, this.durationSec));
+  }
+
+  /**
+   * Captures current world poses from `sim` and starts the staggered spiral re-weave.
+   * Rods or eggs that tumbled far into the abyss stage cleanly from just below the hollow bore
+   * so they rise gracefully into place without high-velocity vertical streaks.
+   */
+  beginFromSim(sim: ReciprocalNestSim): void {
+    this.active = true;
+    this.elapsedSec = 0;
+
+    for (let i = 0; i < this.rodCount; i++) {
+      const rec = sim.rods[i];
+      const tx = this.rodTargetPos[i * 3 + 0];
+      const ty = this.rodTargetPos[i * 3 + 1];
+      const tz = this.rodTargetPos[i * 3 + 2];
+
+      let sx: number;
+      let sy: number;
+      let sz: number;
+      let qx: number;
+      let qy: number;
+      let qz: number;
+      let qw: number;
+
+      if (rec.removed) {
+        sx = tx * 1.24;
+        sy = -0.46 - rec.spec.tier * 0.05;
+        sz = tz * 1.24;
+        qx = rec.spec.quat.x;
+        qy = rec.spec.quat.y;
+        qz = rec.spec.quat.z;
+        qw = rec.spec.quat.w;
+      } else {
+        const tr = rec.body.translation();
+        const rq = rec.body.rotation();
+        if (tr.y < -1.25 || Math.hypot(tr.x, tr.z) > 3.2) {
+          // Stage deep-fallen rods cleanly below the hollow ring with preserved tumble angle
+          const rCur = Math.hypot(tr.x, tr.z);
+          const dirX = rCur > 0.05 ? tr.x / rCur : tx / (Math.hypot(tx, tz) || 1);
+          const dirZ = rCur > 0.05 ? tr.z / rCur : tz / (Math.hypot(tx, tz) || 1);
+          const stageR = 0.65 + (i % 7) * 0.085;
+          sx = dirX * stageR;
+          sy = -0.52 - rec.spec.tier * 0.055;
+          sz = dirZ * stageR;
+        } else {
+          sx = tr.x;
+          sy = tr.y;
+          sz = tr.z;
+        }
+        qx = rq.x;
+        qy = rq.y;
+        qz = rq.z;
+        qw = rq.w;
+      }
+
+      this.rodStartPos[i * 3 + 0] = sx;
+      this.rodStartPos[i * 3 + 1] = sy;
+      this.rodStartPos[i * 3 + 2] = sz;
+      this.rodStartQuat[i * 4 + 0] = qx;
+      this.rodStartQuat[i * 4 + 1] = qy;
+      this.rodStartQuat[i * 4 + 2] = qz;
+      this.rodStartQuat[i * 4 + 3] = qw;
+
+      this.rodCurrentPos[i * 3 + 0] = sx;
+      this.rodCurrentPos[i * 3 + 1] = sy;
+      this.rodCurrentPos[i * 3 + 2] = sz;
+      this.rodCurrentQuat[i * 4 + 0] = qx;
+      this.rodCurrentQuat[i * 4 + 1] = qy;
+      this.rodCurrentQuat[i * 4 + 2] = qz;
+      this.rodCurrentQuat[i * 4 + 3] = qw;
+
+      const dist = Math.hypot(tx - sx, ty - sy, tz - sz);
+      if (dist < 0.03) {
+        // Already near rest: graceful subtle spiral breath-lift ripple
+        this.rodArcLift[i] = 0.048;
+        this.rodRadialBreath[i] = 0.028;
+      } else {
+        // Displaced/fallen: smooth arched sweep clearing the outer brass lip
+        this.rodArcLift[i] = Math.min(0.42, 0.13 + dist * 0.22);
+        this.rodRadialBreath[i] = Math.min(0.14, 0.04 + dist * 0.06);
+      }
+    }
+
+    for (let e = 0; e < this.eggCount; e++) {
+      const rec = sim.eggs[e];
+      const tx = this.eggTargetPos[e * 3 + 0];
+      const ty = this.eggTargetPos[e * 3 + 1];
+      const tz = this.eggTargetPos[e * 3 + 2];
+      const tr = rec.body.translation();
+      const rq = rec.body.rotation();
+
+      let sx = tr.x;
+      let sy = tr.y;
+      let sz = tr.z;
+      if (sy < -1.0 || Math.hypot(sx, sz) > 2.6) {
+        sx = tx * 1.45;
+        sy = -0.38 - e * 0.07;
+        sz = tz * 1.45;
+      }
+
+      this.eggStartPos[e * 3 + 0] = sx;
+      this.eggStartPos[e * 3 + 1] = sy;
+      this.eggStartPos[e * 3 + 2] = sz;
+      this.eggStartQuat[e * 4 + 0] = rq.x;
+      this.eggStartQuat[e * 4 + 1] = rq.y;
+      this.eggStartQuat[e * 4 + 2] = rq.z;
+      this.eggStartQuat[e * 4 + 3] = rq.w;
+
+      this.eggCurrentPos[e * 3 + 0] = sx;
+      this.eggCurrentPos[e * 3 + 1] = sy;
+      this.eggCurrentPos[e * 3 + 2] = sz;
+      this.eggCurrentQuat[e * 4 + 0] = rq.x;
+      this.eggCurrentQuat[e * 4 + 1] = rq.y;
+      this.eggCurrentQuat[e * 4 + 2] = rq.z;
+      this.eggCurrentQuat[e * 4 + 3] = rq.w;
+
+      const dist = Math.hypot(tx - sx, ty - sy, tz - sz);
+      this.eggArcLift[e] = dist < 0.03 ? 0.065 : Math.min(0.38, 0.16 + dist * 0.20);
+    }
+  }
+
+  /**
+   * Advances the choreography by `dtSec`. Returns `true` on the exact frame the
+   * transition finishes (signaling caller to commit clean zero-velocity Rapier reset).
+   */
+  step(dtSec: number): boolean {
+    if (!this.active) return false;
+    this.elapsedSec += Math.max(0, dtSec);
+    const done = this.elapsedSec >= this.durationSec;
+    const tNow = done ? this.durationSec : this.elapsedSec;
+
+    for (let i = 0; i < this.rodCount; i++) {
+      const t0 = this.rodStartTime[i];
+      const t1 = this.rodEndTime[i];
+      const rawU = done ? 1 : tNow <= t0 ? 0 : tNow >= t1 ? 1 : (tNow - t0) / Math.max(1e-4, t1 - t0);
+      const e = quinticEase(rawU);
+      const arc = Math.sin(Math.PI * e);
+
+      const pOff = i * 3;
+      const sx = this.rodStartPos[pOff + 0];
+      const sy = this.rodStartPos[pOff + 1];
+      const sz = this.rodStartPos[pOff + 2];
+      const tx = this.rodTargetPos[pOff + 0];
+      const ty = this.rodTargetPos[pOff + 1];
+      const tz = this.rodTargetPos[pOff + 2];
+
+      const rTar = Math.hypot(tx, tz) || 1;
+      const radialOut = arc * this.rodRadialBreath[i];
+
+      this.rodCurrentPos[pOff + 0] = sx + (tx - sx) * e + (tx / rTar) * radialOut;
+      this.rodCurrentPos[pOff + 1] = sy + (ty - sy) * e + arc * this.rodArcLift[i];
+      this.rodCurrentPos[pOff + 2] = sz + (tz - sz) * e + (tz / rTar) * radialOut;
+
+      const qOff = i * 4;
+      slerpQuatInto(
+        this.rodStartQuat[qOff + 0],
+        this.rodStartQuat[qOff + 1],
+        this.rodStartQuat[qOff + 2],
+        this.rodStartQuat[qOff + 3],
+        this.rodTargetQuat[qOff + 0],
+        this.rodTargetQuat[qOff + 1],
+        this.rodTargetQuat[qOff + 2],
+        this.rodTargetQuat[qOff + 3],
+        e,
+        this.rodCurrentQuat,
+        qOff
+      );
+    }
+
+    for (let j = 0; j < this.eggCount; j++) {
+      const t0 = this.eggStartTime[j];
+      const t1 = this.eggEndTime[j];
+      const rawU = done ? 1 : tNow <= t0 ? 0 : tNow >= t1 ? 1 : (tNow - t0) / Math.max(1e-4, t1 - t0);
+      const e = quinticEase(rawU);
+      const arc = Math.sin(Math.PI * e);
+
+      const pOff = j * 3;
+      const sx = this.eggStartPos[pOff + 0];
+      const sy = this.eggStartPos[pOff + 1];
+      const sz = this.eggStartPos[pOff + 2];
+      const tx = this.eggTargetPos[pOff + 0];
+      const ty = this.eggTargetPos[pOff + 1];
+      const tz = this.eggTargetPos[pOff + 2];
+
+      this.eggCurrentPos[pOff + 0] = sx + (tx - sx) * e;
+      this.eggCurrentPos[pOff + 1] = sy + (ty - sy) * e + arc * this.eggArcLift[j];
+      this.eggCurrentPos[pOff + 2] = sz + (tz - sz) * e;
+
+      const qOff = j * 4;
+      slerpQuatInto(
+        this.eggStartQuat[qOff + 0],
+        this.eggStartQuat[qOff + 1],
+        this.eggStartQuat[qOff + 2],
+        this.eggStartQuat[qOff + 3],
+        this.eggTargetQuat[qOff + 0],
+        this.eggTargetQuat[qOff + 1],
+        this.eggTargetQuat[qOff + 2],
+        this.eggTargetQuat[qOff + 3],
+        e,
+        this.eggCurrentQuat,
+        qOff
+      );
+    }
+
+    if (done) {
+      this.active = false;
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Computes current maximum Euclidean distance across all rods & eggs from exact target rest pose.
+   */
+  getMaxErrorToRest(): number {
+    let maxErr = 0;
+    for (let i = 0; i < this.rodCount; i++) {
+      const o = i * 3;
+      const d = Math.hypot(
+        this.rodCurrentPos[o + 0] - this.rodTargetPos[o + 0],
+        this.rodCurrentPos[o + 1] - this.rodTargetPos[o + 1],
+        this.rodCurrentPos[o + 2] - this.rodTargetPos[o + 2]
+      );
+      if (d > maxErr) maxErr = d;
+    }
+    for (let j = 0; j < this.eggCount; j++) {
+      const o = j * 3;
+      const d = Math.hypot(
+        this.eggCurrentPos[o + 0] - this.eggTargetPos[o + 0],
+        this.eggCurrentPos[o + 1] - this.eggTargetPos[o + 1],
+        this.eggCurrentPos[o + 2] - this.eggTargetPos[o + 2]
+      );
+      if (d > maxErr) maxErr = d;
+    }
+    return maxErr;
+  }
+}
+
+/**
+ * Zero-allocation pre-allocated pool of fine dry wood-dust & limestone-chalk motes
+ * released on tap-test wiggles, pinned-dowel extraction scrapes, and stone plinth impacts.
+ */
+export class NestDustPool {
+  readonly capacity: number;
+  readonly pos: Float32Array;
+  readonly vel: Float32Array;
+  readonly rot: Float32Array;
+  readonly angVel: Float32Array;
+  readonly age: Float32Array;
+  readonly life: Float32Array;
+  readonly size: Float32Array;
+  readonly tone: Float32Array;
+  readonly opacity: Float32Array;
+  readonly active: Uint8Array;
+
+  private activeCount = 0;
+  private cursor = 0;
+  private rngState = 0x51a7c3d9;
+
+  constructor(capacity = MAX_DUST_MOTES) {
+    this.capacity = capacity;
+    this.pos = new Float32Array(capacity * 3);
+    this.vel = new Float32Array(capacity * 3);
+    this.rot = new Float32Array(capacity * 3);
+    this.angVel = new Float32Array(capacity * 3);
+    this.age = new Float32Array(capacity);
+    this.life = new Float32Array(capacity);
+    this.size = new Float32Array(capacity);
+    this.tone = new Float32Array(capacity);
+    this.opacity = new Float32Array(capacity);
+    this.active = new Uint8Array(capacity);
+  }
+
+  private nextRand(): number {
+    // Deterministic xorshift32 in [0, 1) — zero allocations
+    let x = this.rngState | 0;
+    x ^= x << 13;
+    x ^= x >>> 17;
+    x ^= x << 5;
+    this.rngState = x;
+    return ((x >>> 0) & 0x0fffffff) / 0x10000000;
+  }
+
+  getActiveCount(): number {
+    return this.activeCount;
+  }
+
+  clear(): void {
+    this.active.fill(0);
+    this.opacity.fill(0);
+    this.activeCount = 0;
+  }
+
+  /**
+   * Emits a subtle localized puff of dry wood-dust or limestone-chalk motes.
+   * `materialTone`: 0.0 = dark walnut dust, 0.45 = cedar/birch sawdust, 0.95 = limestone chalk.
+   */
+  emitBurst(
+    originX: number,
+    originY: number,
+    originZ: number,
+    count: number,
+    speed: number,
+    materialTone: number,
+    spreadRadius = 0.025
+  ): void {
+    for (let n = 0; n < count; n++) {
+      const idx = this.cursor;
+      this.cursor = (this.cursor + 1) % this.capacity;
+
+      const u1 = this.nextRand();
+      const u2 = this.nextRand();
+      const u3 = this.nextRand();
+      const theta = u1 * Math.PI * 2;
+      const elev = (u2 - 0.35) * 1.15;
+      const cElev = Math.cos(elev);
+      const sElev = Math.sin(elev);
+      const rOff = u3 * spreadRadius;
+
+      const pOff = idx * 3;
+      this.pos[pOff + 0] = originX + Math.cos(theta) * cElev * rOff;
+      this.pos[pOff + 1] = originY + Math.abs(sElev) * rOff * 0.65;
+      this.pos[pOff + 2] = originZ + Math.sin(theta) * cElev * rOff;
+
+      const spd = speed * (0.45 + this.nextRand() * 0.85);
+      this.vel[pOff + 0] = Math.cos(theta) * cElev * spd;
+      this.vel[pOff + 1] = Math.max(0.03, (0.28 + this.nextRand() * 0.72) * spd);
+      this.vel[pOff + 2] = Math.sin(theta) * cElev * spd;
+
+      this.rot[pOff + 0] = this.nextRand() * Math.PI * 2;
+      this.rot[pOff + 1] = this.nextRand() * Math.PI * 2;
+      this.rot[pOff + 2] = this.nextRand() * Math.PI * 2;
+
+      this.angVel[pOff + 0] = (this.nextRand() - 0.5) * 7.5;
+      this.angVel[pOff + 1] = (this.nextRand() - 0.5) * 7.5;
+      this.angVel[pOff + 2] = (this.nextRand() - 0.5) * 7.5;
+
+      this.age[idx] = 0;
+      this.life[idx] = 0.55 + this.nextRand() * 0.65;
+      this.size[idx] = 0.58 + this.nextRand() * 0.85;
+      this.tone[idx] = Math.max(0, Math.min(1, materialTone + (this.nextRand() - 0.5) * 0.12));
+      this.opacity[idx] = 0;
+      this.active[idx] = 1;
+    }
+    this.recountActive();
+  }
+
+  private recountActive(): void {
+    let cnt = 0;
+    for (let i = 0; i < this.capacity; i++) {
+      if (this.active[i]) cnt++;
+    }
+    this.activeCount = cnt;
+  }
+
+  /**
+   * Advances all active motes with gentle aerodynamic drag, soft gravity settling,
+   * and smooth fade-in / fade-out (strictly zero allocations).
+   */
+  step(dtSec: number): void {
+    if (this.activeCount === 0 || dtSec <= 0) return;
+    const dt = Math.min(0.05, dtSec);
+    const drag = Math.exp(-3.1 * dt);
+    let alive = 0;
+
+    for (let i = 0; i < this.capacity; i++) {
+      if (!this.active[i]) continue;
+      const nextAge = this.age[i] + dt;
+      const life = this.life[i];
+      if (nextAge >= life) {
+        this.active[i] = 0;
+        this.opacity[i] = 0;
+        continue;
+      }
+      this.age[i] = nextAge;
+      const u = nextAge / life;
+
+      const pOff = i * 3;
+      const driftX = Math.sin(nextAge * 4.5 + i * 1.9) * 0.032;
+      const driftZ = Math.cos(nextAge * 3.9 + i * 2.3) * 0.032;
+
+      this.vel[pOff + 0] = this.vel[pOff + 0] * drag + driftX * dt;
+      this.vel[pOff + 1] = this.vel[pOff + 1] * drag - 0.92 * dt;
+      this.vel[pOff + 2] = this.vel[pOff + 2] * drag + driftZ * dt;
+
+      this.pos[pOff + 0] += this.vel[pOff + 0] * dt;
+      this.pos[pOff + 1] += this.vel[pOff + 1] * dt;
+      this.pos[pOff + 2] += this.vel[pOff + 2] * dt;
+
+      this.rot[pOff + 0] += this.angVel[pOff + 0] * dt;
+      this.rot[pOff + 1] += this.angVel[pOff + 1] * dt;
+      this.rot[pOff + 2] += this.angVel[pOff + 2] * dt;
+
+      // Crisp soft dust fade-in (first 10%) and gentle airy dissolve (last 55%)
+      const fadeIn = u < 0.1 ? u / 0.1 : 1.0;
+      const fadeOut = u > 0.45 ? 1.0 - (u - 0.45) / 0.55 : 1.0;
+      this.opacity[i] = 0.72 * fadeIn * fadeOut * fadeOut;
+      alive++;
+    }
+
+    this.activeCount = alive;
+  }
+}
+
+/**
  * True 3D rigid-body simulation of the 56-dowel reciprocal timber dome + 3 ovoid
  * Celadon & Bone-Calcite river-pebble eggs on a hollow circular plinth ring using
  * `@dimforge/rapier3d-compat` 0.21 (`roundCylinder` dowels + `convexHull` ovoid eggs).
@@ -133,6 +732,7 @@ export class ReciprocalNestSim {
   private readonly grabLocalPt: [number, number, number] = [0, 0, 0];
   private readonly grabTargetWorld: [number, number, number] = [0, 0, 0];
   private readonly scratchRot: [number, number, number] = [0, 0, 0];
+  private readonly scratchAxis: [number, number, number] = [0, 1, 0];
   private readonly scratchWorldPt: [number, number, number] = [0, 0, 0];
   private readonly scratchArm: [number, number, number] = [0, 0, 0];
   private readonly scratchPtVel: [number, number, number] = [0, 0, 0];
@@ -299,6 +899,19 @@ export class ReciprocalNestSim {
   }
 
   /**
+   * Estimates how tightly pinned/load-bearing rod `rodId` currently is in [0..1]
+   * based on live tier load and intact upper-tier support (0 = loose/free, 1 = heavily pinned).
+   */
+  estimateRodPinFactor(rodId: number): number {
+    const rec = this.rods[rodId];
+    if (!rec || rec.removed || rec.fallen) return 0;
+    const tierWeight = Math.max(0, 1.0 - rec.spec.tier / 4.2);
+    const intactRatio = this.intactRodCount / Math.max(1, this.rods.length);
+    const driftFree = Math.max(0, 1.0 - rec.drift / 0.14);
+    return Math.max(0, Math.min(1, tierWeight * intactRatio * driftFree));
+  }
+
+  /**
    * Starts a 3D spring-tether grab on rod `rodId` anchored at its local-space point `localPt`.
    */
   startGrab(
@@ -380,7 +993,9 @@ export class ReciprocalNestSim {
   }
 
   /**
-   * Applies the active 3D damped spring-tether impulse to the currently grabbed dowel.
+   * Applies the active 3D damped spring-tether impulse to the currently grabbed dowel,
+   * gently biasing pull responsiveness along the dowel's natural longitudinal extraction
+   * axis blended with the camera drag plane so Jenga pulls glide smoothly without binding.
    */
   private applyGrabSpringSubstep(dt: number): void {
     if (this.activeGrabRodId === null) return;
@@ -406,6 +1021,8 @@ export class ReciprocalNestSim {
       q.w,
       this.scratchRot
     );
+    // Live longitudinal axis of the grabbed dowel (local +Y rotated into world space)
+    rotateVecByQuatOut(0, 1, 0, q.x, q.y, q.z, q.w, this.scratchAxis);
 
     const wx = tr.x + this.scratchRot[0];
     const wy = tr.y + this.scratchRot[1];
@@ -436,27 +1053,48 @@ export class ReciprocalNestSim {
       dz *= s;
     }
 
-    // Gentle natural fingertip lift when pulling a Tier-0 rod radially outward over the 4.6 cm brass lip
-    if (rec.spec.tier === 0 && wy < 0.22) {
+    // Natural fingertip lift when pulling a Tier-0 rod radially outward over the 4.6 cm brass lip:
+    // prevents downward camera-plane drag angles from jamming the dowel butt into the stone shelf or brass wall.
+    if (rec.spec.tier === 0 && wy < 0.26) {
       const rLen = Math.hypot(tr.x, tr.z) || 1;
       const outwardPull = (dx * tr.x + dz * tr.z) / rLen;
-      if (outwardPull > 0.02) {
-        dy += outwardPull * 0.24;
+      if (outwardPull > 0.015) {
+        const minLipClearDy = 0.115 - wy + outwardPull * 0.40;
+        if (dy < minLipClearDy) {
+          dy = minLipClearDy;
+        }
       }
     }
 
-    // Mass-normalized PD spring-tether (stiff enough to slide a loaded Jenga dowel cleanly, damped to avoid buzz)
+    // Decompose pull into axial (along the dowel's natural pull-out path) + transverse camera-plane
+    // so sliding sticks out Jenga-style feels silky, weighted, and responsive under full dome load
+    const ax = this.scratchAxis[0];
+    const ay = this.scratchAxis[1];
+    const az = this.scratchAxis[2];
+    const dAxial = dx * ax + dy * ay + dz * az;
+    const dTransX = dx - dAxial * ax;
+    const dTransY = dy - dAxial * ay;
+    const dTransZ = dz - dAxial * az;
+
+    const vAxial = this.scratchPtVel[0] * ax + this.scratchPtVel[1] * ay + this.scratchPtVel[2] * az;
+    const vTransX = this.scratchPtVel[0] - vAxial * ax;
+    const vTransY = this.scratchPtVel[1] - vAxial * ay;
+    const vTransZ = this.scratchPtVel[2] - vAxial * az;
+
     const mass = Math.max(0.0005, body.mass());
-    const stiffness = 240.0 * mass;
-    const damping = 22.0 * mass;
+    const kAxial = 440.0 * mass;
+    const cAxial = 26.0 * mass;
+    const kTrans = 310.0 * mass;
+    const cTrans = 26.5 * mass;
 
-    const fx = dx * stiffness - this.scratchPtVel[0] * damping;
-    const fy = dy * stiffness - this.scratchPtVel[1] * damping + mass * 9.81 * 0.45;
-    const fz = dz * stiffness - this.scratchPtVel[2] * damping;
+    const fAxial = dAxial * kAxial - vAxial * cAxial;
+    const fx = fAxial * ax + dTransX * kTrans - vTransX * cTrans;
+    const fy = fAxial * ay + dTransY * kTrans - vTransY * cTrans + mass * 9.81 * 0.90;
+    const fz = fAxial * az + dTransZ * kTrans - vTransZ * cTrans;
 
-    // Clamp max force to keep neighboring structural contacts responsive and natural
+    // Clamp max force so heavy pinned sticks slide out cleanly without launching explosively
     const fMag = Math.hypot(fx, fy, fz);
-    const maxForce = 185.0 * mass;
+    const maxForce = 385.0 * mass;
     const fScale = fMag > maxForce ? maxForce / fMag : 1.0;
 
     this.scratchImpulse.x = fx * fScale * dt;
@@ -549,7 +1187,8 @@ export class ReciprocalNestSim {
   }
 
   /**
-   * Re-weaves and resets the intact reciprocal dome + ovoid Celadon river-pebble eggs.
+   * Immediately re-weaves and resets the intact reciprocal dome + ovoid Celadon river-pebble eggs
+   * (used directly by unit tests and committed cleanly at the end of `NestReweaveController`).
    */
   reset(): void {
     if (this.isDisposed) return;

@@ -57,7 +57,8 @@ export function buildDowelGeometry(
   halfHeight: number,
   radius: number,
   notchParams: readonly [number, number],
-  radialSegments = 24
+  radialSegments = 28,
+  extraContactParams: readonly number[] = []
 ): THREE.BufferGeometry {
   const segLen = halfHeight * 2;
   const bevelR = radius * DOWEL_CHAMFER_FRAC;
@@ -71,13 +72,30 @@ export function buildDowelGeometry(
     notchValues.push(notch);
   };
 
+  // Combine same-tier notchParams with inter-tier crossing stations so EVERY physical
+  // wood-on-wood crossing receives a crisp burnished contact-wear patina band.
+  const allNotches: number[] = [notchParams[0], notchParams[1]];
+  for (let i = 0; i < extraContactParams.length; i++) {
+    const u = extraContactParams[i];
+    let duplicate = false;
+    for (let j = 0; j < allNotches.length; j++) {
+      if (Math.abs(allNotches[j] - u) < 0.018) {
+        duplicate = true;
+        break;
+      }
+    }
+    if (!duplicate && u > 0.03 && u < 0.97) {
+      allNotches.push(u);
+    }
+  }
+
   // Evaluate burnished joinery contact band along the full-radius cylindrical shaft
-  // (keeps outer radius >= 99.65% of collider radius so touching dowels sit flush wood-to-wood!)
-  const notchWidth = 0.026;
+  // (keeps outer radius >= 99.68% of collider radius so touching dowels sit flush wood-to-wood!)
+  const notchWidth = Math.min(0.052, Math.max(0.025, (radius * 1.65) / segLen));
   const shaftProfileAt = (u: number): { r: number; notch: number } => {
     let notch = 0;
-    for (let k = 0; k < 2; k++) {
-      const center = notchParams[k];
+    for (let k = 0; k < allNotches.length; k++) {
+      const center = allNotches[k];
       const dist = Math.abs(u - center);
       if (dist < notchWidth) {
         const t = 1 - dist / notchWidth;
@@ -85,13 +103,13 @@ export function buildDowelGeometry(
         if (smooth > notch) notch = smooth;
       }
     }
-    const r = radius * (1.0 - 0.0035 * notch);
+    const r = radius * (1.0 - 0.0032 * notch);
     return { r, notch };
   };
 
   const holdInset = Math.min(0.0012, rFlat * 0.08);
   const shaftHoldY = Math.min(0.0022, halfHeight * 0.012);
-  const bevelSteps = 3;
+  const bevelSteps = 4;
 
   // 1. Bottom flat circular end-grain cap (strictly outward normal (0, -1, 0))
   pushPt(0, -yEnd, 0);
@@ -99,7 +117,7 @@ export function buildDowelGeometry(
   pushPt(rFlat - holdInset, -yEnd, 0);
   pushPt(rFlat, -yEnd, 0);
 
-  // 2. Bottom crisp 3-step lathe chamfer bevel matching roundCylinder quarter-circle arc
+  // 2. Bottom crisp 4-step lathe chamfer bevel matching roundCylinder quarter-circle arc
   for (let i = 1; i <= bevelSteps; i++) {
     const ang = -Math.PI * 0.5 + (i / bevelSteps) * (Math.PI * 0.5);
     const r = rFlat + Math.cos(ang) * bevelR;
@@ -109,8 +127,8 @@ export function buildDowelGeometry(
   // Edge-holding ring right onto the cylindrical barrel for razor-crisp bevel break
   pushPt(radius, -halfHeight + shaftHoldY, 0);
 
-  // 3. Adaptive full-radius cylindrical shaft: lean on straight stretches, dense across both
-  //    joinery notch bands (exact peak & shoulders -> zero notch aliasing at 3x fewer tris!)
+  // 3. Adaptive full-radius cylindrical shaft: lean on straight stretches, dense across all
+  //    joinery notch bands (exact peak & shoulders -> zero notch aliasing!)
   const uMin = shaftHoldY / segLen;
   const uMax = 1.0 - uMin;
   const uSamples: number[] = [];
@@ -118,8 +136,8 @@ export function buildDowelGeometry(
     uSamples.push(uMin + (i / 16) * (uMax - uMin));
   }
   const notchOffsets = [-1.0, -0.62, -0.28, 0.0, 0.28, 0.62, 1.0];
-  for (let k = 0; k < 2; k++) {
-    const c = notchParams[k];
+  for (let k = 0; k < allNotches.length; k++) {
+    const c = allNotches[k];
     for (let j = 0; j < notchOffsets.length; j++) {
       const u = c + notchOffsets[j] * notchWidth;
       if (u > uMin + 0.002 && u < uMax - 0.002) {
@@ -399,6 +417,28 @@ export function buildPebbleEggGeometry(
     pos.setXYZ(i, px, py, pz);
   }
 
+  pos.needsUpdate = true;
+  geom.computeVertexNormals();
+  geom.computeBoundingSphere();
+  return geom;
+}
+
+/**
+ * Builds an irregular faceted dry wood-dust / limestone-chalk flake geometry
+ * (closed outward-wound mesh, `signedVolume > 0`) for the pre-allocated mote pool.
+ */
+export function buildDustMoteGeometry(): THREE.BufferGeometry {
+  const raw = new THREE.IcosahedronGeometry(0.0044, 0);
+  const geom = weldPositionsToIndexed(raw);
+  const pos = geom.getAttribute('position');
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i);
+    const y = pos.getY(i);
+    const z = pos.getZ(i);
+    // Slightly flat organic wood-shaving / mineral-grit aspect with gentle irregular facets
+    const chipScale = 1.0 + 0.16 * Math.sin(x * 420 + z * 310) * Math.cos(y * 370);
+    pos.setXYZ(i, x * 1.18 * chipScale, y * 0.56 * chipScale, z * 0.92 * chipScale);
+  }
   pos.needsUpdate = true;
   geom.computeVertexNormals();
   geom.computeBoundingSphere();

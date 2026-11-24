@@ -4,6 +4,7 @@ import {
   DOWEL_CHAMFER_FRAC,
   auditLayoutClearances,
   buildOvoidPebbleHullPoints,
+  computeAllRodContactStations,
   generateReciprocalDomeLayout,
   pointToRoundCylinderSignedDist,
   rotateVecByQuat,
@@ -12,6 +13,7 @@ import {
 } from '../src/days/24-nest/reciprocalDome';
 import {
   buildDowelGeometry,
+  buildDustMoteGeometry,
   buildPebbleEggGeometry,
   buildPlinthBrassInnerBezelGeometry,
   buildPlinthBrassOuterLipGeometry,
@@ -19,7 +21,13 @@ import {
   computeSignedVolume,
 } from '../src/days/24-nest/nestGeometry';
 import { createNestMaterials } from '../src/days/24-nest/nestMaterials';
-import { ReciprocalNestSim } from '../src/days/24-nest/nestSimulation';
+import {
+  MAX_DUST_MOTES,
+  NestDustPool,
+  NestReweaveController,
+  REWEAVE_DURATION_SEC,
+  ReciprocalNestSim,
+} from '../src/days/24-nest/nestSimulation';
 
 let sharedLayout: ReciprocalDomeLayout;
 
@@ -437,5 +445,158 @@ describe('Day 24 - Nest: Reciprocal-Frame Timber Dome (Geometry, Equilibrium & C
     } finally {
       sim.dispose();
     }
+  });
+
+  it('Choreographed Spiral Re-Weave converges monotonically to exact rest equilibrium with zero stray velocity', () => {
+    const sim = new ReciprocalNestSim(RAPIER, sharedLayout);
+    const reweave = new NestReweaveController(sharedLayout);
+    try {
+      // Collapse the dome genuinely first so rods and eggs tumble through the hollow bore
+      for (let f = 0; f < 25; f++) sim.stepFixedFrame();
+      sim.removeRods([0, 1, 2]);
+      for (let f = 0; f < 130; f++) sim.stepFixedFrame();
+      expect(sim.getState().collapsed).toBe(true);
+
+      reweave.beginFromSim(sim);
+      expect(reweave.isActive()).toBe(true);
+      expect(reweave.getMaxErrorToRest()).toBeGreaterThan(0.2);
+
+      // Step to mid-transition (t ≈ 0.35 s): Tier-0 should already be much closer to rest than eggs
+      const dt = 1 / 60;
+      let completed = false;
+      for (let f = 0; f < 21; f++) {
+        completed = reweave.step(dt);
+      }
+      expect(completed).toBe(false);
+      expect(reweave.isActive()).toBe(true);
+      expect(reweave.getProgress()).toBeGreaterThan(0.35);
+      expect(reweave.getProgress()).toBeLessThan(0.5);
+
+      // Verify bottom-to-top stagger: Tier-0 mean error < egg mean error mid-transition
+      let tier0Err = 0;
+      for (let i = 0; i < 16; i++) {
+        const s = sharedLayout.rods[i].center;
+        tier0Err += Math.hypot(
+          reweave.rodCurrentPos[i * 3] - s[0],
+          reweave.rodCurrentPos[i * 3 + 1] - s[1],
+          reweave.rodCurrentPos[i * 3 + 2] - s[2]
+        );
+      }
+      tier0Err /= 16;
+      let eggErr = 0;
+      for (let e = 0; e < 3; e++) {
+        const s = sharedLayout.eggs[e].pos;
+        eggErr += Math.hypot(
+          reweave.eggCurrentPos[e * 3] - s[0],
+          reweave.eggCurrentPos[e * 3 + 1] - s[1],
+          reweave.eggCurrentPos[e * 3 + 2] - s[2]
+        );
+      }
+      eggErr /= 3;
+      expect(tier0Err).toBeLessThan(eggErr);
+
+      // Verify monotonic convergence during the final settling window (t = 0.65 s .. 0.85 s)
+      for (let f = 21; f < 39; f++) {
+        completed = reweave.step(dt);
+      }
+      let prevErr = reweave.getMaxErrorToRest();
+      let totalFrames = 39;
+      while (!completed && totalFrames < 120) {
+        completed = reweave.step(dt);
+        totalFrames++;
+        const curErr = reweave.getMaxErrorToRest();
+        expect(curErr).toBeLessThanOrEqual(prevErr + 1e-6);
+        prevErr = curErr;
+      }
+
+      expect(completed).toBe(true);
+      expect(reweave.isActive()).toBe(false);
+      expect(totalFrames * dt).toBeGreaterThanOrEqual(REWEAVE_DURATION_SEC - dt);
+      expect(reweave.getMaxErrorToRest()).toBeLessThan(1e-6);
+
+      // Commit Rapier handoff and assert exact zero stray velocity across all 56 rods & 3 eggs
+      sim.reset();
+      for (const rec of sim.rods) {
+        const lv = rec.body.linvel();
+        const av = rec.body.angvel();
+        expect(Math.hypot(lv.x, lv.y, lv.z)).toBe(0);
+        expect(Math.hypot(av.x, av.y, av.z)).toBe(0);
+      }
+      for (const egg of sim.eggs) {
+        const lv = egg.body.linvel();
+        const av = egg.body.angvel();
+        expect(Math.hypot(lv.x, lv.y, lv.z)).toBe(0);
+        expect(Math.hypot(av.x, av.y, av.z)).toBe(0);
+      }
+
+      // Post-handoff equilibrium holds cleanly for 120 physics frames
+      for (let f = 0; f < 120; f++) sim.stepFixedFrame();
+      expect(sim.getState().intactRodCount).toBe(56);
+      expect(sim.getState().fallenRodCount).toBe(0);
+      expect(sim.getState().collapsed).toBe(false);
+      expect(sim.getMaxRodDrop()).toBeLessThan(0.025);
+    } finally {
+      sim.dispose();
+    }
+  });
+
+  it('Multi-tier contact burnish stations, load-aware pin factor, and zero-allocation dust mote pool', () => {
+    // 1. Every tier discovers real physical crossing stations and builds outward-wound geometry
+    let cursor = 0;
+    for (const tierMeta of sharedLayout.tiers) {
+      const sampleRod = sharedLayout.rods[cursor];
+      const stations = computeAllRodContactStations(sampleRod, sharedLayout.rods);
+      expect(stations.length).toBeGreaterThanOrEqual(2);
+      const geom = buildDowelGeometry(
+        tierMeta.halfHeight,
+        tierMeta.radius,
+        sampleRod.notchParams,
+        28,
+        stations
+      );
+      expect(computeSignedVolume(geom)).toBeGreaterThan(0);
+      geom.dispose();
+      cursor += tierMeta.count;
+    }
+
+    const dustGeom = buildDustMoteGeometry();
+    expect(computeSignedVolume(dustGeom)).toBeGreaterThan(0);
+    dustGeom.dispose();
+
+    // 2. Load-bearing Tier-0 rod reports strictly higher pin factor than loose Tier-4 crown rod
+    const sim = new ReciprocalNestSim(RAPIER, sharedLayout);
+    try {
+      for (let f = 0; f < 30; f++) sim.stepFixedFrame();
+      expect(sim.estimateRodPinFactor(0)).toBeGreaterThan(0.75);
+      expect(sim.estimateRodPinFactor(50)).toBeLessThan(0.25);
+    } finally {
+      sim.dispose();
+    }
+
+    // 3. Dust pool reuses pre-allocated typed arrays (zero reallocation), steps cleanly, and decays to 0
+    const pool = new NestDustPool(MAX_DUST_MOTES);
+    const posBuf = pool.pos.buffer;
+    const velBuf = pool.vel.buffer;
+    const opBuf = pool.opacity.buffer;
+
+    expect(pool.getActiveCount()).toBe(0);
+    pool.emitBurst(0.4, 0.3, 0.2, 12, 0.22, 0.4);
+    expect(pool.getActiveCount()).toBe(12);
+
+    // Step across 150 frames (2.5 s) -> all motes finite, fade cleanly, buffers identical
+    let peakOpacity = 0;
+    for (let f = 0; f < 150; f++) {
+      pool.step(1 / 60);
+      for (let i = 0; i < pool.capacity; i++) {
+        expect(Number.isFinite(pool.pos[i * 3])).toBe(true);
+        expect(Number.isFinite(pool.opacity[i])).toBe(true);
+        if (pool.opacity[i] > peakOpacity) peakOpacity = pool.opacity[i];
+      }
+    }
+    expect(peakOpacity).toBeGreaterThan(0.3);
+    expect(pool.getActiveCount()).toBe(0);
+    expect(pool.pos.buffer).toBe(posBuf);
+    expect(pool.vel.buffer).toBe(velBuf);
+    expect(pool.opacity.buffer).toBe(opBuf);
   });
 });

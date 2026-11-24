@@ -872,6 +872,40 @@ export function auditLayoutClearances(
 }
 
 /**
+ * Computes all real physical crossing contact stations `s ∈ (0.035, 0.965)` along a rod's
+ * centerline where it seats against same-tier AND inter-tier neighboring dowels.
+ * Used to drive physically registered burnished contact-wear patina bands on every tier mesh.
+ */
+export function computeAllRodContactStations(
+  rod: ReciprocalRodSpec,
+  allRods: readonly ReciprocalRodSpec[],
+  tolerance = 0.008
+): number[] {
+  const raw: number[] = [];
+  for (let i = 0; i < allRods.length; i++) {
+    const other = allRods[i];
+    if (other.id === rod.id) continue;
+    const res = segmentSegmentClosest(rod.endA, rod.endB, other.endA, other.endB);
+    if (res.dist <= rod.radius + other.radius + tolerance && res.s > 0.035 && res.s < 0.965) {
+      raw.push(res.s);
+    }
+  }
+  raw.sort((a, b) => a - b);
+
+  // Merge stations within 0.028 normalized length into clean single contact bands
+  const merged: number[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const s = raw[i];
+    if (merged.length === 0 || s - merged[merged.length - 1] > 0.028) {
+      merged.push(s);
+    } else {
+      merged[merged.length - 1] = 0.5 * (merged[merged.length - 1] + s);
+    }
+  }
+  return merged;
+}
+
+/**
  * Generates the complete analytical zero-overlap 56-rod reciprocal timber dome,
  * plinth specification, and 3 cradled ovoid Celadon & Bone-Calcite river-pebble eggs.
  */
