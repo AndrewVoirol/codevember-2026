@@ -1,0 +1,46 @@
+{
+  "day": 27,
+  "slug": "27-burrow",
+  "expectedHeader": "Day 27 - Burrow",
+  "domAudit": {
+    "headerText": "Day 27 - Burrow",
+    "bodyBg": "rgb(33, 37, 41)",
+    "drawerCount": 30
+  },
+  "telemetry": {
+    "frameCount": 356,
+    "avgFrameMs": 8.48,
+    "p95FrameMs": 10.2,
+    "sceneState": {
+      "day": 27,
+      "slug": "27-burrow",
+      "headerLabel": "Day 27 - Burrow",
+      "frameCount": 356,
+      "cameraPos": [
+        0.34,
+        0.14000000000000004,
+        3.02
+      ],
+      "pointerWorld": [
+        0.21379116596011366,
+        -0.18867692779706005,
+        -0.014073075489704934
+      ],
+      "pointerSpeed": 0,
+      "pointerDwellSec": 1.9141,
+      "pointerImpulse": 0.0008
+    }
+  },
+  "metrics": {
+    "specimenCoverageRatio": 0.434,
+    "interactionMad": 0.504
+  },
+  "gpuErrors": [],
+  "gateFailures": [],
+  "artifacts": {
+    "contactSheet": "screenshots/day-27-burrow-contact-sheet.png",
+    "initial": "screenshots/day-27-burrow-initial.png",
+    "drawer": "screenshots/day-27-burrow-drawer.png"
+  },
+  "passed": true
+}

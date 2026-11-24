@@ -330,12 +330,12 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
   createDay(
     27,
     'Burrow',
-    'upcoming',
+    'complete',
     'tsl',
     'burntSienna',
     'boneCalcite',
-    'Cast aluminum/calcite endocast of a subterranean ant & root gallery network suspended in cross-section',
-    'Pointer illuminates and traces nutrient flow packets traveling down the branching subterranean shafts'
+    'Suspended oiled dark-walnut and satin-brass observation terrarium slice with slotted corner hardware, 45° beveled glass panes, and a live 300×220 stratified mineral sand bed of Yellow Ochre, Burnt Sienna, Bone Calcite, Raw Umber, Hematite Rust, and embedded quartz/basalt river pebbles featuring 3D parallax shadowed burrow walls, Terzaghi granular arching vs. shear-fault cave-ins, and four articulated subterranean burrowing beetles hauling deep grains to surface tailings craters',
+    'Drag directly across the glass sand bed to carve branching burrows and test vaulted arch spans against cascading shear-fault cave-ins; click and hold in the clear open top airspace to pour fresh layered mineral sand; drag empty space to orbit 360°; double-click empty space or press Space to reset a freshly stratified sand bed'
   ),
   createDay(
     28,
