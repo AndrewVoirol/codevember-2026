@@ -276,13 +276,19 @@ describe('Day 22 - Echo (Brass-Framed Two-Way Infinity Mirror Cube)', () => {
 
       let signedVol = 0;
       let outwardDot = 0;
+      let flippedNormTris = 0;
       const a = new THREE.Vector3();
       const b = new THREE.Vector3();
       const c = new THREE.Vector3();
       const ab = new THREE.Vector3();
       const ac = new THREE.Vector3();
       const n = new THREE.Vector3();
+      const n0 = new THREE.Vector3();
+      const n1 = new THREE.Vector3();
+      const n2 = new THREE.Vector3();
+      const avgN = new THREE.Vector3();
       const cen = new THREE.Vector3();
+      const normAttr = geo.attributes.normal as THREE.BufferAttribute | undefined;
       geo.computeBoundingBox();
       const boxCenter = new THREE.Vector3();
       geo.boundingBox!.getCenter(boxCenter);
@@ -300,10 +306,20 @@ describe('Day 22 - Echo (Brass-Framed Two-Way Infinity Mirror Cube)', () => {
         n.crossVectors(ab, ac);
         cen.copy(a).add(b).add(c).multiplyScalar(1 / 3).sub(boxCenter);
         outwardDot += n.dot(cen);
+        if (normAttr && n.lengthSq() > 1e-16) {
+          n0.fromBufferAttribute(normAttr, i0);
+          n1.fromBufferAttribute(normAttr, i1);
+          n2.fromBufferAttribute(normAttr, i2);
+          avgN.copy(n0).add(n1).add(n2);
+          if (avgN.lengthSq() > 1e-10 && n.dot(avgN) < -1e-4) {
+            flippedNormTris++;
+          }
+        }
       }
 
       expect(signedVol, `${label} signedVol`).toBeGreaterThan(0);
       expect(outwardDot, `${label} outwardDot`).toBeGreaterThan(0);
+      expect(flippedNormTris, `${label} flippedNormTris`).toBe(0);
     };
 
     const checkedGeos = new Set<THREE.BufferGeometry>();
@@ -346,15 +362,24 @@ describe('Day 22 - Echo (Brass-Framed Two-Way Infinity Mirror Cube)', () => {
     expect(mats.uMirrorNormals.length).toBe(6);
     expect(mats.infinityMirror.colorNode).toBeTruthy();
     expect(mats.agedBronze.colorNode).toBeTruthy();
+    expect(mats.agedBronze.anisotropyNode).toBeTruthy();
+    expect(mats.spunCopper.colorNode).toBeTruthy();
+    expect(mats.spunCopper.anisotropyNode).toBeTruthy();
+    expect(mats.spunCopper.clearcoat).toBeGreaterThan(0.15);
     expect(mats.satinBrass.colorNode).toBeTruthy();
+    expect(mats.satinBrass.anisotropyNode).toBeTruthy();
     expect(mats.bezelBrass.colorNode).toBeTruthy();
+    expect(mats.bezelBrass.anisotropyNode).toBeTruthy();
     expect(mats.vernierBrass.colorNode).toBeTruthy();
+    expect(mats.vernierBrass.anisotropyNode).toBeTruthy();
     expect(mats.knurledBrass.colorNode).toBeTruthy();
     expect(mats.bluedSteel.colorNode).toBeTruthy();
     expect(mats.ceramicInsulator.colorNode).toBeTruthy();
     expect(mats.darkCeramic.colorNode).toBeTruthy();
     expect(mats.braidedCord.colorNode).toBeTruthy();
     expect(mats.braidedCord.positionNode).toBeTruthy();
+    expect(mats.braidedCord.normalNode).toBeTruthy();
+    expect(mats.braidedCord.sheen).toBeGreaterThan(0.2);
     expect(mats.ventBaffleGlow.emissiveNode).toBeTruthy();
     expect(mats.edisonFilament.colorNode).toBeTruthy();
     expect(mats.filamentAura.colorNode).toBeTruthy();
@@ -642,11 +667,13 @@ describe('Day 22 - Echo (Brass-Framed Two-Way Infinity Mirror Cube)', () => {
     expect(CORE_ANCHOR_Y).toBeLessThan(GROMMET_TOP_Y - 0.004);
     expect(cordBox.max.y).toBeCloseTo(CORE_ANCHOR_Y, 4);
 
-    // 3. Braided cord bottom -> Edison socket cord-grip nut -> cap -> vent struts -> knurl -> skirt -> insulator -> E27 -> bulb -> prism -> finial
+    // 3. Braided cord bottom -> Edison socket cord-grip nut -> cap -> top knurl -> smooth barrel (+ switch boss) -> vents -> flared skirt -> insulator -> E27 -> bulb -> prism -> finial
     const gripNutBox = getBox('EdisonSocketCordGripNut');
     const capBox = getBox('EdisonSocketCap');
-    const ventBox = getBox('EdisonSocketVentStruts');
     const knurlBox = getBox('EdisonSocketKnurledCollar');
+    const barrelBox = getBox('EdisonSocketBarrel');
+    const switchBossBox = getBox('EdisonSocketSwitchBoss');
+    const ventBox = getBox('EdisonSocketVentStruts');
     const skirtBox = getBox('EdisonSocketSkirt');
     const ceramicBox = getBox('EdisonSocketCeramicRing');
     const e27Box = getBox('EdisonE27ScrewBase');
@@ -663,9 +690,13 @@ describe('Day 22 - Echo (Brass-Framed Two-Way Infinity Mirror Cube)', () => {
 
     // Every adjacent stage strictly overlaps (zero air gaps anywhere down the vertical chain!)
     expect(gripNutBox.min.y).toBeLessThan(capBox.max.y - 0.002);
-    expect(capBox.min.y).toBeLessThan(ventBox.max.y - 0.001);
-    expect(ventBox.min.y).toBeLessThan(knurlBox.max.y - 0.001);
-    expect(knurlBox.min.y).toBeLessThan(skirtBox.max.y - 0.001);
+    expect(capBox.min.y).toBeLessThan(knurlBox.max.y - 0.001);
+    expect(knurlBox.min.y).toBeLessThan(barrelBox.max.y - 0.001);
+    // Switch boss mounts cleanly on the smooth barrel below the diamond knurl (zero knurl collision!)
+    expect(switchBossBox.max.y).toBeLessThan(knurlBox.min.y + 0.001);
+    expect(switchBossBox.min.y).toBeGreaterThan(ventBox.max.y - 0.006);
+    expect(barrelBox.min.y).toBeLessThan(ventBox.max.y - 0.001);
+    expect(ventBox.min.y).toBeLessThan(skirtBox.max.y - 0.001);
     expect(skirtBox.min.y).toBeLessThan(ceramicBox.max.y - 0.001);
     expect(ceramicBox.min.y).toBeLessThan(e27Box.max.y - 0.002);
     expect(e27Box.min.y).toBeLessThan(bulbBox.max.y + 0.002);
@@ -696,13 +727,23 @@ describe('Day 22 - Echo (Brass-Framed Two-Way Infinity Mirror Cube)', () => {
     expect(minHeat).toBeLessThan(0.25);
     expect(maxHeat).toBeGreaterThan(0.95);
 
-    // Verify braided cord GPU Hermite attributes (`aCordS` in [0, 1] and `aCordRadial`)
+    // Verify tight twin-conductor braided cord GPU Hermite attributes (`aCordS`, `aCordRadial`, `aCordRestNormal`, `aCordRestTangent`)
     const cordGeo = createBraidedCordGeometry();
     const sAttr = cordGeo.attributes.aCordS as THREE.BufferAttribute;
     const radAttr = cordGeo.attributes.aCordRadial as THREE.BufferAttribute;
+    const restNormAttr = cordGeo.attributes.aCordRestNormal as THREE.BufferAttribute;
+    const restTanAttr = cordGeo.attributes.aCordRestTangent as THREE.BufferAttribute;
     expect(sAttr).toBeDefined();
     expect(radAttr).toBeDefined();
-    expect(sAttr.count).toBeGreaterThan(500);
+    expect(restNormAttr).toBeDefined();
+    expect(restTanAttr).toBeDefined();
+    expect(sAttr.count).toBeGreaterThan(10000);
+
+    // Verify every spun/brushed hardware geometry exports explicit `tangent` (vec4) + `aCrevice` for WebGPU GGX anisotropy
+    const socketBarrel = assembly.group.getObjectByName('EdisonSocketBarrel') as THREE.Mesh;
+    expect(socketBarrel.geometry.attributes.tangent).toBeDefined();
+    expect(socketBarrel.geometry.attributes.tangent.itemSize).toBe(4);
+    expect(socketBarrel.geometry.attributes.aCrevice).toBeDefined();
 
     // 6. Bounce-0 to Bounce-1..40 optical parity: raytracer bounding sphere LAMP_BOUND_RADIUS strictly
     //    encloses every single 3D vertex of lampHeadGroup (cord-grip nut, finial tip, paddle switch, equator bosses) with zero clipping!
@@ -726,9 +767,9 @@ describe('Day 22 - Echo (Brass-Framed Two-Way Infinity Mirror Cube)', () => {
     expect(CORD_GRIP_BOT_Y).toBeLessThan(GLAND_TOP_Y);
     expect(GLAND_BOT_Y).toBeLessThan(GROMMET_TOP_Y);
     expect(CORD_SOCKET_ATTACH_Y).toBeLessThan(SOCKET_TOP_Y);
-    expect(SOCKET_CAP_BOT_Y).toBeGreaterThan(SOCKET_VENT_BOT_Y);
-    expect(SOCKET_VENT_BOT_Y).toBeGreaterThan(SOCKET_KNURL_BOT_Y);
-    expect(SOCKET_KNURL_BOT_Y).toBeGreaterThan(SOCKET_SKIRT_BOT_Y);
+    expect(SOCKET_CAP_BOT_Y).toBeGreaterThan(SOCKET_KNURL_BOT_Y);
+    expect(SOCKET_KNURL_BOT_Y).toBeGreaterThan(SOCKET_VENT_BOT_Y);
+    expect(SOCKET_VENT_BOT_Y).toBeGreaterThan(SOCKET_SKIRT_BOT_Y);
     expect(SOCKET_SKIRT_BOT_Y).toBeGreaterThan(SOCKET_INSULATOR_BOT_Y);
     expect(E27_BASE_TOP_Y).toBeGreaterThan(E27_BASE_BOT_Y);
     expect(PRISM_TRUNC_Y).toBeGreaterThan(BULB_TOP_Y);

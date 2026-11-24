@@ -25,27 +25,27 @@ export const APERTURE_HALF = 0.58;
  * (single source of truth ensuring exact Bounce-0 real-3D to Bounce-1..40 raytracer parity).
  */
 export const CEILING_ROSETTE_TOP_Y = GLASS_PANE_HALF - 0.0005; // 0.5975 (flush against underside of +Y glass)
-export const CEILING_ROSETTE_BOT_Y = 0.566;
-export const CEILING_ROSETTE_RADIUS = 0.092;
-export const CORD_GRIP_TOP_Y = 0.572;
-export const CORD_GRIP_BOT_Y = 0.528;
-export const GLAND_TOP_Y = 0.531;
-export const GLAND_BOT_Y = 0.508;
-export const GROMMET_TOP_Y = 0.511;
-export const GROMMET_BOT_Y = 0.488;
+export const CEILING_ROSETTE_BOT_Y = 0.562;
+export const CEILING_ROSETTE_RADIUS = 0.098;
+export const CORD_GRIP_TOP_Y = 0.568;
+export const CORD_GRIP_BOT_Y = 0.526;
+export const GLAND_TOP_Y = 0.530;
+export const GLAND_BOT_Y = 0.506;
+export const GROMMET_TOP_Y = 0.510;
+export const GROMMET_BOT_Y = 0.486;
 
-/** Braided textile pendant cord radius & local socket attachment elevation (in lamp head local +Y). */
-export const CORD_RADIUS = 0.0105;
+/** Tight early-1900s twin-conductor braided cloth pendant cord radius & local socket attachment (in lamp local +Y). */
+export const CORD_RADIUS = 0.0108;
 export const CORD_SOCKET_ATTACH_Y = 0.304;
 
-/** Vintage Edison lamp socket & prism gallery cage dimensions (in lamp head local +Y, 0 = prism center). */
+/** Vintage spun-copper Edison lamp socket & prism gallery cage dimensions (in lamp head local +Y, 0 = prism center). */
 export const SOCKET_TOP_Y = 0.316;
-export const SOCKET_CAP_BOT_Y = 0.252;
-export const SOCKET_VENT_BOT_Y = 0.224;
-export const SOCKET_KNURL_BOT_Y = 0.198;
-export const SOCKET_SKIRT_BOT_Y = 0.168;
-export const SOCKET_INSULATOR_BOT_Y = 0.152;
-export const E27_BASE_TOP_Y = 0.16;
+export const SOCKET_CAP_BOT_Y = 0.246;
+export const SOCKET_KNURL_BOT_Y = 0.220;
+export const SOCKET_VENT_BOT_Y = 0.184;
+export const SOCKET_SKIRT_BOT_Y = 0.162;
+export const SOCKET_INSULATOR_BOT_Y = 0.148;
+export const E27_BASE_TOP_Y = 0.158;
 export const E27_BASE_BOT_Y = 0.114;
 
 /** Truncated 8-facet optical crystal prism & brass drop finial dimensions. */

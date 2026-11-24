@@ -33,6 +33,7 @@ import {
   transformNormalToView,
   uniform,
   uv,
+  vec2,
   vec3,
   cameraPosition,
 } from 'three/tsl';
@@ -44,11 +45,8 @@ import {
   BULB_MAX_R,
   BULB_TOP_Y,
   CAVITY_HALF,
-  CEILING_ROSETTE_BOT_Y,
   CEILING_ROSETTE_RADIUS,
-  CEILING_ROSETTE_TOP_Y,
   CORD_GRIP_BOT_Y,
-  CORD_GRIP_TOP_Y,
   CORD_RADIUS,
   CORD_SOCKET_ATTACH_Y,
   E27_BASE_BOT_Y,
@@ -94,15 +92,16 @@ export interface StudioEnvironmentHandle {
 }
 
 export interface EchoMaterials extends EchoMaterialsContract {
-  agedBronze: THREE.MeshStandardNodeMaterial;
-  satinBrass: THREE.MeshStandardNodeMaterial;
-  bezelBrass: THREE.MeshStandardNodeMaterial;
-  vernierBrass: THREE.MeshStandardNodeMaterial;
-  knurledBrass: THREE.MeshStandardNodeMaterial;
+  agedBronze: THREE.MeshPhysicalNodeMaterial;
+  spunCopper: THREE.MeshPhysicalNodeMaterial;
+  satinBrass: THREE.MeshPhysicalNodeMaterial;
+  bezelBrass: THREE.MeshPhysicalNodeMaterial;
+  vernierBrass: THREE.MeshPhysicalNodeMaterial;
+  knurledBrass: THREE.MeshPhysicalNodeMaterial;
   bluedSteel: THREE.MeshStandardNodeMaterial;
   ceramicInsulator: THREE.MeshStandardNodeMaterial;
   darkCeramic: THREE.MeshStandardNodeMaterial;
-  braidedCord: THREE.MeshStandardNodeMaterial;
+  braidedCord: THREE.MeshPhysicalNodeMaterial;
   ventBaffleGlow: THREE.MeshStandardNodeMaterial;
   edisonFilament: THREE.MeshBasicNodeMaterial;
   filamentAura: THREE.MeshBasicNodeMaterial;
@@ -215,19 +214,23 @@ export function createEchoStudioEnvironment(
   };
 
   // Overhead-left warm calcite key softbox
-  addSoftbox(12.0, 9.5, [-5.2, 5.8, 4.2], 1.0, 0.96, 0.9, 1.95);
-  // Front-right tall studio strip scrim (carves crisp bronze vertical bevels & diamond knurling)
-  addSoftbox(8.0, 12.5, [6.2, 2.4, 3.6], 0.99, 0.95, 0.89, 1.72);
+  addSoftbox(11.5, 9.0, [-5.2, 5.8, 4.2], 1.0, 0.96, 0.9, 2.08);
+  // Crisp narrow studio accent strip (upper-front-left -> pulls dramatic radial anisotropic bow-ties!)
+  addSoftbox(2.4, 11.5, [-2.2, 4.4, 5.8], 1.0, 0.97, 0.92, 2.15);
+  // Front-right tall studio strip scrim (carves crisp bronze vertical bevels, spun copper & diamond knurling)
+  addSoftbox(7.2, 12.5, [6.2, 2.4, 3.6], 0.99, 0.95, 0.89, 1.85);
+  // Crisp horizontal warm highlight bar (lower-right -> defines concentric lathe bands on spun copper)
+  addSoftbox(10.5, 2.2, [4.6, -1.6, 5.4], 0.98, 0.92, 0.84, 1.45);
   // Front-left low warm fill scrim (lifts front dark-bronze rails off #212529)
-  addSoftbox(10.0, 6.5, [-3.8, -1.8, 6.4], 0.95, 0.91, 0.85, 0.94);
+  addSoftbox(10.0, 6.5, [-3.8, -1.8, 6.4], 0.95, 0.91, 0.85, 0.96);
   // Rear-top cool calcite rim strip
-  addSoftbox(13.0, 5.8, [-1.2, 5.2, -5.8], 0.9, 0.95, 1.0, 1.6);
+  addSoftbox(13.0, 5.2, [-1.2, 5.2, -5.8], 0.9, 0.95, 1.0, 1.72);
   // Zenith diffused gallery canopy
-  addSoftbox(10.0, 10.0, [0.0, 7.6, 0.4], 0.96, 0.94, 0.9, 0.92);
+  addSoftbox(10.0, 10.0, [0.0, 7.6, 0.4], 0.96, 0.94, 0.9, 0.94);
   // Rear-right celadon-slate fill card
-  addSoftbox(9.0, 7.0, [5.0, 1.2, -5.6], 0.88, 0.95, 0.98, 1.18);
+  addSoftbox(9.0, 7.0, [5.0, 1.2, -5.6], 0.88, 0.95, 0.98, 1.24);
   // Warm gallery underside table bounce (illuminates underside lock caps & interior ceiling rosette)
-  addSoftbox(13.0, 13.0, [0.0, -6.5, 0.8], 0.96, 0.92, 0.86, 0.62);
+  addSoftbox(13.0, 13.0, [0.0, -6.5, 0.8], 0.96, 0.92, 0.86, 0.68);
 
   const renderTarget = pmrem.fromScene(envScene, 0.068);
   for (const item of disposables) item.dispose();
@@ -342,149 +345,253 @@ export function createEchoMaterials(): EchoMaterials {
   const pLapis = vec3(...MINERAL_PALETTE.lapisUltramarine.rInfLinear);
 
   // ---------------------------------------------------------------------------
-  // 1. Brushed Oil-Rubbed Dark-Bronze Precision Frame (Edge Burnishing + Inner Corner Patina)
+  // 1. Linearly-Brushed Oil-Rubbed Dark-Bronze Precision Frame (Silky Fine Micro-Grain + Copper Chamfers)
   // ---------------------------------------------------------------------------
-  const agedBronze = new THREE.MeshStandardNodeMaterial({
-    metalness: 0.85,
-    roughness: 0.33,
-    envMapIntensity: 1.12,
+  const agedBronze = new THREE.MeshPhysicalNodeMaterial({
+    metalness: 0.87,
+    roughness: 0.3,
+    anisotropy: 0.62,
+    clearcoat: 0.16,
+    clearcoatRoughness: 0.25,
+    envMapIntensity: 1.18,
   });
   {
-    const brushA = mineralToothFbm(positionLocal.mul(vec3(58.0, 260.0, 260.0)), float(1.0));
-    const brushB = mineralToothFbm(positionLocal.mul(vec3(260.0, 58.0, 260.0)), float(1.0));
-    const brushC = mineralToothFbm(positionLocal.mul(vec3(260.0, 260.0, 58.0)), float(1.0));
-    const absN = abs(normalize(normalLocal));
-    const fineGrain = mineralToothFbm(positionLocal, float(140.0));
-    const brushed = brushA
-      .mul(absN.y.add(absN.z).mul(0.5))
-      .add(brushB.mul(absN.x.add(absN.z).mul(0.5)))
-      .add(brushC.mul(absN.x.add(absN.y).mul(0.5)))
-      .mul(0.62)
-      .add(fineGrain.mul(0.38));
+    const uvC = uv();
+    const tLoc = normalize(attribute('tangent', 'vec4').xyz);
+    const nLoc = normalize(normalLocal);
+    const aCrev = clamp(attribute('aCrevice', 'float'), 0.0, 1.0);
 
-    // Detect 45-deg machined rail chamfers -> warm hand-rubbed bronze edge burnishing
+    // Ultra-fine silky longitudinal satin-bronze hairlines along B (`uv.y`) — zero coarse wood-grain bands!
+    const brushStreak = mineralToothFbm(vec3(uvC.x.mul(680.0), uvC.y.mul(26.0), float(2.1)), float(1.0));
+    const fineGrain = mineralToothFbm(positionLocal, float(180.0));
+    const grooveWave = sin(uvC.x.mul(1650.0).add(brushStreak.mul(2.4))).mul(0.5).add(0.5);
+    const brushed = brushStreak.mul(0.45).add(grooveWave.mul(0.25)).add(fineGrain.mul(0.3));
+
+    // Detect 45-deg machined rail chamfers -> warm hand-rubbed antique copper-bronze burnishing
+    const absN = abs(nLoc);
     const maxAxisN = max(absN.x, max(absN.y, absN.z));
     const chamferMask = smoothstep(float(0.93), float(0.73), maxAxisN);
 
-    // Subtle dark oil-rubbed patina pooling inside inner corner junctions (`worldPos` near corners)
+    // Subtle dark oil-rubbed patina pooling inside inner corner junctions
     const apW = abs(positionWorld);
     const innerCornerPatina = smoothstep(float(0.52), float(0.68), min(apW.x, max(apW.y, apW.z)))
       .mul(float(1.0).sub(chamferMask));
 
-    const bronzeDeep = mix(pRawUmber, pBoneCalcite, float(0.03)).mul(0.72);
-    const bronzePatina = mix(pRawUmber.mul(0.52), pVerdigris.mul(0.22), float(0.16));
-    const bronzeSatin = mix(pRawUmber, pYellowOchre, float(0.15)).add(pBoneCalcite.mul(0.032));
-    const bronzeChamfer = mix(pRawUmber, pYellowOchre, float(0.42)).add(pBoneCalcite.mul(0.075));
+    // Tight metallic dark-bronze value band so rails read as dense forged dark bronze, never wood!
+    const bronzeDeep = mix(pRawUmber, pHematite, float(0.08)).mul(0.52);
+    const bronzePatina = mix(pRawUmber.mul(0.38), pVerdigris.mul(0.18), float(0.14));
+    const bronzeSatin = mix(pRawUmber, pBurntSienna, float(0.14)).mul(0.74).add(pBoneCalcite.mul(0.024));
+    const bronzeChamfer = mix(pBurntSienna, pYellowOchre, float(0.42)).mul(0.92).add(pBoneCalcite.mul(0.05));
 
     const baseBronze = mix(
       bronzeDeep,
       bronzeSatin,
-      smoothstep(float(0.32), float(0.68), brushed).mul(0.65)
+      smoothstep(float(0.24), float(0.76), brushed).mul(0.58)
     );
-    const patinated = mix(baseBronze, bronzePatina, innerCornerPatina.mul(0.48));
+    const patinated = mix(baseBronze, bronzePatina, innerCornerPatina.mul(0.45));
     const edgeBurnished = mix(patinated, bronzeChamfer, chamferMask.mul(0.68));
     agedBronze.colorNode = mix(
       edgeBurnished,
-      pVerdigris.mul(0.2),
-      smoothstep(float(0.84), float(0.96), fineGrain).mul(0.035).add(innerCornerPatina.mul(0.025))
-    );
+      pVerdigris.mul(0.18),
+      smoothstep(float(0.84), float(0.96), fineGrain).mul(0.025).add(innerCornerPatina.mul(0.02))
+    ).mul(float(0.7).add(aCrev.mul(0.3)));
+
+    const grooveSlope = cos(uvC.x.mul(1650.0).add(brushStreak.mul(2.4))).mul(0.0075);
+    const nBrushed = normalize(nLoc.add(tLoc.mul(grooveSlope)));
     agedBronze.normalNode = perturbNormal3DAniso(
-      normalLocal,
+      nBrushed,
       positionLocal,
-      vec3(110.0, 110.0, 110.0),
-      float(0.0085)
+      vec3(150.0, 150.0, 150.0),
+      float(0.0032)
     );
     agedBronze.roughnessNode = clamp(
-      float(0.34)
-        .add(brushed.sub(0.5).mul(0.055))
-        .add(innerCornerPatina.mul(0.07))
-        .sub(chamferMask.mul(0.115)),
-      0.21,
+      float(0.3)
+        .add(brushed.sub(0.5).mul(0.045))
+        .add(innerCornerPatina.mul(0.08))
+        .sub(chamferMask.mul(0.11)),
+      0.19,
       0.44
+    );
+    agedBronze.anisotropyNode = vec2(
+      clamp(float(0.62).mul(float(1.0).sub(innerCornerPatina.mul(0.45))).mul(aCrev), 0.18, 0.74),
+      float(0.0)
     );
   }
 
   // ---------------------------------------------------------------------------
-  // 2. Machined Turned Antique Satin Brass (Gussets, Screws, Edison Socket, Rosette, Finial)
+  // 1b. Hero Anisotropic Spun Antique Copper-Bronze (Modeled on Khronos AnisotropyBarnLamp!)
+  //     Silky fine circumferential lathe hairlines letting real GGX + Filament IBL anisotropy
+  //     (`anisotropy ~ 0.94`) & protective clearcoat (`0.26 / 0.15`) produce authentic spun-metal sheen!
   // ---------------------------------------------------------------------------
-  const satinBrass = new THREE.MeshStandardNodeMaterial({
-    metalness: 0.91,
-    roughness: 0.22,
+  const spunCopper = new THREE.MeshPhysicalNodeMaterial({
+    metalness: 0.94,
+    roughness: 0.23,
+    anisotropy: 0.94,
+    clearcoat: 0.26,
+    clearcoatRoughness: 0.15,
+    envMapIntensity: 1.32,
+  });
+  {
+    const uvC = uv();
+    const tLoc = normalize(attribute('tangent', 'vec4').xyz);
+    const nLoc = normalize(normalLocal);
+    const crev = clamp(attribute('aCrevice', 'float'), 0.0, 1.0);
+
+    // Physical-scale silky fine concentric lathe micro-grooves (3x finer & subtler than corrugated ribs!)
+    const latheDrift = mineralToothFbm(vec3(uvC.x.mul(3.2), uvC.y.mul(140.0), float(1.7)), float(1.0));
+    const latheFine = mineralToothFbm(vec3(uvC.x.mul(6.0), uvC.y.mul(440.0), float(4.3)), float(1.0));
+    const ringPhase = uvC.y.mul(620.0).add(latheDrift.mul(2.2));
+    const latheGroove = sin(ringPhase).mul(0.5).add(0.5);
+    const latheMicro = sin(uvC.y.mul(1180.0).add(latheFine.mul(2.8))).mul(0.5).add(0.5);
+    const grainMix = latheFine.mul(0.48).add(latheGroove.mul(0.32)).add(latheMicro.mul(0.2));
+
+    // Organic corner/crevice oxidation variation (just like BarnLamp oxidized recesses)
+    const oxNoise = mineralToothFbm(positionLocal.mul(28.0), float(1.0));
+    const cleanMask = smoothstep(float(0.14), float(0.84), crev.add(oxNoise.sub(0.5).mul(0.14)));
+
+    // Strictly MINERAL_PALETTE antique brushed copper-bronze palette (tight silky spun metal range!)
+    const copperOxide = mix(pRawUmber.mul(0.22), pHematite.mul(0.2), float(0.38));
+    const copperGroove = mix(pBurntSienna, pYellowOchre, float(0.28)).mul(0.96).add(pHematite.mul(0.06));
+    const copperBrushed = mix(pBurntSienna, pYellowOchre, float(0.42)).mul(1.22).add(pBoneCalcite.mul(0.085));
+    const copperSheen = mix(pYellowOchre, pBoneCalcite, float(0.34)).mul(1.18);
+
+    const spunMid = mix(copperGroove, copperBrushed, smoothstep(float(0.18), float(0.84), grainMix).mul(0.75).add(0.25));
+    const spunPolished = mix(spunMid, copperSheen, smoothstep(float(0.72), float(0.96), grainMix).mul(0.18));
+    spunCopper.colorNode = mix(copperOxide, spunPolished, cleanMask);
+
+    // Subtle silky lathe micro-groove tilt along meridian T so spun sheen glides smoothly without vinyl grooves!
+    const grooveSlope = cos(ringPhase)
+      .mul(0.01)
+      .add(cos(uvC.y.mul(1180.0).add(latheFine.mul(2.8))).mul(0.006))
+      .mul(cleanMask);
+    const nLathed = normalize(nLoc.add(tLoc.mul(grooveSlope)));
+    spunCopper.normalNode = transformNormalToView(nLathed);
+
+    // Lower metalness + higher roughness + attenuated anisotropy in oxidized step crevices (BarnLamp physics!)
+    spunCopper.metalnessNode = mix(float(0.54), float(0.95), cleanMask);
+    spunCopper.roughnessNode = clamp(
+      mix(float(0.56), float(0.22), cleanMask)
+        .add(grainMix.sub(0.5).mul(0.05))
+        .add(oxNoise.sub(0.5).mul(0.028)),
+      0.16,
+      0.62
+    );
+    spunCopper.anisotropyNode = vec2(mix(float(0.24), float(0.94), cleanMask), float(0.0));
+  }
+
+  // ---------------------------------------------------------------------------
+  // 2. Silky Brushed Anisotropic Antique Copper-Brass Adornments (Corner Gussets, Prism Ribs, Saddles)
+  // ---------------------------------------------------------------------------
+  const satinBrass = new THREE.MeshPhysicalNodeMaterial({
+    metalness: 0.92,
+    roughness: 0.23,
+    anisotropy: 0.86,
+    clearcoat: 0.22,
+    clearcoatRoughness: 0.17,
     envMapIntensity: 1.28,
   });
   {
-    const fineSatin = mineralToothFbm(positionLocal.mul(vec3(195.0, 95.0, 195.0)), float(1.0));
-    const microGrain = mineralToothFbm(positionLocal.add(vec3(4.1, 1.8, 6.2)), float(185.0));
-    const brassAged = mix(pRawUmber, pYellowOchre, float(0.74)).mul(1.02);
-    const brassBright = mix(pYellowOchre, pBoneCalcite, float(0.24)).mul(1.04);
-    const absN = abs(normalize(normalLocal));
+    const uvC = uv();
+    const tLoc = normalize(attribute('tangent', 'vec4').xyz);
+    const nLoc = normalize(normalLocal);
+    const crev = clamp(attribute('aCrevice', 'float'), 0.0, 1.0);
+
+    // Ultra-fine silky brushed hairlines along B (`uv.y`) — 4x finer than corduroy bars!
+    const brushTrack = mineralToothFbm(vec3(uvC.x.mul(780.0), uvC.y.mul(36.0), float(3.4)), float(1.0));
+    const microGrain = mineralToothFbm(positionLocal.add(vec3(4.1, 1.8, 6.2)), float(190.0));
+    const trackWave = sin(uvC.x.mul(1900.0).add(brushTrack.mul(2.5))).mul(0.5).add(0.5);
+    const brushed = brushTrack.mul(0.46).add(trackWave.mul(0.28)).add(microGrain.mul(0.26));
+
+    const cleanMask = smoothstep(float(0.2), float(0.86), crev);
+    const absN = abs(nLoc);
     const chamferEdge = smoothstep(float(0.92), float(0.72), max(absN.x, max(absN.y, absN.z)));
 
-    satinBrass.colorNode = mix(
+    // Tight silky antique copper-brass tone bridging spunCopper fixture & agedBronze rails
+    const brassOxide = mix(pRawUmber.mul(0.32), pBurntSienna.mul(0.38), float(0.4));
+    const brassAged = mix(pBurntSienna, pYellowOchre, float(0.58)).mul(1.06);
+    const brassBright = mix(pYellowOchre, pBoneCalcite, float(0.22)).mul(1.14);
+
+    const brassBody = mix(
       brassAged,
       brassBright,
-      smoothstep(float(0.32), float(0.72), fineSatin.mul(0.58).add(microGrain.mul(0.42)))
-        .mul(0.68)
-        .add(chamferEdge.mul(0.26))
+      smoothstep(float(0.24), float(0.8), brushed).mul(0.58).add(chamferEdge.mul(0.26))
     );
-    satinBrass.normalNode = perturbNormal3DAniso(
-      normalLocal,
-      positionLocal,
-      vec3(140.0, 140.0, 140.0),
-      float(0.0036)
-    );
+    satinBrass.colorNode = mix(brassOxide, brassBody, cleanMask);
+
+    const brushSlope = cos(uvC.x.mul(1900.0).add(brushTrack.mul(2.5))).mul(0.008).mul(cleanMask);
+    const nBrushed = normalize(nLoc.add(tLoc.mul(brushSlope)));
+    satinBrass.normalNode = transformNormalToView(nBrushed);
+
+    satinBrass.metalnessNode = mix(float(0.62), float(0.94), cleanMask);
     satinBrass.roughnessNode = clamp(
-      float(0.22)
-        .add(fineSatin.sub(0.5).mul(0.04))
-        .sub(chamferEdge.mul(0.045)),
+      mix(float(0.46), float(0.22), cleanMask)
+        .add(brushed.sub(0.5).mul(0.045))
+        .sub(chamferEdge.mul(0.04)),
       0.16,
-      0.29
+      0.52
     );
+    satinBrass.anisotropyNode = vec2(mix(float(0.28), float(0.86), cleanMask), float(0.0));
   }
 
   // ---------------------------------------------------------------------------
-  // 2b. Stepped Recessed Brass Retaining Bezel (Depth-Occluded Rabbet)
+  // 2b. Stepped Recessed Anisotropic Brushed Copper-Brass Retaining Bezels
   // ---------------------------------------------------------------------------
-  const bezelBrass = new THREE.MeshStandardNodeMaterial({
-    metalness: 0.88,
-    roughness: 0.32,
-    envMapIntensity: 1.04,
+  const bezelBrass = new THREE.MeshPhysicalNodeMaterial({
+    metalness: 0.9,
+    roughness: 0.26,
+    anisotropy: 0.84,
+    clearcoat: 0.22,
+    clearcoatRoughness: 0.18,
+    envMapIntensity: 1.18,
   });
   {
-    const fineBezel = mineralToothFbm(positionLocal, float(145.0));
-    const recessT = smoothstep(float(BEZEL_BACK_Z), float(BEZEL_FRONT_Z), positionLocal.z);
-    const rabbetShadow = mix(pRawUmber, pYellowOchre, float(0.38)).mul(0.72);
-    const bezelRim = mix(pRawUmber, pYellowOchre, float(0.74)).mul(0.84);
-    const bevelCatch = smoothstep(float(0.88), float(0.65), abs(normalize(normalLocal).z));
+    const uvC = uv();
+    const tLoc = normalize(attribute('tangent', 'vec4').xyz);
+    const nLoc = normalize(normalLocal);
+    const crev = clamp(attribute('aCrevice', 'float'), 0.0, 1.0);
 
-    const baseCol = mix(rabbetShadow, bezelRim, recessT.mul(0.72).add(0.28));
+    const millTrack = mineralToothFbm(vec3(uvC.x.mul(820.0), uvC.y.mul(32.0), float(5.1)), float(1.0));
+    const millWave = sin(uvC.x.mul(1950.0).add(millTrack.mul(2.4))).mul(0.5).add(0.5);
+    const recessT = smoothstep(float(BEZEL_BACK_Z), float(BEZEL_FRONT_Z), positionLocal.z);
+    const rabbetShadow = mix(pRawUmber.mul(0.34), pBurntSienna.mul(0.42), float(0.42));
+    const bezelRim = mix(pBurntSienna, pYellowOchre, float(0.58)).mul(0.98);
+    const bevelCatch = smoothstep(float(0.88), float(0.65), abs(nLoc.z));
+
+    const cleanBezel = smoothstep(float(0.22), float(0.85), crev).mul(recessT.mul(0.74).add(0.26));
+    const baseCol = mix(rabbetShadow, bezelRim, cleanBezel);
     bezelBrass.colorNode = baseCol
-      .mul(float(0.95).add(fineBezel.mul(0.1)))
-      .add(pYellowOchre.mul(bevelCatch.mul(0.025)));
-    bezelBrass.normalNode = perturbNormal3DAniso(
-      normalLocal,
-      positionLocal,
-      vec3(145.0, 145.0, 145.0),
-      float(0.0038)
-    );
+      .mul(float(0.93).add(millTrack.mul(0.08)).add(millWave.mul(0.05)))
+      .add(mix(pYellowOchre, pBoneCalcite, float(0.2)).mul(bevelCatch.mul(0.04)));
+
+    const millSlope = cos(uvC.x.mul(1950.0).add(millTrack.mul(2.4))).mul(0.0075).mul(cleanBezel);
+    bezelBrass.normalNode = transformNormalToView(normalize(nLoc.add(tLoc.mul(millSlope))));
+    bezelBrass.metalnessNode = mix(float(0.62), float(0.92), cleanBezel);
     bezelBrass.roughnessNode = clamp(
-      mix(float(0.42), float(0.3), recessT).add(fineBezel.sub(0.5).mul(0.045)),
-      0.26,
-      0.46
+      mix(float(0.44), float(0.24), cleanBezel).add(millTrack.sub(0.5).mul(0.04)),
+      0.19,
+      0.48
     );
+    bezelBrass.anisotropyNode = vec2(mix(float(0.3), float(0.84), cleanBezel), float(0.0));
   }
 
   // ---------------------------------------------------------------------------
-  // 2c. Calibrated Micrometer Vernier Sleeve Brass (Crisp Engraved Calibration Ticks!)
+  // 2c. Calibrated Spun-Copper Micrometer Vernier Sleeve (Engraved Calibration Ticks + Anisotropy!)
   // ---------------------------------------------------------------------------
-  const vernierBrass = new THREE.MeshStandardNodeMaterial({
-    metalness: 0.9,
+  const vernierBrass = new THREE.MeshPhysicalNodeMaterial({
+    metalness: 0.92,
     roughness: 0.23,
-    envMapIntensity: 1.26,
+    anisotropy: 0.88,
+    clearcoat: 0.24,
+    clearcoatRoughness: 0.16,
+    envMapIntensity: 1.28,
   });
   {
     const p = positionLocal;
-    const fineTurn = mineralToothFbm(vec3(p.x.mul(32.0), p.y.mul(240.0), p.z.mul(32.0)), float(1.0));
+    const uvC = uv();
+    const tLoc = normalize(attribute('tangent', 'vec4').xyz);
+    const nLoc = normalize(normalLocal);
+    const fineTurn = mineralToothFbm(vec3(uvC.x.mul(4.0), uvC.y.mul(170.0), float(2.5)), float(1.0));
+    const turnWave = sin(uvC.y.mul(260.0).add(fineTurn.mul(2.5))).mul(0.5).add(0.5);
     const safeX = abs(p.x).lessThan(1e-5).select(float(1e-5), p.x);
     const phi = atan(p.z, safeX);
 
@@ -517,48 +624,55 @@ export function createEchoMaterials(): EchoMaterials {
     const engraved = clamp(max(tickMask, max(datumTop, datumBot)), 0.0, 1.0);
 
     const brassBase = mix(
-      mix(pRawUmber, pYellowOchre, float(0.72)).mul(1.06),
-      mix(pYellowOchre, pBoneCalcite, float(0.26)).mul(1.06),
-      fineTurn
+      mix(pBurntSienna, pYellowOchre, float(0.55)).mul(1.08),
+      mix(pYellowOchre, pBoneCalcite, float(0.28)).mul(1.12),
+      fineTurn.mul(0.6).add(turnWave.mul(0.4))
     );
-    const inkDark = pRawUmber.mul(0.16);
+    const inkDark = pRawUmber.mul(0.15);
     vernierBrass.colorNode = mix(brassBase, inkDark, engraved.mul(0.92));
+    const turnSlope = cos(uvC.y.mul(260.0).add(fineTurn.mul(2.5))).mul(0.02).mul(float(1.0).sub(engraved));
+    vernierBrass.normalNode = transformNormalToView(normalize(nLoc.add(tLoc.mul(turnSlope))));
     vernierBrass.roughnessNode = clamp(
-      mix(float(0.22), float(0.68), engraved).add(fineTurn.sub(0.5).mul(0.04)),
+      mix(float(0.22), float(0.68), engraved).add(fineTurn.sub(0.5).mul(0.045)),
       0.17,
       0.72
     );
-    vernierBrass.metalnessNode = mix(float(0.91), float(0.28), engraved);
+    vernierBrass.metalnessNode = mix(float(0.93), float(0.28), engraved);
+    vernierBrass.anisotropyNode = vec2(mix(float(0.88), float(0.1), engraved), float(0.0));
   }
 
   // ---------------------------------------------------------------------------
-  // 3. 4-Sided Diamond-Knurled Satin Brass (Micrometer Drums, Lock-Rings, Cord-Grip, Socket Collar)
+  // 3. 4-Sided Diamond-Knurled Spun Copper-Brass (Micrometer Drums, Lock-Rings, Socket Collar)
   // ---------------------------------------------------------------------------
-  const knurledBrass = new THREE.MeshStandardNodeMaterial({
-    metalness: 0.91,
+  const knurledBrass = new THREE.MeshPhysicalNodeMaterial({
+    metalness: 0.92,
     roughness: 0.22,
+    anisotropy: 0.42,
+    clearcoat: 0.22,
+    clearcoatRoughness: 0.16,
     envMapIntensity: 1.32,
   });
   {
     const aKnurlValley = attribute('aKnurlValley', 'float');
     const fineGrain = mineralToothFbm(positionLocal, float(84.0));
-    const valleyDark = mix(pRawUmber, pBurntSienna, float(0.18)).mul(0.5);
-    const crestBright = mix(pYellowOchre, pBoneCalcite, float(0.28)).mul(1.16);
+    const valleyDark = mix(pRawUmber, pHematite, float(0.26)).mul(0.36);
+    const crestBright = mix(pBurntSienna, pYellowOchre, float(0.52)).mul(1.24).add(pBoneCalcite.mul(0.07));
     const grooveFactor = clamp(aKnurlValley, 0.0, 1.0);
     const baseKnurl = mix(
       valleyDark,
       crestBright,
-      smoothstep(float(0.06), float(0.94), grooveFactor)
+      smoothstep(float(0.08), float(0.92), grooveFactor)
     );
     const hoverWarmth = pYellowOchre.mul(uThumbHover.mul(0.16));
 
     knurledBrass.colorNode = baseKnurl.add(hoverWarmth);
     knurledBrass.roughnessNode = clamp(
-      mix(float(0.52), float(0.18), grooveFactor).add(fineGrain.sub(0.5).mul(0.035)),
+      mix(float(0.54), float(0.19), grooveFactor).add(fineGrain.sub(0.5).mul(0.035)),
       0.15,
-      0.56
+      0.58
     );
-    knurledBrass.metalnessNode = mix(float(0.68), float(0.94), grooveFactor);
+    knurledBrass.metalnessNode = mix(float(0.58), float(0.95), grooveFactor);
+    knurledBrass.anisotropyNode = vec2(mix(float(0.15), float(0.45), grooveFactor), float(0.0));
   }
 
   // ---------------------------------------------------------------------------
@@ -615,7 +729,7 @@ export function createEchoMaterials(): EchoMaterials {
   }
 
   // ---------------------------------------------------------------------------
-  // 6. Warm Backlit Dark-Bronze Vent Baffle Core Inside Edison Socket Cooling Slots
+  // 6. Warm Backlit Dark-Bronze Vent Baffle Core Inside Edison Socket Lower Shoulder Louvers
   // ---------------------------------------------------------------------------
   const ventBaffleGlow = new THREE.MeshStandardNodeMaterial({
     metalness: 0.55,
@@ -624,27 +738,37 @@ export function createEchoMaterials(): EchoMaterials {
   });
   {
     const pulse = float(1.0).add(sin(uTime.mul(4.2)).mul(0.03)).add(uPluckFlash.mul(0.45));
-    // Warm incandescent light escaping upward from the Edison bulb neck into the lower vent openings
+    // Warm incandescent light softly grazing upward through the subtle lower gallery cooling louvers
     const ventHeightT = float(1.0).sub(
-      smoothstep(float(SOCKET_VENT_BOT_Y), float(SOCKET_CAP_BOT_Y), positionLocal.y)
+      smoothstep(float(SOCKET_VENT_BOT_Y - 0.002), float(SOCKET_VENT_BOT_Y + 0.014), positionLocal.y)
     );
-    ventBaffleGlow.colorNode = pRawUmber.mul(0.22);
+    ventBaffleGlow.colorNode = pRawUmber.mul(0.18);
     ventBaffleGlow.emissiveNode = mix(pBurntSienna, pRealgar, ventHeightT)
-      .mul(float(0.18).add(ventHeightT.mul(0.55)))
+      .mul(float(0.12).add(ventHeightT.mul(0.42)))
       .mul(pulse);
   }
 
   // ---------------------------------------------------------------------------
-  // 7. Articulated Woven Dark-Umber & Ochre Textile Pendant Cord (GPU Cubic Hermite Swing!)
+  // 7. Early Turn-of-the-Century Tight Twin-Conductor Twisted Cloth-Braided Pendant Cord
+  //    Full GPU Cubic Hermite Position + Tangent-Frame Normal Rotation + Woven Herringbone Micro-Normals + Cloth Sheen!
   // ---------------------------------------------------------------------------
-  const braidedCord = new THREE.MeshStandardNodeMaterial({
-    metalness: 0.02,
-    roughness: 0.86,
+  const braidedCord = new THREE.MeshPhysicalNodeMaterial({
+    metalness: 0.0,
+    roughness: 0.88,
+    sheen: 0.48,
+    sheenRoughness: 0.72,
+    sheenColor: new THREE.Color(
+      MINERAL_PALETTE.boneCalcite.rInfLinear[0] * 0.42 + MINERAL_PALETTE.yellowOchre.rInfLinear[0] * 0.32,
+      MINERAL_PALETTE.boneCalcite.rInfLinear[1] * 0.42 + MINERAL_PALETTE.yellowOchre.rInfLinear[1] * 0.32,
+      MINERAL_PALETTE.boneCalcite.rInfLinear[2] * 0.42 + MINERAL_PALETTE.yellowOchre.rInfLinear[2] * 0.32
+    ),
     envMapIntensity: 0.72,
   });
   {
     const s = attribute('aCordS', 'float');
     const radOff = attribute('aCordRadial', 'vec3');
+    const restNorm = attribute('aCordRestNormal', 'vec3');
+    const restTan = attribute('aCordRestTangent', 'vec3');
     const uvCoord = uv();
 
     // Cubic Hermite centerline from ceiling ceramic grommet (exiting strictly vertical -Y)
@@ -669,7 +793,7 @@ export function createEchoMaterials(): EchoMaterials {
     const dh11 = s2.mul(3.0).sub(s.mul(2.0));
     const tanDown = normalize(p0.mul(dh00).add(t0.mul(dh10)).add(p1.mul(dh01)).add(t1.mul(dh11)));
 
-    // Exact twist-free orthonormal cross-section basis (eX, eZ) matching (1,0,0) & (0,0,1) at rest
+    // Exact twist-free right-handed orthonormal frame (eX, upAx, eZ) matching (1,0,0), (0,1,0), (0,0,1) at rest
     const upAx = tanDown.negate();
     const denom = max(float(0.15), float(1.0).add(upAx.y));
     const eX = vec3(
@@ -683,32 +807,51 @@ export function createEchoMaterials(): EchoMaterials {
       float(1.0).sub(upAx.z.mul(upAx.z).div(denom))
     );
 
-    braidedCord.positionNode = centerPos.add(eX.mul(radOff.x)).add(eZ.mul(radOff.z));
+    // Rigidly transform full 3D helical cross-section offset (including helical pitch y!) along leaning cord
+    braidedCord.positionNode = centerPos
+      .add(eX.mul(radOff.x))
+      .add(upAx.mul(radOff.y))
+      .add(eZ.mul(radOff.z));
 
-    // Crisp herringbone diagonal woven cloth warp & weft texture (dark raw umber + antique ochre flecks)
-    const uStrand = uvCoord.x.mul(8.0);
-    const vStrand = uvCoord.y.mul(54.0);
-    const diagA = sin(uStrand.add(vStrand).mul(Math.PI * 2)).mul(0.5).add(0.5);
-    const diagB = sin(uStrand.sub(vStrand).mul(Math.PI * 2)).mul(0.5).add(0.5);
-    const weaveCrest = max(diagA, diagB);
-    const weaveGroove = diagA.mul(diagB);
-    const lintNoise = mineralToothFbm(vec3(uvCoord.x.mul(24.0), uvCoord.y.mul(160.0), float(1.3)), float(1.0));
+    // Rotate exact analytic rest-frame outward normal & strand tangent into the leaning Hermite frame!
+    const bentN = normalize(eX.mul(restNorm.x).add(upAx.mul(restNorm.y)).add(eZ.mul(restNorm.z)));
+    const bentT = normalize(eX.mul(restTan.x).add(upAx.mul(restTan.y)).add(eZ.mul(restTan.z)));
+    const bentB = normalize(cross(bentN, bentT));
 
-    const clothDark = pRawUmber.mul(0.24);
-    const clothMid = mix(pRawUmber.mul(0.56), pBurntSienna.mul(0.45), float(0.32));
-    const clothOchreThread = mix(pRawUmber.mul(0.45), pYellowOchre.mul(0.72), float(0.58));
-    // Alternating subtle golden-ochre tracer strand woven into the dark-umber textile braid
-    const tracerMask = smoothstep(float(0.68), float(0.95), diagA).mul(
-      smoothstep(float(0.35), float(0.85), sin(uStrand.mul(Math.PI)).mul(0.5).add(0.5))
+    // Tight turn-of-the-century 2x2 diagonal herringbone woven silk-cotton sleeve around EACH conductor
+    const uYarn = uvCoord.x.mul(8.0);
+    const vYarn = uvCoord.y.mul(136.0);
+    const phaseA = uYarn.add(vYarn).mul(Math.PI * 2);
+    const phaseB = uYarn.sub(vYarn).mul(Math.PI * 2);
+    const yarnA = sin(phaseA).mul(0.5).add(0.5);
+    const yarnB = sin(phaseB).mul(0.5).add(0.5);
+    // Crisp interlocking diamond cloth over-under weave height + analytical tangent-space slopes
+    const weaveHeight = max(yarnA, yarnB);
+    const weaveCrevice = yarnA.mul(yarnB);
+    const dHdU = cos(phaseA).add(cos(phaseB)).mul(0.16);
+    const dHdV = cos(phaseA).sub(cos(phaseB)).mul(0.16);
+    const lintNoise = mineralToothFbm(vec3(uvCoord.x.mul(22.0), uvCoord.y.mul(260.0), float(1.9)), float(1.0));
+
+    // Perturb rotated strand normal with the tight woven cloth braid relief (strictly right-side-out!)
+    const wovenN = normalize(bentN.sub(bentB.mul(dHdU)).sub(bentT.mul(dHdV)));
+    braidedCord.normalNode = transformNormalToView(wovenN);
+
+    // Authentic 1900s vintage dark Espresso-Umber & antique flax-ochre braided cotton textile (MINERAL_PALETTE)
+    const clothShadow = pRawUmber.mul(0.15);
+    const clothUmber = mix(pRawUmber.mul(0.42), pYellowOchre.mul(0.24), float(0.26));
+    const clothFlaxTracer = mix(pRawUmber.mul(0.48), pYellowOchre.mul(0.76), float(0.58));
+    // Subtle alternating antique flax-ochre herringbone tracer thread woven tightly through the dark cotton jacket
+    const tracerBand = smoothstep(float(0.66), float(0.95), yarnA).mul(
+      smoothstep(float(0.48), float(0.88), sin(uYarn.mul(Math.PI)).mul(0.5).add(0.5))
     );
-    const wovenCol = mix(clothDark, clothMid, smoothstep(float(0.18), float(0.86), weaveCrest))
-      .mul(float(0.84).add(weaveGroove.mul(0.26)))
+    const wovenCol = mix(clothShadow, clothUmber, smoothstep(float(0.18), float(0.84), weaveHeight))
+      .mul(float(0.74).add(weaveCrevice.mul(0.32)))
       .mul(float(0.9).add(lintNoise.mul(0.2)));
-    braidedCord.colorNode = mix(wovenCol, clothOchreThread, tracerMask.mul(0.58));
+    braidedCord.colorNode = mix(wovenCol, clothFlaxTracer, tracerBand.mul(0.42));
     braidedCord.roughnessNode = clamp(
-      float(0.88).sub(weaveCrest.mul(0.12)).add(lintNoise.sub(0.5).mul(0.08)),
+      float(0.92).sub(weaveHeight.mul(0.14)).add(lintNoise.sub(0.5).mul(0.08)),
       0.74,
-      0.95
+      0.96
     );
   }
 
@@ -844,29 +987,29 @@ export function createEchoMaterials(): EchoMaterials {
     const studioRefl = evalStudioSoftboxDome(reflDir);
     const lKey = normalize(vec3(-0.5, 0.72, 0.48));
     const lRim = normalize(vec3(0.46, 0.56, -0.69));
-    const specKey = pow(max(float(0.0), dot(nW, normalize(lKey.add(vW)))), 78.0);
-    const specRim = pow(max(float(0.0), dot(nW, normalize(lRim.add(vW)))), 42.0);
+    const specKey = pow(max(float(0.0), dot(nW, normalize(lKey.add(vW)))), 124.0);
+    const specRim = pow(max(float(0.0), dot(nW, normalize(lRim.add(vW)))), 64.0);
 
     // Subtle warm filament edge refraction + delicate celadon optical bevel catch
-    const bevelCol = mix(pBoneCalcite, pCeladon, float(0.32)).mul(bevelEdge.mul(0.42));
+    const bevelCol = mix(pBoneCalcite, pCeladon, float(0.34)).mul(bevelEdge.mul(0.36));
     const facetGlint = pBoneCalcite
-      .mul(specKey.mul(1.25).add(specRim.mul(0.55)))
-      .add(studioRefl.mul(fresnel.mul(0.55)))
-      .add(pRealgar.mul(fresnel.mul(0.1)));
+      .mul(specKey.mul(0.92).add(specRim.mul(0.42)))
+      .add(studioRefl.mul(fresnel.mul(0.42)))
+      .add(pRealgar.mul(fresnel.mul(0.08)));
     const rawCrystal = facetGlint.add(bevelCol);
 
-    // Keep pane centers ~92% transparent so the vintage Edison bulb & squirrel-cage filament shine cleanly!
+    // Keep pane centers ultra-clear from every orbit (zero milky white facet blowout on underside views!)
     const alpha = clamp(
-      float(0.045)
-        .add(fresnel.mul(0.28))
-        .add(bevelEdge.mul(0.26))
-        .add(specKey.mul(0.58))
-        .add(specRim.mul(0.28)),
-      0.045,
-      0.68
+      float(0.036)
+        .add(fresnel.mul(0.22))
+        .add(bevelEdge.mul(0.22))
+        .add(specKey.mul(0.34))
+        .add(specRim.mul(0.18)),
+      0.036,
+      0.44
     );
 
-    crystalPrismGlass.colorNode = rawCrystal.div(max(float(0.08), alpha)).min(vec3(1.5, 1.45, 1.38));
+    crystalPrismGlass.colorNode = rawCrystal.div(max(float(0.08), alpha)).min(vec3(1.38, 1.32, 1.24));
     crystalPrismGlass.opacityNode = alpha;
   }
 
@@ -1057,8 +1200,9 @@ export function createEchoMaterials(): EchoMaterials {
         );
         accum.addAssign(haloColor.mul(throughput));
 
-        // B2. Connected Top Ceiling Rosette Canopy + Knurled Cord-Grip + Ceramic Grommet
-        //     Bridges solidly from +Y mirror plane (`CAVITY_HALF = 0.668`) down to `GROMMET_BOT_Y = 0.514`
+        // B2. Connected Top Spun-Copper Ceiling Rosette Canopy + Knurled Cord-Grip + Ceramic Grommet
+        //     Seats flush against the +Y interior ceiling plane (`CAVITY_HALF = 0.668`) with concentric
+        //     BarnLamp turned oxidation rings and zero floating double-disc stem artifact!
         const aRos = rd.x.mul(rd.x).add(rd.z.mul(rd.z));
         const bRos = ro.x.mul(rd.x).add(ro.z.mul(rd.z));
         const rRosBound = float(CEILING_ROSETTE_RADIUS);
@@ -1075,47 +1219,53 @@ export function createEchoMaterials(): EchoMaterials {
             const pRos = ro.add(rd.mul(tRosMid));
             If(pRos.y.greaterThan(float(GROMMET_BOT_Y)).and(pRos.y.lessThan(float(CAVITY_HALF + 0.002))), () => {
               const rAxisRos = length(vec3(pRos.x, float(0.0), pRos.z));
-              // Stepped physical profile matching Bounce-0 ceiling rosette + collet + gland + ceramic grommet
-              const isUpperStem = pRos.y.greaterThan(float(CEILING_ROSETTE_TOP_Y));
-              const isUpperCanopy = pRos.y.greaterThan(float(CEILING_ROSETTE_BOT_Y));
-              const isCollet = pRos.y.greaterThan(float(CORD_GRIP_BOT_Y)).and(pRos.y.lessThan(float(CORD_GRIP_TOP_Y)));
+              // Compact sleek spun-copper saucer canopy seated flush right against +Y cavity ceiling (`0.618..0.668`)!
+              const isUpperCanopy = pRos.y.greaterThan(float(0.618));
+              const isUpperCollet = pRos.y.greaterThan(float(0.574)).and(pRos.y.lessThan(float(0.618)));
+              const isCollet = pRos.y.greaterThan(float(CORD_GRIP_BOT_Y)).and(pRos.y.lessThan(float(0.574)));
               const isGrommet = pRos.y.lessThan(float(GLAND_BOT_Y));
-              const canopyProfileR = isUpperStem.select(
-                float(0.032),
-                mix(
-                  float(0.054),
-                  float(CEILING_ROSETTE_RADIUS),
-                  smoothstep(float(CEILING_ROSETTE_BOT_Y), float(CEILING_ROSETTE_TOP_Y), pRos.y)
-                )
-              );
+              const canopyT = smoothstep(float(0.618), float(CAVITY_HALF), pRos.y);
+              const canopyProfileR = mix(float(0.044), float(CEILING_ROSETTE_RADIUS), pow(canopyT, 0.52));
               const targetR = isUpperCanopy.select(
                 canopyProfileR,
-                isCollet.select(float(0.0315), isGrommet.select(float(0.0195), float(0.025)))
+                isUpperCollet.select(
+                  float(0.036),
+                  isCollet.select(float(0.0315), isGrommet.select(float(0.0195), float(0.026)))
+                )
               );
               If(rAxisRos.lessThan(targetR), () => {
-                // Compute true front cylindrical surface normal for rich PBR-matched brass IBL reflections
                 const halfChordR = sqrt(max(float(0.0), targetR.mul(targetR).sub(rAxisRos.mul(rAxisRos))));
                 const tSurfRos = max(tR0, tRosMid.sub(halfChordR.div(sqrt(max(float(1e-5), aRos)))));
                 const pSurfRos = ro.add(rd.mul(tSurfRos));
-                const nRosW = normalize(vec3(pSurfRos.x, float(-0.18), pSurfRos.z));
+                const nRosW = normalize(vec3(pSurfRos.x, float(-0.34), pSurfRos.z));
                 const sxR = abs(pSurfRos.x).lessThan(1e-5).select(float(1e-5), pSurfRos.x);
                 const phiR = atan(pSurfRos.z, sxR);
                 const reflRos = evalStudioSoftboxDome(reflect(rd, nRosW));
                 const diffRos = max(float(0.0), dot(nRosW, lStudioKeyW));
-                const specRos = pow(max(float(0.0), dot(nRosW, normalize(lStudioKeyW.sub(rd)))), 48.0);
+                const hRos = normalize(lStudioKeyW.sub(rd));
+                // Anisotropic radial/meridional stretched specular matching Bounce-0 spunCopper!
+                const anisoBandR = pow(max(float(0.0), dot(nRosW, hRos)), 14.0).mul(0.52);
+                const specRos = pow(max(float(0.0), dot(nRosW, hRos)), 64.0);
+                // Concentric oxidized lathe rings on the spun ceiling rosette canopy
+                const latheRingR = sin(pSurfRos.y.mul(520.0)).mul(0.5).add(0.5);
+                const oxGrooveR = isUpperCanopy.select(
+                  float(1.0).sub(smoothstep(float(0.002), float(0.0055), min(abs(pSurfRos.y.sub(0.634)), abs(pSurfRos.y.sub(0.652))))),
+                  float(0.0)
+                );
                 const knurlRos = sin(phiR.mul(28.0).add(pSurfRos.y.mul(420.0)))
                   .mul(sin(phiR.mul(28.0).sub(pSurfRos.y.mul(420.0))))
                   .mul(0.5)
                   .add(0.5)
                   .mul(isCollet.select(float(1.0), float(0.0)));
-                const brassTint = mix(pRawUmber.mul(0.32), pYellowOchre.mul(1.06), float(0.76));
-                const bronzeStemTint = mix(pRawUmber.mul(0.22), pYellowOchre.mul(0.45), float(0.28));
-                const metalTint = isUpperStem.select(bronzeStemTint, brassTint);
-                const rosMetal = metalTint
-                  .mul(float(0.18).add(diffRos.mul(0.55)).add(reflRos.mul(1.65)))
-                  .mul(float(1.0).sub(knurlRos.mul(0.36)))
-                  .add(pBoneCalcite.mul(specRos.mul(0.95)))
-                  .add(pRealgar.mul(0.1).mul(filamentPulse));
+                // Warm antique spun-copper hue matching Bounce-0 spunCopper exactly!
+                const copperTint = mix(pBurntSienna.mul(1.08), pYellowOchre.mul(1.06), float(0.32));
+                const rosMetal = copperTint
+                  .mul(float(0.16).add(diffRos.mul(0.46)).add(reflRos.mul(1.55)).add(anisoBandR))
+                  .mul(float(0.86).add(latheRingR.mul(0.22)))
+                  .mul(float(1.0).sub(knurlRos.mul(0.42)))
+                  .mul(float(1.0).sub(oxGrooveR.mul(0.68)))
+                  .add(pBoneCalcite.mul(specRos.mul(0.82)))
+                  .add(pRealgar.mul(0.08).mul(filamentPulse));
                 const rosCeramic = mix(pWarmKaolin.mul(0.46), pBoneCalcite.mul(0.98), diffRos.mul(0.7).add(0.3))
                   .add(pBoneCalcite.mul(specRos.mul(0.42)));
                 const rosCol = isGrommet.select(rosCeramic, rosMetal);
@@ -1127,7 +1277,7 @@ export function createEchoMaterials(): EchoMaterials {
           });
         });
 
-        // B3. Articulated Woven Dark-Umber & Ochre Braided Textile Pendant Cord
+        // B3. Tight Twin-Conductor Twisted Cloth-Braided Pendant Cord (10.5 helical turns + herringbone cloth!)
         const oaW = ro.sub(cordBot);
         const dOa = dot(rd, oaW);
         const wOa = dot(cordVec, oaW);
@@ -1138,26 +1288,29 @@ export function createEchoMaterials(): EchoMaterials {
 
         If(tCord.greaterThan(1e-4).and(tCord.lessThan(tWall)), () => {
           const pRayC = ro.add(rd.mul(tCord));
-          // Include subtle curved pendulum swing bow matching the 3D Hermite cord
           const bendW = sCord.mul(float(1.0).sub(sCord)).mul(4.0);
           const pSegC = cordBot.add(cordVec.mul(sCord)).add(cordMidBend.mul(bendW));
           const diffC = pRayC.sub(pSegC);
           const dCordSq = dot(diffC, diffC);
-          const cordRad = float(CORD_RADIUS).add(totalDist.mul(0.00042));
+          // Slight twin-strand helical silhouette scallop along 12.5 tight turns
+          const helixWave = sin(sCord.mul(Math.PI * 2 * 12.5 * 2.0)).mul(0.11);
+          const cordRad = float(CORD_RADIUS).mul(float(0.96).add(helixWave)).add(totalDist.mul(0.00038));
           If(dCordSq.lessThan(cordRad.mul(cordRad)), () => {
             const rNorm = sqrt(max(float(0.0), dCordSq)).div(cordRad);
             const cylLit = sqrt(max(float(0.05), float(1.0).sub(rNorm.mul(rNorm))));
-            // Diagonal herringbone braided cloth pattern matching Bounce-0 woven textile cord
-            const braidTex = sin(sCord.mul(88.0).add(rNorm.mul(7.0))).mul(0.5).add(0.5);
-            const clothDark = pRawUmber.mul(0.28);
-            const clothOchre = mix(pRawUmber.mul(0.55), pYellowOchre.mul(0.86), float(0.45));
-            const cordWarmth = float(1.0).sub(sCord).mul(0.32).add(0.68);
-            const cordCol = mix(clothDark, clothOchre, braidTex.mul(0.62))
-              .mul(cylLit.mul(0.75).add(0.32))
+            // Crisp twin-ply helical crease + tight herringbone cloth weave matching Bounce-0 braided cord!
+            const strandCrease = sin(sCord.mul(Math.PI * 2 * 12.5 * 2.0).add(rNorm.mul(3.4))).mul(0.5).add(0.5);
+            const weaveMicro = sin(sCord.mul(220.0).sub(rNorm.mul(14.0))).mul(0.5).add(0.5);
+            const clothDark = pRawUmber.mul(0.2);
+            const clothMid = mix(pRawUmber.mul(0.5), pBurntSienna.mul(0.46), float(0.36));
+            const clothOchre = mix(pBurntSienna.mul(0.62), pYellowOchre.mul(0.76), float(0.48));
+            const cordWarmth = float(1.0).sub(sCord).mul(0.34).add(0.66);
+            const cordCol = mix(clothDark, mix(clothMid, clothOchre, weaveMicro.mul(0.45)), strandCrease.mul(0.78).add(0.22))
+              .mul(cylLit.mul(0.78).add(0.26))
               .mul(cordWarmth);
-            const cordEdge = float(1.0).sub(smoothstep(float(0.62), float(1.0), rNorm));
+            const cordEdge = float(1.0).sub(smoothstep(float(0.64), float(1.0), rNorm));
             accum.addAssign(cordCol.mul(cordEdge).mul(throughput));
-            throughput.mulAssign(float(1.0).sub(cordEdge.mul(0.95)));
+            throughput.mulAssign(float(1.0).sub(cordEdge.mul(0.96)));
           });
         });
 
@@ -1185,9 +1338,9 @@ export function createEchoMaterials(): EchoMaterials {
             const aCylSafe = max(float(1e-5), aCyl);
 
             // ---------------------------------------------------------------
-            // B4a. Machined Vintage Brass Edison Socket & Cord-Grip Nut (`zL in [0.146, 0.316]`)
+            // B4a. BarnLamp Spun Antique-Copper Edison Socket & Drop Finial (`zL in [0.146, 0.316]`)
             // ---------------------------------------------------------------
-            const rSockBound = float(0.054);
+            const rSockBound = float(0.062);
             const cSock = roL.x.mul(roL.x).add(roL.y.mul(roL.y)).sub(rSockBound.mul(rSockBound));
             const discSock = bCyl.mul(bCyl).sub(aCyl.mul(cSock));
             const hitOpaqueHardware = float(0.0).toVar();
@@ -1198,34 +1351,39 @@ export function createEchoMaterials(): EchoMaterials {
               const tS0 = max(tSpanMin, bCyl.negate().sub(sqS).mul(invAS));
               const tS1 = min(tSpanMax, bCyl.negate().add(sqS).mul(invAS));
               If(tS1.greaterThan(tS0), () => {
-                // Evaluate exact stepped profile along ray intersection with socket/finial cylinder
                 const tSCheck = clamp(bCyl.negate().mul(invAS), tS0, tS1);
                 const pS = roL.add(rdL.mul(tSCheck));
                 const rS = length(vec3(pS.x, pS.y, float(0.0)));
 
-                // Upper Edison Brass Socket (`zL in [0.146, SOCKET_TOP_Y]`)
+                // Upper Spun-Copper Edison Socket matching exact BarnLamp band order!
                 If(pS.z.greaterThan(float(0.146)).and(pS.z.lessThan(float(SOCKET_TOP_Y))), () => {
-                  const isNut = pS.z.greaterThan(float(0.274));
-                  const isCap = pS.z.greaterThan(float(SOCKET_CAP_BOT_Y)).and(pS.z.lessThan(float(0.274)));
-                  const isVent = pS.z.greaterThan(float(SOCKET_VENT_BOT_Y)).and(pS.z.lessThan(float(SOCKET_CAP_BOT_Y)));
-                  const isKnurl = pS.z.greaterThan(float(SOCKET_KNURL_BOT_Y)).and(pS.z.lessThan(float(SOCKET_VENT_BOT_Y)));
-                  const isGallery = pS.z.lessThan(float(SOCKET_SKIRT_BOT_Y));
+                  const isNut = pS.z.greaterThan(float(0.273));
+                  const isCap = pS.z.greaterThan(float(SOCKET_CAP_BOT_Y)).and(pS.z.lessThan(float(0.273)));
+                  const isKnurl = pS.z.greaterThan(float(SOCKET_KNURL_BOT_Y)).and(pS.z.lessThan(float(SOCKET_CAP_BOT_Y)));
+                  const isBarrel = pS.z.greaterThan(float(SOCKET_VENT_BOT_Y + 0.011)).and(pS.z.lessThan(float(SOCKET_KNURL_BOT_Y)));
+                  const isVent = pS.z.greaterThan(float(SOCKET_VENT_BOT_Y - 0.002)).and(pS.z.lessThan(float(SOCKET_VENT_BOT_Y + 0.011)));
+                  const isSkirt = pS.z.greaterThan(float(SOCKET_SKIRT_BOT_Y)).and(pS.z.lessThan(float(SOCKET_VENT_BOT_Y - 0.002)));
                   const isInsulator = pS.z
                     .greaterThan(float(SOCKET_INSULATOR_BOT_Y))
                     .and(pS.z.lessThan(float(SOCKET_SKIRT_BOT_Y)));
-                  const capT = smoothstep(float(SOCKET_CAP_BOT_Y), float(0.274), pS.z);
+                  const capT = smoothstep(float(SOCKET_CAP_BOT_Y), float(0.273), pS.z);
                   const profR = isNut.select(
-                    float(0.024),
+                    float(0.0245),
                     isCap.select(
-                      mix(float(0.049), float(0.027), capT),
+                      mix(float(0.0505), float(0.026), capT),
                       isKnurl.select(
-                        float(0.052),
-                        isInsulator.select(float(0.042), isGallery.select(float(0.044), float(0.049)))
+                        float(0.0525),
+                        isBarrel.select(
+                          float(0.0496),
+                          isSkirt.select(
+                            float(0.060),
+                            isInsulator.select(float(0.042), float(0.0502))
+                          )
+                        )
                       )
                     )
                   );
                   If(rS.lessThan(profR), () => {
-                    // Exact front cylindrical hit + studio metallic IBL reflection matching Bounce-0 PBR brass!
                     const halfChord = sqrt(max(float(0.0), profR.mul(profR).sub(rS.mul(rS))));
                     const tSurf = max(tS0, tSCheck.sub(halfChord.div(sqrt(aCylSafe))));
                     const pSurf = roL.add(rdL.mul(tSurf));
@@ -1238,49 +1396,45 @@ export function createEchoMaterials(): EchoMaterials {
                     const diffS = max(float(0.0), dot(nSurf, lKeyL));
                     const rimS = max(float(0.0), dot(nSurf, lRimL));
                     const hKeyS = normalize(lKeyL.sub(rdL));
-                    const specS = pow(max(float(0.0), dot(nSurf, hKeyS)), 54.0);
-                    // Crisp machined horizontal lathe step grooves separating socket bands
+                    // Stretched vertical anisotropic highlight ribbon matching Bounce-0 spunCopper!
+                    const anisoRibbon = pow(max(float(0.0), dot(nSurf, normalize(vec3(hKeyS.x, hKeyS.y, float(0.0))))), 18.0).mul(0.75);
+                    const specS = pow(max(float(0.0), dot(nSurf, hKeyS)), 68.0);
+                    // Crisp horizontal lathe brushing hairlines + dark oxidized step crevices
+                    const latheLine = sin(pSurf.z.mul(520.0)).mul(0.5).add(0.5);
                     const seamG = min(
-                      abs(pSurf.z.sub(float(0.274))),
+                      abs(pSurf.z.sub(float(0.273))),
                       min(
                         abs(pSurf.z.sub(float(SOCKET_CAP_BOT_Y))),
                         min(
-                          abs(pSurf.z.sub(float(SOCKET_VENT_BOT_Y))),
-                          min(abs(pSurf.z.sub(float(SOCKET_KNURL_BOT_Y))), abs(pSurf.z.sub(float(SOCKET_SKIRT_BOT_Y))))
+                          abs(pSurf.z.sub(float(SOCKET_KNURL_BOT_Y))),
+                          min(abs(pSurf.z.sub(float(SOCKET_VENT_BOT_Y))), abs(pSurf.z.sub(float(SOCKET_SKIRT_BOT_Y))))
                         )
                       )
                     );
-                    const seamDark = float(1.0).sub(smoothstep(float(0.0008), float(0.0032), seamG));
+                    const seamDark = float(1.0).sub(smoothstep(float(0.0008), float(0.0034), seamG));
+                    const filBounce = float(1.0).sub(smoothstep(float(0.146), float(0.235), pSurf.z)).mul(0.3);
 
-                    // Warm upward incandescent bounce onto lower socket skirt
-                    const filBounce = float(1.0).sub(smoothstep(float(0.146), float(0.235), pSurf.z)).mul(0.32);
-
-                    // 12 radial dark/amber-lit cooling ventilation slots on the upper bell!
                     const ventSlot = smoothstep(float(-0.18), float(0.22), cos(phiS.mul(12.0))).mul(
                       isVent.select(float(1.0), float(0.0))
                     );
-                    // Fine diamond knurling relief on the socket grip collar!
-                    const knurlRelief = sin(phiS.mul(40.0).add(pSurf.z.mul(480.0)))
-                      .mul(sin(phiS.mul(40.0).sub(pSurf.z.mul(480.0))))
+                    const knurlRelief = sin(phiS.mul(42.0).add(pSurf.z.mul(480.0)))
+                      .mul(sin(phiS.mul(42.0).sub(pSurf.z.mul(480.0))))
                       .mul(0.5)
                       .add(0.5)
                       .mul(isKnurl.select(float(1.0), float(0.0)));
 
-                    const brassAlbedo = mix(pRawUmber.mul(0.36), pYellowOchre.mul(1.08), float(0.76));
-                    const brassBody = brassAlbedo
-                      .mul(float(0.16).add(diffS.mul(0.48)).add(rimS.mul(0.18)).add(studioMetalRefl.mul(1.85)))
-                      .mul(float(1.0).sub(knurlRelief.mul(0.42)))
-                      .mul(float(1.0).sub(seamDark.mul(0.62)))
-                      .add(pBoneCalcite.mul(specS.mul(1.05)))
+                    const copperAlbedo = mix(pBurntSienna.mul(1.12), pYellowOchre.mul(1.04), float(0.3));
+                    const copperBody = copperAlbedo
+                      .mul(float(0.14).add(diffS.mul(0.42)).add(rimS.mul(0.16)).add(studioMetalRefl.mul(1.7)).add(anisoRibbon))
+                      .mul(float(0.92).add(latheLine.mul(0.14)))
+                      .mul(float(1.0).sub(knurlRelief.mul(0.46)))
+                      .mul(float(1.0).sub(seamDark.mul(0.72)))
+                      .add(pBoneCalcite.mul(specS.mul(0.98)))
                       .add(pRealgar.mul(filBounce.mul(filamentPulse)));
-                    const ventRecess = mix(pRawUmber.mul(0.12), pRealgar.mul(0.95).mul(filamentPulse), float(0.48));
-                    const sockCol = mix(brassBody, ventRecess, ventSlot.mul(0.9));
-                    const ceramicDarkCol = pRawUmber.mul(0.16).add(pRealgar.mul(0.08).mul(filamentPulse));
-                    const galleryBronze = mix(pRawUmber.mul(0.22), pYellowOchre.mul(0.5), float(0.26))
-                      .mul(float(0.22).add(diffS.mul(0.52)).add(studioMetalRefl.mul(1.3)))
-                      .add(pRealgar.mul(0.16).mul(filamentPulse));
-                    const withIns = isInsulator.select(ceramicDarkCol, sockCol);
-                    const finalSockCol = isGallery.and(isInsulator.not()).select(galleryBronze, withIns);
+                    const ventRecess = mix(pRawUmber.mul(0.12), pRealgar.mul(0.85).mul(filamentPulse), float(0.4));
+                    const sockCol = mix(copperBody, ventRecess, ventSlot.mul(0.88));
+                    const ceramicDarkCol = pRawUmber.mul(0.15).add(pRealgar.mul(0.07).mul(filamentPulse));
+                    const finalSockCol = isInsulator.select(ceramicDarkCol, sockCol);
 
                     accum.addAssign(finalSockCol.mul(throughput));
                     throughput.assign(vec3(0.0, 0.0, 0.0));
@@ -1288,7 +1442,7 @@ export function createEchoMaterials(): EchoMaterials {
                   });
                 });
 
-                // Bottom Machined Satin-Brass Drop Finial (`zL in [FINIAL_TIP_Y, FINIAL_TOP_Y]`)
+                // Bottom Spun Antique-Copper Drop Finial (`zL in [FINIAL_TIP_Y, FINIAL_TOP_Y]`)
                 If(
                   hitOpaqueHardware
                     .lessThan(0.5)
@@ -1303,8 +1457,8 @@ export function createEchoMaterials(): EchoMaterials {
                     const finR = fT
                       .lessThan(0.58)
                       .select(
-                        sin(fT.div(0.58).mul(Math.PI * 0.88)).mul(0.0195).add(0.002),
-                        mix(float(0.011), float(0.034), smoothstep(float(0.58), float(1.0), fT))
+                        sin(fT.div(0.58).mul(Math.PI * 0.88)).mul(0.0198).add(0.002),
+                        mix(float(0.0105), float(0.0345), smoothstep(float(0.58), float(1.0), fT))
                       );
                     If(rS.lessThan(finR), () => {
                       const halfChordF = sqrt(max(float(0.0), finR.mul(finR).sub(rS.mul(rS))));
@@ -1314,12 +1468,16 @@ export function createEchoMaterials(): EchoMaterials {
                       const nFinW = normalize(cU.mul(nFinL.x).add(cV.mul(nFinL.y)));
                       const reflFin = evalStudioSoftboxDome(reflect(rd, nFinW));
                       const diffFin = max(float(0.0), dot(nFinL, lKeyL));
-                      const specFin = pow(max(float(0.0), dot(nFinL, normalize(lKeyL.sub(rdL)))), 48.0);
-                      const brassFin = mix(pRawUmber.mul(0.36), pYellowOchre.mul(1.08), float(0.76));
-                      const finCol = brassFin
-                        .mul(float(0.16).add(diffFin.mul(0.48)).add(reflFin.mul(1.85)))
-                        .add(pBoneCalcite.mul(specFin.mul(0.95)))
-                        .add(pRealgar.mul(fT.mul(0.24).mul(filamentPulse)));
+                      const hFin = normalize(lKeyL.sub(rdL));
+                      const anisoFin = pow(max(float(0.0), dot(nFinL, normalize(vec3(hFin.x, hFin.y, float(0.0))))), 16.0).mul(0.65);
+                      const specFin = pow(max(float(0.0), dot(nFinL, hFin)), 56.0);
+                      const neckOx = float(1.0).sub(smoothstep(float(0.002), float(0.007), abs(pSurfF.z.add(0.182))));
+                      const copperFin = mix(pBurntSienna.mul(1.12), pYellowOchre.mul(1.04), float(0.3));
+                      const finCol = copperFin
+                        .mul(float(0.14).add(diffFin.mul(0.44)).add(reflFin.mul(1.65)).add(anisoFin))
+                        .mul(float(1.0).sub(neckOx.mul(0.62)))
+                        .add(pBoneCalcite.mul(specFin.mul(0.9)))
+                        .add(pRealgar.mul(fT.mul(0.22).mul(filamentPulse)));
                       accum.addAssign(finCol.mul(throughput));
                       throughput.assign(vec3(0.0, 0.0, 0.0));
                       hitOpaqueHardware.assign(float(1.0));
@@ -1564,12 +1722,12 @@ export function createEchoMaterials(): EchoMaterials {
               const e27Col = mix(pRawUmber.mul(0.55), pYellowOchre.mul(1.22), e27Thread.mul(0.55).add(0.45))
                 .add(pRealgar.mul(0.22).mul(filamentPulse));
 
-              // Brass edge-came ribs & spider claws shading (matched metallic studio IBL contrast!)
+              // Spun-copper edge-came ribs & spider claws shading (matched BarnLamp metallic IBL contrast!)
               const nPrismW = normalize(cU.mul(nPrismL.x).add(cV.mul(nPrismL.y)).add(cW.mul(nPrismL.z)));
               const cameRefl = evalStudioSoftboxDome(reflect(rd, nPrismW));
-              const cameBrass = mix(pRawUmber.mul(0.36), pYellowOchre.mul(1.06), float(0.75));
+              const cameBrass = mix(pBurntSienna.mul(0.9), pYellowOchre.mul(1.16), float(0.44));
               const cameCol = cameBrass
-                .mul(float(0.2).add(facetDiff.mul(0.45)).add(cameRefl.mul(1.55)))
+                .mul(float(0.18).add(facetDiff.mul(0.45)).add(cameRefl.mul(1.6)))
                 .add(pBoneCalcite.mul(facetSpecKey.mul(0.85).add(facetSpecRim.mul(0.38))))
                 .add(pRealgar.mul(0.18).mul(filamentPulse));
 
@@ -1653,7 +1811,7 @@ export function createEchoMaterials(): EchoMaterials {
         .sub(smoothstep(float(0.0065), float(0.0095).add(aaW), rivetDist))
         .mul(gussetMask);
 
-      // Flush stepped ceiling rosette base plate on the +Y ceiling mirror (`r <= CEILING_ROSETTE_RADIUS`)
+      // Flush stepped spun-copper ceiling rosette base plate on the +Y ceiling mirror (`r <= CEILING_ROSETTE_RADIUS`)
       const isCeilingWall = smoothstep(float(-0.5), float(-0.85), hitN.y);
       const rCeil = length(vec3(pWall.x, float(0.0), pWall.z));
       const rosetteMask = float(1.0)
@@ -1665,9 +1823,15 @@ export function createEchoMaterials(): EchoMaterials {
           )
         )
         .mul(isCeilingWall);
-      const rosetteInnerRing = float(1.0).sub(
-        smoothstep(float(0.054).sub(aaW), float(0.054).add(aaW), rCeil)
-      );
+      // Concentric oxidized lathe grooves on the ceiling rosette base plate (matching BarnLamp wall canopy!)
+      const rosetteOxRing = max(
+        float(1.0).sub(smoothstep(float(0.002), float(0.0055).add(aaW), abs(rCeil.sub(0.058)))),
+        float(1.0).sub(smoothstep(float(0.002), float(0.0055).add(aaW), abs(rCeil.sub(0.079))))
+      ).mul(rosetteMask);
+      // Radial bow-tie anisotropic shimmer across the spun ceiling canopy disc
+      const sxC = abs(pWall.x).lessThan(1e-5).select(float(1e-5), pWall.x);
+      const phiCeil = atan(pWall.z, sxC);
+      const rosetteBowtie = pow(abs(cos(phiCeil.sub(0.78))), 3.0).mul(rosetteMask);
 
       const solidMetalMask = max(max(railMask, gussetMask), rosetteMask);
 
@@ -1687,20 +1851,23 @@ export function createEchoMaterials(): EchoMaterials {
         const atten = float(1.0).div(float(1.0).add(lDistSq.mul(1.25)));
         const nDotL = clamp(dot(hitN, lDir), 0.0, 1.0);
         const halfV = normalize(lDir.sub(rd));
-        const metalSpec = pow(max(float(0.0), dot(hitN, halfV)), 38.0);
+        const metalSpec = pow(max(float(0.0), dot(hitN, halfV)), 42.0);
 
-        const brassWeight = max(gussetMask, rosetteMask.mul(float(0.95).sub(rosetteInnerRing.mul(0.28))));
-        const darkBronzeRail = mix(pRawUmber.mul(0.24), pBoneCalcite.mul(0.065), float(0.28));
-        const satinBrassBracket = mix(pRawUmber.mul(0.46), pYellowOchre.mul(0.94), float(0.74));
-        const railMetal = mix(darkBronzeRail, satinBrassBracket, brassWeight);
+        const darkBronzeRail = mix(pRawUmber.mul(0.22), pBurntSienna.mul(0.08), float(0.28));
+        const copperBrassGusset = mix(pBurntSienna.mul(0.82), pYellowOchre.mul(1.04), float(0.58));
+        const spunCopperRos = mix(pBurntSienna.mul(0.9), pYellowOchre.mul(1.16), float(0.42))
+          .mul(float(1.0).sub(rosetteOxRing.mul(0.68)))
+          .mul(float(0.84).add(rosetteBowtie.mul(0.48)));
+        const railOrGusset = mix(darkBronzeRail, copperBrassGusset, gussetMask);
+        const railMetal = mix(railOrGusset, spunCopperRos, rosetteMask);
 
-        const gussetDetail = gussetBevelRim.mul(0.42).add(rivetMask.mul(0.28));
+        const gussetDetail = gussetBevelRim.mul(0.44).add(rivetMask.mul(0.3));
         const chamferBounce = exp(stripDist.mul(-65.0)).mul(0.075).mul(atten);
         const litFrame = railMetal
-          .mul(float(0.24).add(nDotL.mul(1.12).mul(atten)).add(gussetDetail.mul(atten)))
+          .mul(float(0.22).add(nDotL.mul(1.1).mul(atten)).add(gussetDetail.mul(atten)))
           .add(
-            mix(pYellowOchre, pBoneCalcite, float(0.32)).mul(
-              metalSpec.mul(1.18).add(gussetDetail.mul(0.35)).mul(atten)
+            mix(pYellowOchre, pBoneCalcite, float(0.3)).mul(
+              metalSpec.mul(1.14).add(gussetDetail.mul(0.35)).add(rosetteBowtie.mul(0.22)).mul(atten)
             )
           )
           .add(pRealgar.mul(float(0.032).mul(atten).add(chamferBounce)));
@@ -1768,6 +1935,7 @@ export function createEchoMaterials(): EchoMaterials {
 
   return {
     agedBronze,
+    spunCopper,
     satinBrass,
     bezelBrass,
     vernierBrass,
@@ -1794,6 +1962,7 @@ export function createEchoMaterials(): EchoMaterials {
     uGlassHover,
     dispose: () => {
       agedBronze.dispose();
+      spunCopper.dispose();
       satinBrass.dispose();
       bezelBrass.dispose();
       vernierBrass.dispose();

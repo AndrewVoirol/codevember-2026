@@ -60,6 +60,8 @@ export interface EchoMaterialsContract {
   knurledBrass: THREE.Material;
   bluedSteel: THREE.Material;
   infinityMirror: THREE.Material;
+  /** Optional spun antique anisotropic copper-bronze for turned Edison fixture & rosette (defaults to satinBrass). */
+  spunCopper?: THREE.Material;
   /** Optional specialized calibrated brass for micrometer vernier sleeves (defaults to satinBrass). */
   vernierBrass?: THREE.Material;
   /** Optional specialized stepped inner retaining bezel brass (defaults to satinBrass). */
@@ -108,12 +110,31 @@ export interface EchoCubeAssembly {
 interface MeshBuilder {
   positions: number[];
   normals: number[];
+  tangents: number[];
   uvs: number[];
   knurlValleys: number[];
+  crevices: number[];
 }
 
 function createMeshBuilder(): MeshBuilder {
-  return { positions: [], normals: [], uvs: [], knurlValleys: [] };
+  return { positions: [], normals: [], tangents: [], uvs: [], knurlValleys: [], crevices: [] };
+}
+
+/**
+ * Computes a deterministic unit tangent vector perpendicular to `n` aligned as closely as possible
+ * to `prefTangent` (so Three.js `TBNViewMatrix` & `MeshPhysicalNodeMaterial` GGX anisotropy
+ * stretches highlights strictly along `T` and places brushed micro-grooves along `B = N × T`).
+ */
+function orthoTangent(n: THREE.Vector3, prefTangent?: THREE.Vector3): THREE.Vector3 {
+  const t = new THREE.Vector3();
+  if (prefTangent && prefTangent.lengthSq() > 1e-8) {
+    t.copy(prefTangent).addScaledVector(n, -prefTangent.dot(n));
+  }
+  if (t.lengthSq() < 1e-6) {
+    const ref = Math.abs(n.y) < 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
+    t.crossVectors(ref, n);
+  }
+  return t.normalize();
 }
 
 function pushTriangle(
@@ -124,22 +145,42 @@ function pushTriangle(
   n: THREE.Vector3,
   kv0 = 1,
   kv1 = 1,
-  kv2 = 1
+  kv2 = 1,
+  prefT?: THREE.Vector3,
+  c0 = 1,
+  c1 = 1,
+  c2 = 1
 ): void {
+  const tVec = orthoTangent(n, prefT);
+  const bVec = new THREE.Vector3().crossVectors(n, tVec).normalize();
   b.positions.push(p0.x, p0.y, p0.z, p1.x, p1.y, p1.z, p2.x, p2.y, p2.z);
   b.normals.push(n.x, n.y, n.z, n.x, n.y, n.z, n.x, n.y, n.z);
-  b.uvs.push(0, 0, 1, 0, 0, 1);
+  b.tangents.push(
+    tVec.x, tVec.y, tVec.z, 1,
+    tVec.x, tVec.y, tVec.z, 1,
+    tVec.x, tVec.y, tVec.z, 1
+  );
+  // Metric planar UVs aligned cleanly to (T, B) so brush-groove textures never distort per triangle
+  b.uvs.push(
+    p0.dot(tVec), p0.dot(bVec),
+    p1.dot(tVec), p1.dot(bVec),
+    p2.dot(tVec), p2.dot(bVec)
+  );
   b.knurlValleys.push(kv0, kv1, kv2);
+  b.crevices.push(c0, c1, c2);
 }
 
 /**
  * Emits a convex polygon sorted strictly counter-clockwise around `outwardNormal`,
- * guaranteeing 100% outward-facing winding (`inwardTri === 0`) and crisp flat machined normals.
+ * guaranteeing 100% outward-facing winding (`inwardTri === 0`), crisp flat machined normals,
+ * and deterministic anisotropic brush tangents.
  */
 function pushConvexFace(
   b: MeshBuilder,
   verts: THREE.Vector3[],
-  outwardNormal: THREE.Vector3
+  outwardNormal: THREE.Vector3,
+  prefTangent?: THREE.Vector3,
+  creviceVal = 1.0
 ): void {
   if (verts.length < 3) return;
   const n = outwardNormal.clone().normalize();
@@ -159,7 +200,7 @@ function pushConvexFace(
     .sort((a, bItem) => a.ang - bItem.ang);
 
   for (let i = 1; i < sorted.length - 1; i++) {
-    pushTriangle(b, sorted[0].v, sorted[i].v, sorted[i + 1].v, n);
+    pushTriangle(b, sorted[0].v, sorted[i].v, sorted[i + 1].v, n, 1, 1, 1, prefTangent, creviceVal, creviceVal, creviceVal);
   }
 }
 
@@ -167,7 +208,9 @@ function finalizeBuilder(b: MeshBuilder, includeKnurlAttr = false): THREE.Buffer
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(b.positions, 3));
   geo.setAttribute('normal', new THREE.Float32BufferAttribute(b.normals, 3));
+  geo.setAttribute('tangent', new THREE.Float32BufferAttribute(b.tangents, 4));
   geo.setAttribute('uv', new THREE.Float32BufferAttribute(b.uvs, 2));
+  geo.setAttribute('aCrevice', new THREE.Float32BufferAttribute(b.crevices, 1));
   if (includeKnurlAttr) {
     geo.setAttribute('aKnurlValley', new THREE.Float32BufferAttribute(b.knurlValleys, 1));
   }
@@ -193,56 +236,47 @@ export function createChamferedBlockGeometry(
   const iy = hy - by;
   const iz = hz - bz;
 
+  // Align brush bitangent (B = N × T) along the block's longest axis so rail grain runs longitudinally!
+  const longAxis =
+    hx >= hy && hx >= hz
+      ? new THREE.Vector3(1, 0, 0)
+      : hy >= hx && hy >= hz
+        ? new THREE.Vector3(0, 1, 0)
+        : new THREE.Vector3(0, 0, 1);
+  const prefTFor = (n: THREE.Vector3): THREE.Vector3 => {
+    const t = new THREE.Vector3().crossVectors(longAxis, n);
+    return t.lengthSq() > 1e-6 ? t.normalize() : orthoTangent(n);
+  };
+
   const vx = (sx: number, sy: number, sz: number) => new THREE.Vector3(sx * hx, sy * iy, sz * iz);
   const vy = (sx: number, sy: number, sz: number) => new THREE.Vector3(sx * ix, sy * hy, sz * iz);
   const vz = (sx: number, sy: number, sz: number) => new THREE.Vector3(sx * ix, sy * iy, sz * hz);
 
   for (const s of [-1, 1]) {
-    pushConvexFace(
-      b,
-      [vx(s, -1, -1), vx(s, 1, -1), vx(s, 1, 1), vx(s, -1, 1)],
-      new THREE.Vector3(s, 0, 0)
-    );
-    pushConvexFace(
-      b,
-      [vy(-1, s, -1), vy(1, s, -1), vy(1, s, 1), vy(-1, s, 1)],
-      new THREE.Vector3(0, s, 0)
-    );
-    pushConvexFace(
-      b,
-      [vz(-1, -1, s), vz(1, -1, s), vz(1, 1, s), vz(-1, 1, s)],
-      new THREE.Vector3(0, 0, s)
-    );
+    const nx = new THREE.Vector3(s, 0, 0);
+    pushConvexFace(b, [vx(s, -1, -1), vx(s, 1, -1), vx(s, 1, 1), vx(s, -1, 1)], nx, prefTFor(nx), 1.0);
+    const ny = new THREE.Vector3(0, s, 0);
+    pushConvexFace(b, [vy(-1, s, -1), vy(1, s, -1), vy(1, s, 1), vy(-1, s, 1)], ny, prefTFor(ny), 1.0);
+    const nz = new THREE.Vector3(0, 0, s);
+    pushConvexFace(b, [vz(-1, -1, s), vz(1, -1, s), vz(1, 1, s), vz(-1, 1, s)], nz, prefTFor(nz), 1.0);
   }
 
   for (const s1 of [-1, 1]) {
     for (const s2 of [-1, 1]) {
-      pushConvexFace(
-        b,
-        [vx(s1, s2, -1), vx(s1, s2, 1), vy(s1, s2, 1), vy(s1, s2, -1)],
-        new THREE.Vector3(s1, s2, 0)
-      );
-      pushConvexFace(
-        b,
-        [vx(s1, -1, s2), vx(s1, 1, s2), vz(s1, 1, s2), vz(s1, -1, s2)],
-        new THREE.Vector3(s1, 0, s2)
-      );
-      pushConvexFace(
-        b,
-        [vy(-1, s1, s2), vy(1, s1, s2), vz(1, s1, s2), vz(-1, s1, s2)],
-        new THREE.Vector3(0, s1, s2)
-      );
+      const nxy = new THREE.Vector3(s1, s2, 0).normalize();
+      pushConvexFace(b, [vx(s1, s2, -1), vx(s1, s2, 1), vy(s1, s2, 1), vy(s1, s2, -1)], nxy, prefTFor(nxy), 1.0);
+      const nxz = new THREE.Vector3(s1, 0, s2).normalize();
+      pushConvexFace(b, [vx(s1, -1, s2), vx(s1, 1, s2), vz(s1, 1, s2), vz(s1, -1, s2)], nxz, prefTFor(nxz), 1.0);
+      const nyz = new THREE.Vector3(0, s1, s2).normalize();
+      pushConvexFace(b, [vy(-1, s1, s2), vy(1, s1, s2), vz(1, s1, s2), vz(-1, s1, s2)], nyz, prefTFor(nyz), 1.0);
     }
   }
 
   for (const sx of [-1, 1]) {
     for (const sy of [-1, 1]) {
       for (const sz of [-1, 1]) {
-        pushConvexFace(
-          b,
-          [vx(sx, sy, sz), vy(sx, sy, sz), vz(sx, sy, sz)],
-          new THREE.Vector3(sx, sy, sz)
-        );
+        const nc = new THREE.Vector3(sx, sy, sz).normalize();
+        pushConvexFace(b, [vx(sx, sy, sz), vy(sx, sy, sz), vz(sx, sy, sz)], nc, prefTFor(nc), 1.0);
       }
     }
   }
@@ -252,8 +286,8 @@ export function createChamferedBlockGeometry(
 
 /**
  * Builds a watertight uniformly-beveled triangular satin-brass corner gusset plate in XY
- * spanning `[0..armLen]` along +X and +Y, with back face embedded `-0.0025` into the bronze face
- * and uniform 45° beveled plateau rising cleanly proud to `+GUSSET_FRONT_PROTRUSION`.
+ * spanning `[0..armLen]` along +X and +Y, with back face embedded `-0.0025` into the bronze face,
+ * diagonal brushed anisotropic grain, darkened oxidized skirt edges, and crisp 45° perimeter bevels.
  */
 export function createCornerGussetGeometry(
   armLen: number,
@@ -288,8 +322,10 @@ export function createCornerGussetGeometry(
   const frontVerts = pts2d.map(([x, y]) => new THREE.Vector3(x, y, frontSkirtZ));
   const bevelFront = inset2d.map(([x, y]) => new THREE.Vector3(x, y, plateauZ));
 
-  pushConvexFace(b, bevelFront, new THREE.Vector3(0, 0, 1));
-  pushConvexFace(b, backVerts, new THREE.Vector3(0, 0, -1));
+  // Diagonal brush grain across the triangular corner plate (B along hypotenuse [-1, 1, 0], T along radial [1, 1, 0])
+  const gussetRadialT = new THREE.Vector3(1, 1, 0).normalize();
+  pushConvexFace(b, bevelFront, new THREE.Vector3(0, 0, 1), gussetRadialT, 0.96);
+  pushConvexFace(b, backVerts, new THREE.Vector3(0, 0, -1), gussetRadialT, 0.2);
 
   const nPts = pts2d.length;
   for (let i = 0; i < nPts; i++) {
@@ -298,10 +334,10 @@ export function createCornerGussetGeometry(
     const edgeY = pts2d[j][1] - pts2d[i][1];
     const out2d = new THREE.Vector3(edgeY, -edgeX, 0).normalize();
 
-    pushConvexFace(b, [backVerts[i], backVerts[j], frontVerts[j], frontVerts[i]], out2d);
+    pushConvexFace(b, [backVerts[i], backVerts[j], frontVerts[j], frontVerts[i]], out2d, new THREE.Vector3(0, 0, 1), 0.34);
 
     const bevelNorm = out2d.clone().add(new THREE.Vector3(0, 0, 0.85)).normalize();
-    pushConvexFace(b, [frontVerts[i], frontVerts[j], bevelFront[j], bevelFront[i]], bevelNorm);
+    pushConvexFace(b, [frontVerts[i], frontVerts[j], bevelFront[j], bevelFront[i]], bevelNorm, out2d, 0.88);
   }
 
   return finalizeBuilder(b);
@@ -413,21 +449,23 @@ export function createMiteredBezelFrameGeometry(
     const bIA = new THREE.Vector3(bar.bInA[0], bar.bInA[1], zBack);
     const bIB = new THREE.Vector3(bar.bInB[0], bar.bInB[1], zBack);
 
+    // Align brushed grain bitangent B along the length of each mitered bezel bar (`T` = across bar width!)
+    const acrossT = new THREE.Vector3(bar.outDir[0], bar.outDir[1], 0);
     // Front flat satin-brass retaining face (+Z)
-    pushConvexFace(b, [fOA, fOB, fIB, fIA], new THREE.Vector3(0, 0, 1));
+    pushConvexFace(b, [fOA, fOB, fIB, fIA], new THREE.Vector3(0, 0, 1), acrossT, 0.96);
     // Back face (-Z)
-    pushConvexFace(b, [bOA, bOB, bIB, bIA], new THREE.Vector3(0, 0, -1));
+    pushConvexFace(b, [bOA, bOB, bIB, bIA], new THREE.Vector3(0, 0, -1), acrossT, 0.25);
     // Outer perimeter wall (embedded inside bronze rails)
-    pushConvexFace(b, [bOA, bOB, fOB, fOA], new THREE.Vector3(bar.outDir[0], bar.outDir[1], 0));
+    pushConvexFace(b, [bOA, bOB, fOB, fOA], new THREE.Vector3(bar.outDir[0], bar.outDir[1], 0), new THREE.Vector3(0, 0, 1), 0.3);
     // Crisp 45-deg optical lip chamfer
     const slopeNorm = new THREE.Vector3(
       bar.inDir[0] * (zFront - zChamferBot),
       bar.inDir[1] * (zFront - zChamferBot),
       innerStep
     ).normalize();
-    pushConvexFace(b, [fIA, fIB, mIB, mIA], slopeNorm);
-    // Short vertical inner rabbet wall seating directly against the glass perimeter
-    pushConvexFace(b, [mIA, mIB, bIB, bIA], new THREE.Vector3(bar.inDir[0], bar.inDir[1], 0));
+    pushConvexFace(b, [fIA, fIB, mIB, mIA], slopeNorm, acrossT, 0.92);
+    // Short vertical inner rabbet wall seating directly against the glass perimeter (dark oxidized depth)
+    pushConvexFace(b, [mIA, mIB, bIB, bIA], new THREE.Vector3(bar.inDir[0], bar.inDir[1], 0), new THREE.Vector3(0, 0, 1), 0.32);
   }
 
   return finalizeBuilder(b);
@@ -815,13 +853,176 @@ export function createSlottedLockCapGeometry(radius = 0.036): THREE.BufferGeomet
 }
 
 /**
- * Helper to create a watertight outward-wound LatheGeometry along +Y from bottom-to-top profile.
+ * Precision crease-aware outward-wound lathe builder along +Y from a bottom-to-top profile
+ * `[radius, y, optionalCrevice?]`.
+ *
+ * Guarantees:
+ * - Strictly outward triangle winding (`signedVol > 0`, `flippedNormTris === 0` across every cap & step!)
+ * - Automatic crisp hard-edge splitting across machined steps (`angle > creaseAngleDeg`) while keeping
+ *   domes, cones, and ST64 glass curves silky smooth
+ * - Exact analytic meridional `tangent` (`vec4`) at every vertex so `B = N × T` runs purely
+ *   circumferentially around the lathe axis -> authentic `AnisotropyBarnLamp` radial/bow-tie GGX & IBL sheen!
+ * - Arc-length V UVs + per-vertex `aCrevice` (`0` = recessed step oxidation groove, `1` = exposed spun copper)
  */
-function createOutwardLathe(profile: Array<[number, number]>, segments = 32): THREE.BufferGeometry {
-  const pts = profile.map(([r, y]) => new THREE.Vector2(r, y));
-  const geo = new THREE.LatheGeometry(pts, segments);
-  geo.computeVertexNormals();
-  return geo;
+function createOutwardLathe(
+  profile: Array<[number, number, number?]>,
+  segments = 32,
+  creaseAngleDeg = 38
+): THREE.BufferGeometry {
+  const b = createMeshBuilder();
+  const nProf = profile.length;
+  if (nProf < 2) return finalizeBuilder(b);
+
+  const cosCrease = Math.cos((creaseAngleDeg * Math.PI) / 180);
+  const dPhi = (Math.PI * 2) / segments;
+
+  // Compute cumulative arc length along the profile for uniform lathe-groove V coordinates
+  const arcV: number[] = [0];
+  let totalArc = 0;
+  for (let i = 1; i < nProf; i++) {
+    const dr = profile[i][0] - profile[i - 1][0];
+    const dy = profile[i][1] - profile[i - 1][1];
+    totalArc += Math.hypot(dr, dy);
+    arcV.push(totalArc);
+  }
+  const invArc = totalArc > 1e-6 ? 1 / totalArc : 1;
+
+  // Compute 2D profile segment outward normals (nr, ny) and meridional tangents (tr, ty)
+  // For bottom-to-top exterior profile (dy >= 0): outward normal is (+dy, -dr) / len.
+  const segCount = nProf - 1;
+  const segN: Array<[number, number]> = [];
+  const segT: Array<[number, number]> = [];
+  const segValid: boolean[] = [];
+  for (let i = 0; i < segCount; i++) {
+    const dr = profile[i + 1][0] - profile[i][0];
+    const dy = profile[i + 1][1] - profile[i][1];
+    const len = Math.hypot(dr, dy);
+    if (len < 1e-7) {
+      segN.push([1, 0]);
+      segT.push([0, 1]);
+      segValid.push(false);
+    } else {
+      segN.push([dy / len, -dr / len]);
+      segT.push([dr / len, dy / len]);
+      segValid.push(true);
+    }
+  }
+
+  // Auto-detect concave step recesses for authentic BarnLamp oxidized crevice pooling when not explicitly supplied
+  const profCrevice: number[] = [];
+  for (let i = 0; i < nProf; i++) {
+    if (profile[i][2] !== undefined) {
+      profCrevice.push(profile[i][2]!);
+    } else if (i === 0 || i === nProf - 1) {
+      profCrevice.push(0.85);
+    } else {
+      const nPrev = segN[i - 1];
+      const nNext = segN[i];
+      // Concave step corner: cross2D(nPrev, nNext) < 0 (normal bends inward -> recessed step groove!)
+      const cross2 = nPrev[0] * nNext[1] - nPrev[1] * nNext[0];
+      const dot2 = nPrev[0] * nNext[0] + nPrev[1] * nNext[1];
+      if (cross2 < -0.18 && dot2 < 0.85) {
+        profCrevice.push(0.18);
+      } else if (cross2 > 0.25 && dot2 < 0.8) {
+        // Convex machined chamfer lip -> slightly burnished & clean
+        profCrevice.push(1.0);
+      } else {
+        profCrevice.push(0.92);
+      }
+    }
+  }
+
+  const pushLatheVert = (
+    r: number,
+    y: number,
+    phi: number,
+    nr: number,
+    ny: number,
+    tr: number,
+    ty: number,
+    u: number,
+    v: number,
+    crev: number
+  ) => {
+    const cs = Math.cos(phi);
+    const sn = Math.sin(phi);
+    // Right-handed cylindrical frame matching rest of geometry.ts: x = r cos(phi), z = -r sin(phi)
+    b.positions.push(r * cs, y, -r * sn);
+    const nLen = Math.hypot(nr, ny) || 1;
+    const nx = (nr / nLen) * cs;
+    const nyOut = ny / nLen;
+    const nz = -(nr / nLen) * sn;
+    b.normals.push(nx, nyOut, nz);
+
+    // Exact meridional unit tangent T perpendicular to N so B = N × T = (sin(phi), 0, cos(phi)) (circumferential!)
+    const tLen = Math.hypot(tr, ty) || 1;
+    const tx = (tr / tLen) * cs;
+    const tyOut = ty / tLen;
+    const tz = -(tr / tLen) * sn;
+    b.tangents.push(tx, tyOut, tz, 1);
+
+    b.uvs.push(u, v);
+    b.knurlValleys.push(1);
+    b.crevices.push(crev);
+  };
+
+  for (let i = 0; i < segCount; i++) {
+    if (!segValid[i]) continue;
+    const [r0, y0] = profile[i];
+    const [r1, y1] = profile[i + 1];
+    const v0 = arcV[i] * invArc;
+    const v1 = arcV[i + 1] * invArc;
+    const c0 = profCrevice[i];
+    const c1 = profCrevice[i + 1];
+
+    // Smooth normal at start of segment i (blend with segment i-1 only if within crease angle)
+    let n0r = segN[i][0];
+    let n0y = segN[i][1];
+    let t0r = segT[i][0];
+    let t0y = segT[i][1];
+    if (i > 0 && segValid[i - 1]) {
+      const dotPrev = segN[i - 1][0] * segN[i][0] + segN[i - 1][1] * segN[i][1];
+      if (dotPrev >= cosCrease) {
+        n0r = segN[i - 1][0] + segN[i][0];
+        n0y = segN[i - 1][1] + segN[i][1];
+        t0r = -n0y;
+        t0y = n0r;
+      }
+    }
+
+    // Smooth normal at end of segment i (blend with segment i+1 only if within crease angle)
+    let n1r = segN[i][0];
+    let n1y = segN[i][1];
+    let t1r = segT[i][0];
+    let t1y = segT[i][1];
+    if (i < segCount - 1 && segValid[i + 1]) {
+      const dotNext = segN[i][0] * segN[i + 1][0] + segN[i][1] * segN[i + 1][1];
+      if (dotNext >= cosCrease) {
+        n1r = segN[i][0] + segN[i + 1][0];
+        n1y = segN[i][1] + segN[i + 1][1];
+        t1r = -n1y;
+        t1y = n1r;
+      }
+    }
+
+    for (let j = 0; j < segments; j++) {
+      const phi0 = j * dPhi;
+      const phi1 = (j + 1) * dPhi;
+      const u0 = j / segments;
+      const u1 = (j + 1) / segments;
+
+      // Outward CCW winding: (phi0, i) -> (phi1, i) -> (phi1, i+1) and (phi0, i) -> (phi1, i+1) -> (phi0, i+1)
+      pushLatheVert(r0, y0, phi0, n0r, n0y, t0r, t0y, u0, v0, c0);
+      pushLatheVert(r0, y0, phi1, n0r, n0y, t0r, t0y, u1, v0, c0);
+      pushLatheVert(r1, y1, phi1, n1r, n1y, t1r, t1y, u1, v1, c1);
+
+      pushLatheVert(r0, y0, phi0, n0r, n0y, t0r, t0y, u0, v0, c0);
+      pushLatheVert(r1, y1, phi1, n1r, n1y, t1r, t1y, u1, v1, c1);
+      pushLatheVert(r1, y1, phi0, n1r, n1y, t1r, t1y, u0, v1, c1);
+    }
+  }
+
+  return finalizeBuilder(b);
 }
 
 /**
@@ -933,10 +1134,17 @@ function appendCappedTube(
     e1 = 1,
     e2 = 1
   ) => {
+    // Metric UVs along the tube: u = circumferential, v = arc-length; use T = circumferential, B = axial
+    // so drawn metal rods (`PrismCageAndSpiderClaws`) brush cleanly along their length instead of ringing!
     b.positions.push(p0.x, p0.y, p0.z, p1.x, p1.y, p1.z, p2.x, p2.y, p2.z);
     b.normals.push(vn0.x, vn0.y, vn0.z, vn1.x, vn1.y, vn1.z, vn2.x, vn2.y, vn2.z);
-    b.uvs.push(u0, v0, u1, v1, u2, v2);
+    const t0 = orthoTangent(vn0);
+    const t1 = orthoTangent(vn1);
+    const t2 = orthoTangent(vn2);
+    b.tangents.push(t0.x, t0.y, t0.z, 1, t1.x, t1.y, t1.z, 1, t2.x, t2.y, t2.z, 1);
+    b.uvs.push(v0 * 0.14, u0 * 0.04, v1 * 0.14, u1 * 0.04, v2 * 0.14, u2 * 0.04);
     b.knurlValleys.push(1, 1, 1);
+    b.crevices.push(0.95, 0.95, 0.95);
     if (extraAttr) extraAttr.values.push(e0, e1, e2);
   };
 
@@ -1042,148 +1250,185 @@ function appendCappedTube(
 }
 
 /**
- * Builds the articulated braided dark-umber & ochre textile pendant cord in its exact rest pose
- * (`y in [CORE_REST_Y + CORD_SOCKET_ATTACH_Y, CORE_ANCHOR_Y]`) with physical twin-ply helical
- * surface relief and vertex attributes (`aCordS`, `aCordRadial`) for zero-GC GPU cubic Hermite swing!
+ * Builds the authentic early turn-of-the-century (c. 1900) tight twin-conductor twisted
+ * cloth-braided Edison pendant cord (`y in [CORE_REST_Y + CORD_SOCKET_ATTACH_Y, CORE_ANCHOR_Y]`):
+ * - Two tightly interwoven helical cloth-covered conductors (`10.5` tight full turns,
+ *   `140` axial steps = >6.6x above Nyquist -> zero aliasing or flat-facet lumps!)
+ * - Strictly outward-wound smooth analytical vertex normals & strand-aligned weave tangents
+ *   stored in `aCordRestNormal` & `aCordRestTangent` so the GPU cubic Hermite swing transforms
+ *   BOTH positions AND surface normals seamlessly as the wire leans!
  */
 export function createBraidedCordGeometry(
-  radialSegs = 20,
-  axialSegs = 34
+  radialSegs = 14,
+  axialSegs = 140
 ): THREE.BufferGeometry {
   const b = createMeshBuilder();
   const yTop = CORE_ANCHOR_Y;
   const yBot = CORE_REST_Y + CORD_SOCKET_ATTACH_Y;
-  const dPhi = (Math.PI * 2) / radialSegs;
-  const twists = 16;
+  const cordLen = Math.abs(yTop - yBot);
+  const dAlpha = (Math.PI * 2) / radialSegs;
+  const turns = 12.5;
+  const rStrandBase = CORD_RADIUS * 0.565;
+  const rHelixBase = CORD_RADIUS - rStrandBase; // outer radius === CORD_RADIUS, solid core overlap -> zero gaps!
 
   const cordS: number[] = [];
   const cordRadial: number[] = [];
+  const cordRestNormal: number[] = [];
+  const cordRestTangent: number[] = [];
 
-  const rings: Array<Array<{ pos: THREE.Vector3; radVec: THREE.Vector3; s: number; phi: number }>> = [];
-  for (let i = 0; i <= axialSegs; i++) {
-    const s = i / axialSegs; // 0 = top inside ceiling grommet, 1 = bottom inside socket cord-grip nut
-    const y = yTop + (yBot - yTop) * s;
-    // Taper braided relief smoothly near ends so cord seats tightly inside both compression collets
-    const endSmooth = Math.min(1, s * 12) * Math.min(1, (1 - s) * 12);
-    const ring: Array<{ pos: THREE.Vector3; radVec: THREE.Vector3; s: number; phi: number }> = [];
-    for (let j = 0; j < radialSegs; j++) {
-      const phi = j * dPhi;
-      const braidWave =
-        0.085 * Math.cos(2 * phi + Math.PI * 2 * twists * s) +
-        0.045 * Math.cos(4 * phi - Math.PI * 2 * twists * s);
-      const r = CORD_RADIUS * (1 + braidWave * endSmooth);
-      const rx = Math.cos(phi) * r;
-      const rz = -Math.sin(phi) * r;
-      ring.push({
-        pos: new THREE.Vector3(rx, y, rz),
-        radVec: new THREE.Vector3(rx, 0, rz),
-        s,
-        phi,
-      });
-    }
-    rings.push(ring);
+  interface StrandVert {
+    pos: THREE.Vector3;
+    radOff: THREE.Vector3;
+    norm: THREE.Vector3;
+    tan: THREE.Vector3;
+    s: number;
+    u: number;
   }
 
-  const ab = new THREE.Vector3();
-  const ac = new THREE.Vector3();
-  const faceN = new THREE.Vector3();
-
-  const emitTri = (
-    p0: THREE.Vector3,
-    p1: THREE.Vector3,
-    p2: THREE.Vector3,
-    n: THREE.Vector3,
-    s0: number,
-    s1: number,
-    s2: number,
-    r0: THREE.Vector3,
-    r1: THREE.Vector3,
-    r2: THREE.Vector3,
-    u0: number,
-    u1: number,
-    u2: number
-  ) => {
-    b.positions.push(p0.x, p0.y, p0.z, p1.x, p1.y, p1.z, p2.x, p2.y, p2.z);
-    b.normals.push(n.x, n.y, n.z, n.x, n.y, n.z, n.x, n.y, n.z);
-    b.uvs.push(u0, s0, u1, s1, u2, s2);
-    cordS.push(s0, s1, s2);
-    cordRadial.push(r0.x, r0.y, r0.z, r1.x, r1.y, r1.z, r2.x, r2.y, r2.z);
+  const emitTri = (v0: StrandVert, v1: StrandVert, v2: StrandVert) => {
+    b.positions.push(v0.pos.x, v0.pos.y, v0.pos.z, v1.pos.x, v1.pos.y, v1.pos.z, v2.pos.x, v2.pos.y, v2.pos.z);
+    b.normals.push(v0.norm.x, v0.norm.y, v0.norm.z, v1.norm.x, v1.norm.y, v1.norm.z, v2.norm.x, v2.norm.y, v2.norm.z);
+    b.tangents.push(v0.tan.x, v0.tan.y, v0.tan.z, 1, v1.tan.x, v1.tan.y, v1.tan.z, 1, v2.tan.x, v2.tan.y, v2.tan.z, 1);
+    b.uvs.push(v0.u, v0.s, v1.u, v1.s, v2.u, v2.s);
+    b.knurlValleys.push(1, 1, 1);
+    b.crevices.push(1, 1, 1);
+    cordS.push(v0.s, v1.s, v2.s);
+    cordRadial.push(
+      v0.radOff.x, v0.radOff.y, v0.radOff.z,
+      v1.radOff.x, v1.radOff.y, v1.radOff.z,
+      v2.radOff.x, v2.radOff.y, v2.radOff.z
+    );
+    cordRestNormal.push(
+      v0.norm.x, v0.norm.y, v0.norm.z,
+      v1.norm.x, v1.norm.y, v1.norm.z,
+      v2.norm.x, v2.norm.y, v2.norm.z
+    );
+    cordRestTangent.push(
+      v0.tan.x, v0.tan.y, v0.tan.z,
+      v1.tan.x, v1.tan.y, v1.tan.z,
+      v2.tan.x, v2.tan.y, v2.tan.z
+    );
   };
 
-  // Rings descend from yTop (i = 0) down to yBot (i = axialSegs), with phi increasing CCW looking from +Y
-  // So outward CCW quad winding is (row[i+1][j], row[i+1][jNext], row[i][jNext], row[i][j])
-  for (let i = 0; i < axialSegs; i++) {
-    const rowTop = rings[i];
-    const rowBot = rings[i + 1];
+  for (let strand = 0; strand < 2; strand++) {
+    const phase0 = strand * Math.PI;
+    const rings: StrandVert[][] = [];
+    const centers: THREE.Vector3[] = [];
+    const upVecs: THREE.Vector3[] = [];
+
+    for (let i = 0; i <= axialSegs; i++) {
+      const s = i / axialSegs; // 0 = top inside ceiling grommet, 1 = bottom inside socket cord-grip nut
+      const y = yTop + (yBot - yTop) * s;
+      // Smoothly cinch both conductors cleanly into the round porcelain grommet & brass compression collet
+      const endEaseTop = Math.min(1, s / 0.045);
+      const endEaseBot = Math.min(1, (1 - s) / 0.045);
+      const endSmooth = endEaseTop * endEaseTop * (3 - 2 * endEaseTop) * (endEaseBot * endEaseBot * (3 - 2 * endEaseBot));
+      const rH = rHelixBase * (0.28 + 0.72 * endSmooth);
+      const theta = phase0 + Math.PI * 2 * turns * s;
+      const dThetaDs = Math.PI * 2 * turns;
+
+      const csT = Math.cos(theta);
+      const snT = Math.sin(theta);
+      const cx = rH * csT;
+      const cz = -rH * snT;
+      const cPos = new THREE.Vector3(cx, y, cz);
+      centers.push(cPos);
+
+      // Exact upward unit tangent U_c = -normalize(dC/ds), straightening smoothly to vertical at both collet seats
+      const dCdx = -rH * snT * dThetaDs * endSmooth;
+      const dCdy = -cordLen;
+      const dCdz = -rH * csT * dThetaDs * endSmooth;
+      const uVec = new THREE.Vector3(-dCdx, -dCdy, -dCdz).normalize();
+      upVecs.push(uVec);
+
+      // Twist-locked cross-section basis (N0, B0, U_c) with N0 × B0 = U_c
+      const radAxis = new THREE.Vector3(csT, 0, -snT);
+      const n0 = radAxis.clone().addScaledVector(uVec, -radAxis.dot(uVec)).normalize();
+      const b0 = new THREE.Vector3().crossVectors(uVec, n0).normalize();
+
+      const ring: StrandVert[] = [];
+      for (let j = 0; j < radialSegs; j++) {
+        const alpha = j * dAlpha;
+        const ca = Math.cos(alpha);
+        const sa = Math.sin(alpha);
+        // Subtle woven micro-ovality only where conductors don't pinch
+        const dOut = new THREE.Vector3(
+          ca * n0.x + sa * b0.x,
+          ca * n0.y + sa * b0.y,
+          ca * n0.z + sa * b0.z
+        ).normalize();
+        const pos = cPos.clone().addScaledVector(dOut, rStrandBase);
+        // Store exact 3D offset from centerline `(0, y, 0)` so helical tilt rotates identically with `(eX, upAx, eZ)`!
+        const radOff = new THREE.Vector3(pos.x, pos.y - y, pos.z);
+        ring.push({
+          pos,
+          radOff,
+          norm: dOut,
+          tan: uVec.clone(),
+          s,
+          u: j / radialSegs,
+        });
+      }
+      rings.push(ring);
+    }
+
+    // Side tube strips: outward CCW quad = (bot[j], bot[jNext], top[jNext], top[j]) since (+alpha) × (+U_c) = +dOut!
+    for (let i = 0; i < axialSegs; i++) {
+      const rowTop = rings[i];
+      const rowBot = rings[i + 1];
+      for (let j = 0; j < radialSegs; j++) {
+        const jNext = (j + 1) % radialSegs;
+        const p00 = rowBot[j];
+        const p10 = jNext === 0 ? { ...rowBot[0], u: 1.0 } : rowBot[jNext];
+        const p11 = jNext === 0 ? { ...rowTop[0], u: 1.0 } : rowTop[jNext];
+        const p01 = rowTop[j];
+        emitTri(p00, p10, p11);
+        emitTri(p00, p11, p01);
+      }
+    }
+
+    // Top cap (outward normal = +upVecs[0])
+    const topN = upVecs[0];
+    const topC = centers[0];
+    const topCenterVert: StrandVert = {
+      pos: topC,
+      radOff: new THREE.Vector3(topC.x, topC.y - yTop, topC.z),
+      norm: topN,
+      tan: orthoTangent(topN),
+      s: 0,
+      u: 0.5,
+    };
     for (let j = 0; j < radialSegs; j++) {
       const jNext = (j + 1) % radialSegs;
-      const p00 = rowBot[j];
-      const p10 = rowBot[jNext];
-      const p11 = rowTop[jNext];
-      const p01 = rowTop[j];
-      const u0 = j / radialSegs;
-      const u1 = (j + 1) / radialSegs;
-
-      ab.subVectors(p10.pos, p00.pos);
-      ac.subVectors(p11.pos, p00.pos);
-      faceN.crossVectors(ab, ac).normalize();
-      emitTri(p00.pos, p10.pos, p11.pos, faceN, p00.s, p10.s, p11.s, p00.radVec, p10.radVec, p11.radVec, u0, u1, u1);
-
-      ab.subVectors(p11.pos, p00.pos);
-      ac.subVectors(p01.pos, p00.pos);
-      faceN.crossVectors(ab, ac).normalize();
-      emitTri(p00.pos, p11.pos, p01.pos, faceN, p00.s, p11.s, p01.s, p00.radVec, p11.radVec, p01.radVec, u0, u1, u0);
+      const vA: StrandVert = { ...rings[0][j], norm: topN };
+      const vB: StrandVert = { ...rings[0][jNext], norm: topN };
+      emitTri(topCenterVert, vA, vB);
     }
-  }
 
-  // Top cap (+Y outward at s = 0)
-  const zeroRad = new THREE.Vector3(0, 0, 0);
-  const topCenter = new THREE.Vector3(0, yTop, 0);
-  const upN = new THREE.Vector3(0, 1, 0);
-  for (let j = 0; j < radialSegs; j++) {
-    const jNext = (j + 1) % radialSegs;
-    emitTri(
-      topCenter,
-      rings[0][j].pos,
-      rings[0][jNext].pos,
-      upN,
-      0,
-      0,
-      0,
-      zeroRad,
-      rings[0][j].radVec,
-      rings[0][jNext].radVec,
-      0.5,
-      j / radialSegs,
-      (j + 1) / radialSegs
-    );
-  }
-
-  // Bottom cap (-Y outward at s = 1)
-  const botCenter = new THREE.Vector3(0, yBot, 0);
-  const downN = new THREE.Vector3(0, -1, 0);
-  for (let j = 0; j < radialSegs; j++) {
-    const jNext = (j + 1) % radialSegs;
-    emitTri(
-      botCenter,
-      rings[axialSegs][jNext].pos,
-      rings[axialSegs][j].pos,
-      downN,
-      1,
-      1,
-      1,
-      zeroRad,
-      rings[axialSegs][jNext].radVec,
-      rings[axialSegs][j].radVec,
-      0.5,
-      (j + 1) / radialSegs,
-      j / radialSegs
-    );
+    // Bottom cap (outward normal = -upVecs[axialSegs])
+    const botN = upVecs[axialSegs].clone().negate();
+    const botC = centers[axialSegs];
+    const botCenterVert: StrandVert = {
+      pos: botC,
+      radOff: new THREE.Vector3(botC.x, botC.y - yBot, botC.z),
+      norm: botN,
+      tan: orthoTangent(botN),
+      s: 1,
+      u: 0.5,
+    };
+    for (let j = 0; j < radialSegs; j++) {
+      const jNext = (j + 1) % radialSegs;
+      const vA: StrandVert = { ...rings[axialSegs][jNext], norm: botN };
+      const vB: StrandVert = { ...rings[axialSegs][j], norm: botN };
+      emitTri(botCenterVert, vA, vB);
+    }
   }
 
   const geo = finalizeBuilder(b);
   geo.setAttribute('aCordS', new THREE.Float32BufferAttribute(cordS, 1));
   geo.setAttribute('aCordRadial', new THREE.Float32BufferAttribute(cordRadial, 3));
+  geo.setAttribute('aCordRestNormal', new THREE.Float32BufferAttribute(cordRestNormal, 3));
+  geo.setAttribute('aCordRestTangent', new THREE.Float32BufferAttribute(cordRestTangent, 3));
   return geo;
 }
 
@@ -1289,17 +1534,17 @@ export function createPrismCageAndClawsGeometry(): THREE.BufferGeometry {
     addRib(eqPts[i], eqPts[j]);
     addRib(eqPts[i], botPts[i]);
 
-    // Cast curved brass spider gallery claw sweeping from the socket gallery skirt (`y = 0.178, r = 0.043`)
+    // Cast curved spun-copper spider gallery claw sweeping from the flared gallery collar rim (`y = 0.168, r = 0.052`)
     // cleanly onto the EXACT mathematical upper prism ridge (`y = 0.098, r = rEq * (1 - 0.098 / PRISM_APEX_Y)`)!
     const radDir = eqPts[i].clone().normalize();
     const clawTipY = 0.098;
     const clawTipR = rEq * (1 - clawTipY / PRISM_APEX_Y); // exact ridge center radius (0.0653)
-    const clawMidY = 0.128;
-    const clawMidR = rEq * (1 - clawMidY / PRISM_APEX_Y) + 0.0055;
+    const clawMidY = 0.126;
+    const clawMidR = rEq * (1 - clawMidY / PRISM_APEX_Y) + 0.006;
     const clawCurve = new THREE.CatmullRomCurve3([
-      new THREE.Vector3(radDir.x * 0.042, 0.178, radDir.z * 0.042),
-      new THREE.Vector3(radDir.x * 0.052, 0.168, radDir.z * 0.052),
-      new THREE.Vector3(radDir.x * 0.046, 0.148, radDir.z * 0.046),
+      new THREE.Vector3(radDir.x * 0.051, 0.171, radDir.z * 0.051),
+      new THREE.Vector3(radDir.x * 0.058, 0.162, radDir.z * 0.058),
+      new THREE.Vector3(radDir.x * 0.053, 0.145, radDir.z * 0.053),
       new THREE.Vector3(radDir.x * clawMidR, clawMidY, radDir.z * clawMidR),
       new THREE.Vector3(radDir.x * clawTipR, clawTipY, radDir.z * clawTipR),
     ]);
@@ -1326,16 +1571,17 @@ export function createPrismCageAndClawsGeometry(): THREE.BufferGeometry {
 }
 
 /**
- * Builds the 12 real 3D chamfered brass heat-ventilation louver struts around the Edison socket upper bell.
+ * Builds the 12 sleek chamfered spun-copper heat-ventilation louver struts tucked cleanly around
+ * the lower Edison socket shoulder (`[SOCKET_VENT_BOT_Y, SOCKET_VENT_BOT_Y + 0.014]`) above the flared gallery.
  */
 export function createSocketVentStrutsGeometry(): THREE.BufferGeometry {
   const b = createMeshBuilder();
   const count = 12;
-  const rInner = 0.0445;
-  const rOuter = 0.0502;
-  const y0 = SOCKET_VENT_BOT_Y;
-  const y1 = SOCKET_CAP_BOT_Y + 0.003;
-  const halfAng = (Math.PI * 2) / (count * 4.4); // Leaves crisp ~55% open radial cooling slots!
+  const rInner = 0.0448;
+  const rOuter = 0.0504;
+  const y0 = SOCKET_VENT_BOT_Y - 0.002;
+  const y1 = SOCKET_VENT_BOT_Y + 0.014;
+  const halfAng = (Math.PI * 2) / (count * 3.9);
 
   for (let i = 0; i < count; i++) {
     const phi = (i * Math.PI * 2) / count;
@@ -1358,12 +1604,12 @@ export function createSocketVentStrutsGeometry(): THREE.BufferGeometry {
     const outA1 = new THREE.Vector3(cA * rOuter, y1, sA * rOuter);
     const outB1 = new THREE.Vector3(cB * rOuter, y1, sB * rOuter);
 
-    pushConvexFace(b, [outA0, outB0, outB1, outA1], new THREE.Vector3(cM, 0, sM));
-    pushConvexFace(b, [inA0, inB0, inB1, inA1], new THREE.Vector3(-cM, 0, -sM));
-    pushConvexFace(b, [inA0, outA0, outA1, inA1], new THREE.Vector3(sA, 0, -cA));
-    pushConvexFace(b, [inB0, outB0, outB1, inB1], new THREE.Vector3(-sB, 0, cB));
-    pushConvexFace(b, [inA1, inB1, outB1, outA1], new THREE.Vector3(0, 1, 0));
-    pushConvexFace(b, [inA0, inB0, outB0, outA0], new THREE.Vector3(0, -1, 0));
+    pushConvexFace(b, [outA0, outB0, outB1, outA1], new THREE.Vector3(cM, 0, sM), new THREE.Vector3(0, 1, 0), 0.94);
+    pushConvexFace(b, [inA0, inB0, inB1, inA1], new THREE.Vector3(-cM, 0, -sM), new THREE.Vector3(0, 1, 0), 0.25);
+    pushConvexFace(b, [inA0, outA0, outA1, inA1], new THREE.Vector3(sA, 0, -cA), new THREE.Vector3(0, 1, 0), 0.35);
+    pushConvexFace(b, [inB0, outB0, outB1, inB1], new THREE.Vector3(-sB, 0, cB), new THREE.Vector3(0, 1, 0), 0.35);
+    pushConvexFace(b, [inA1, inB1, outB1, outA1], new THREE.Vector3(0, 1, 0), new THREE.Vector3(cM, 0, sM), 0.8);
+    pushConvexFace(b, [inA0, inB0, outB0, outA0], new THREE.Vector3(0, -1, 0), new THREE.Vector3(cM, 0, sM), 0.8);
   }
 
   return finalizeBuilder(b);
@@ -1442,91 +1688,52 @@ export function createSquirrelCageFilamentGeometry(): THREE.BufferGeometry {
   const heatValues: number[] = [];
   const dPhi = (Math.PI * 2) / FILAMENT_LOOPS;
 
-  const evalPoint = (loopIdx: number, localU: number): { pos: THREE.Vector3; heat: number } => {
-    // Each loop consists of:
-    //   [0.0 .. 0.44]: ascending strand from lower hook (k - 0.5) to upper hook (k)
-    //   [0.44 .. 0.56]: tight rounded hairpin arch over upper molybdenum hook (k)
-    //   [0.56 .. 0.94]: descending strand from upper hook (k) to lower hook (k + 0.5)
-    //   [0.94 .. 1.00]: tight rounded hairpin trough around lower molybdenum hook (k + 0.5)
-    const phiTop = loopIdx * dPhi;
-    const phiBotPrev = (loopIdx - 0.5) * dPhi;
-    const phiBotNext = (loopIdx + 0.5) * dPhi;
-
-    const topPt = new THREE.Vector3(
-      Math.cos(phiTop) * FILAMENT_TOP_R,
-      FILAMENT_TOP_Y,
-      -Math.sin(phiTop) * FILAMENT_TOP_R
-    );
-    const botPrev = new THREE.Vector3(
-      Math.cos(phiBotPrev) * FILAMENT_BOT_R,
-      FILAMENT_BOT_Y,
-      -Math.sin(phiBotPrev) * FILAMENT_BOT_R
-    );
-    const botNext = new THREE.Vector3(
-      Math.cos(phiBotNext) * FILAMENT_BOT_R,
-      FILAMENT_BOT_Y,
-      -Math.sin(phiBotNext) * FILAMENT_BOT_R
-    );
-
-    const p = new THREE.Vector3();
-    let heat = 1.0;
-
-    if (localU < 0.5) {
-      // Bottom-prev -> Top
-      const t = localU / 0.5; // 0..1
-      // Subtle graceful vintage hairpin S-curve + slight outward bow in the middle
-      const smoothT = t;
-      const phi = phiBotPrev + (phiTop - phiBotPrev) * smoothT;
-      const bow = Math.sin(t * Math.PI) * 0.0032;
-      const r = FILAMENT_BOT_R + (FILAMENT_TOP_R - FILAMENT_BOT_R) * t + bow;
-      // Smooth rounded arch right at top/bottom turns via cosine ease near endpoints
-      const y = FILAMENT_BOT_Y + (FILAMENT_TOP_Y - FILAMENT_BOT_Y) * (0.5 - 0.5 * Math.cos(t * Math.PI));
-      p.set(Math.cos(phi) * r, y, -Math.sin(phi) * r);
-      // Thermal conduction cooling right at both molybdenum hooks (`t -> 0` or `t -> 1`)
-      const endProx = Math.sin(t * Math.PI);
-      heat = 0.16 + 0.84 * Math.pow(Math.max(0, endProx), 0.42);
-    } else {
-      // Top -> Bottom-next
-      const t = (localU - 0.5) / 0.5; // 0..1
-      const phi = phiTop + (phiBotNext - phiTop) * t;
-      const bow = Math.sin(t * Math.PI) * 0.0032;
-      const r = FILAMENT_TOP_R + (FILAMENT_BOT_R - FILAMENT_TOP_R) * t + bow;
-      const y = FILAMENT_TOP_Y + (FILAMENT_BOT_Y - FILAMENT_TOP_Y) * (0.5 - 0.5 * Math.cos(t * Math.PI));
-      p.set(Math.cos(phi) * r, y, -Math.sin(phi) * r);
-      const endProx = Math.sin(t * Math.PI);
-      heat = 0.16 + 0.84 * Math.pow(Math.max(0, endProx), 0.42);
-    }
-
-    // Subtle organic handmade tungsten filament micro-character (zero mechanical stiffness)
-    const charAngle = loopIdx * 1.37 + localU * Math.PI * 2;
-    p.x += Math.sin(charAngle * 3.0) * 0.00055;
-    p.z += Math.cos(charAngle * 3.0) * 0.00055;
-
-    // Anchor hooks contact sanity (blend toward exact hook coords at turn extrema)
-    void topPt;
-    void botPrev;
-    void botNext;
-    return { pos: p, heat };
-  };
-
-  // Emit each of the 6 complete hairpin V-loops as a sleek smooth closed micro-tube
-  const segsPerLoop = 44;
+  // Emit each of the 6 graceful antique hairpin V-loops with wide rounded arches over the molybdenum hooks
+  // (`minBendRadius >= 0.0055 > 2.5 * tubeRadius` -> strictly zero self-folding or flipped triangles!)
+  const segsPerLoop = 36;
   for (let k = 0; k < FILAMENT_LOOPS; k++) {
-    const pts: THREE.Vector3[] = [];
+    const phiTop = k * dPhi;
+    const phiBotPrev = (k - 0.5) * dPhi;
+    const phiBotNext = (k + 0.5) * dPhi;
+    const archDPhi = dPhi * 0.14;
+
+    const ptAt = (phi: number, r: number, y: number) =>
+      new THREE.Vector3(Math.cos(phi) * r, y, -Math.sin(phi) * r);
+
+    const midY = (FILAMENT_TOP_Y + FILAMENT_BOT_Y) * 0.5;
+    const midR = (FILAMENT_TOP_R + FILAMENT_BOT_R) * 0.5 + 0.0028;
+
+    const controlPts = [
+      ptAt(phiBotPrev + archDPhi * 0.55, FILAMENT_BOT_R, FILAMENT_BOT_Y + 0.002),
+      ptAt(phiBotPrev + dPhi * 0.16, FILAMENT_BOT_R * 0.72 + FILAMENT_TOP_R * 0.28 + 0.002, FILAMENT_BOT_Y + 0.032),
+      ptAt((phiBotPrev + phiTop) * 0.5, midR, midY),
+      ptAt(phiTop - dPhi * 0.16, FILAMENT_TOP_R * 0.76 + FILAMENT_BOT_R * 0.24 + 0.002, FILAMENT_TOP_Y - 0.026),
+      ptAt(phiTop - archDPhi * 0.65, FILAMENT_TOP_R + 0.001, FILAMENT_TOP_Y - 0.003),
+      ptAt(phiTop, FILAMENT_TOP_R + 0.0015, FILAMENT_TOP_Y + 0.0015),
+      ptAt(phiTop + archDPhi * 0.65, FILAMENT_TOP_R + 0.001, FILAMENT_TOP_Y - 0.003),
+      ptAt(phiTop + dPhi * 0.16, FILAMENT_TOP_R * 0.76 + FILAMENT_BOT_R * 0.24 + 0.002, FILAMENT_TOP_Y - 0.026),
+      ptAt((phiTop + phiBotNext) * 0.5, midR, midY),
+      ptAt(phiBotNext - dPhi * 0.16, FILAMENT_BOT_R * 0.72 + FILAMENT_TOP_R * 0.28 + 0.002, FILAMENT_BOT_Y + 0.032),
+      ptAt(phiBotNext - archDPhi * 0.55, FILAMENT_BOT_R, FILAMENT_BOT_Y + 0.002),
+    ];
+
+    const loopCurve = new THREE.CatmullRomCurve3(controlPts, false, 'centripetal', 0.45);
+    const pts = loopCurve.getPoints(segsPerLoop);
     const heats: number[] = [];
     for (let i = 0; i <= segsPerLoop; i++) {
       const u = i / segsPerLoop;
-      const sample = evalPoint(k, u);
-      pts.push(sample.pos);
-      heats.push(sample.heat);
+      // Thermal conduction cooling right at bottom (`u ~ 0, 1`) and top (`u ~ 0.5`) molybdenum anchor hooks
+      const limbT = u < 0.5 ? u * 2 : (u - 0.5) * 2;
+      const endProx = Math.sin(limbT * Math.PI);
+      heats.push(0.16 + 0.84 * Math.pow(Math.max(0, endProx), 0.42));
     }
+
     appendCappedTube(
       b,
       pts,
       (s) => {
         const idx = Math.min(segsPerLoop, Math.round(s * segsPerLoop));
-        // Subtle glowing expansion visually at hottest mid-spans (`0.00225`), tauter at anchor bends (`0.00185`)
-        return 0.00185 + 0.00045 * heats[idx];
+        return 0.00175 + 0.00042 * heats[idx];
       },
       8,
       {
@@ -1594,6 +1801,7 @@ export function buildEchoCubeAssembly(materials: EchoMaterialsContract): EchoCub
   const thumbscrewHitMeshes: THREE.Mesh[] = [];
   const thumbscrews: ThumbscrewHandle[] = [];
 
+  const spunCopperMat = materials.spunCopper ?? materials.satinBrass;
   const vernierMat = materials.vernierBrass ?? materials.satinBrass;
   const bezelMat = materials.bezelBrass ?? materials.satinBrass;
   const frontGlassMat = materials.infinityMirrorFront ?? materials.infinityMirror;
@@ -1698,14 +1906,14 @@ export function buildEchoCubeAssembly(materials: EchoMaterialsContract): EchoCub
           plate.receiveShadow = true;
           gGroup.add(plate);
 
-          // 3 machined brass dome rivets seated cleanly inside the beveled plateau
+          // 3 machined spun-copper dome rivets seated cleanly inside the beveled plateau
           const boltCoords: Array<[string, number, number]> = [
             ['Corner', 0.032, 0.032],
             ['ArmA', 0.102, 0.026],
             ['ArmB', 0.026, 0.102],
           ];
           for (const [suffix, bx, by] of boltCoords) {
-            const bolt = new THREE.Mesh(boltGeo, materials.satinBrass);
+            const bolt = new THREE.Mesh(boltGeo, spunCopperMat);
             bolt.name = `${name}_Bolt${suffix}`;
             bolt.position.set(bx, by, 0.0055);
             bolt.rotation.x = Math.PI / 2;
@@ -2031,13 +2239,13 @@ export function buildEchoCubeAssembly(materials: EchoMaterialsContract): EchoCub
     });
   }
 
-  // 2 opposing slotted brass fulcrum lock-caps on the -Y underside rails
+  // 2 opposing slotted spun-copper fulcrum lock-caps on the -Y underside rails
   const lockPositions: Array<[number, number, number]> = [
     [0.41, -THUMBSCREW_MOUNT_OFFSET, RAIL_OFFSET],
     [-0.41, -THUMBSCREW_MOUNT_OFFSET, -RAIL_OFFSET],
   ];
   lockPositions.forEach((lp, idx) => {
-    const cap = new THREE.Mesh(lockCapGeo, materials.satinBrass);
+    const cap = new THREE.Mesh(lockCapGeo, spunCopperMat);
     cap.name = `FulcrumLockCap_${idx}`;
     cap.position.set(lp[0], lp[1], lp[2]);
     cap.rotation.x = Math.PI;
@@ -2052,21 +2260,26 @@ export function buildEchoCubeAssembly(materials: EchoMaterialsContract): EchoCub
   const ceilingAnchorGroup = new THREE.Group();
   ceilingAnchorGroup.name = 'CeilingSuspensionAnchor';
 
-  // 5a. Exterior Overhead Bronze Bridge Yoke Bar + Satin-Brass Rail Saddles + Bulkhead Crown
+  // 5a. Exterior Overhead Bronze Bridge Yoke Bar + Brushed Copper-Brass Rail Saddles + Spun Bulkhead Crown
   //     Mortised directly into the -X and +X top bronze rails (`±0.6113`) so the pendant mount
   //     is structurally anchored across the top frame with zero floating glass-only fittings!
   const bridgeBarGeo = createChamferedBlockGeometry(0.622, 0.010, 0.0135, 0.0032);
   const bridgeSaddleGeo = createChamferedBlockGeometry(0.018, 0.016, 0.028, 0.003);
+  // Stepped spun-copper exterior bulkhead flange with concentric oxidized lathe groove
   const extBulkheadWasherGeo = createOutwardLathe(
     [
-      [0.0005, GLASS_PANE_HALF + 0.0005],
-      [0.068, GLASS_PANE_HALF + 0.0005],
-      [0.068, GLASS_PANE_HALF + 0.008],
-      [0.056, GLASS_PANE_HALF + 0.016],
-      [0.044, GLASS_PANE_HALF + 0.018],
-      [0.0005, GLASS_PANE_HALF + 0.018],
+      [0.0005, GLASS_PANE_HALF + 0.0005, 0.9],
+      [0.074, GLASS_PANE_HALF + 0.0005, 0.85],
+      [0.074, GLASS_PANE_HALF + 0.006, 0.96],
+      [0.068, GLASS_PANE_HALF + 0.010, 1.0],
+      [0.061, GLASS_PANE_HALF + 0.010, 0.92],
+      [0.059, GLASS_PANE_HALF + 0.0085, 0.14], // Turned concentric oxidized groove
+      [0.056, GLASS_PANE_HALF + 0.0115, 0.95],
+      [0.048, GLASS_PANE_HALF + 0.017, 1.0],
+      [0.042, GLASS_PANE_HALF + 0.018, 0.3],
+      [0.0005, GLASS_PANE_HALF + 0.018, 0.85],
     ],
-    32
+    40
   );
   const extHexNutGeo = createOutwardLathe(
     [
@@ -2087,21 +2300,28 @@ export function buildEchoCubeAssembly(materials: EchoMaterialsContract): EchoCub
       [0.006, 0.661],
       [0.0005, 0.662],
     ],
-    24
+    28
   );
 
-  // 5b. Interior Stepped Satin-Brass Ceiling Rosette Canopy (flush at underside of +Y glass: 0.5975)
+  // 5b. Interior Stepped Spun-Copper Ceiling Rosette Canopy (modeled on BarnLamp concentric wall canopy!)
+  //     Sits flush at underside of +Y glass (`0.5975`) with two crisp concentric oxidized lathe grooves
   const rosetteCanopyGeo = createOutwardLathe(
     [
-      [0.0005, CEILING_ROSETTE_BOT_Y],
-      [0.054, CEILING_ROSETTE_BOT_Y],
-      [0.064, CEILING_ROSETTE_BOT_Y + 0.005],
-      [0.082, CEILING_ROSETTE_BOT_Y + 0.011],
-      [CEILING_ROSETTE_RADIUS, CEILING_ROSETTE_TOP_Y - 0.006],
-      [CEILING_ROSETTE_RADIUS, CEILING_ROSETTE_TOP_Y],
-      [0.0005, CEILING_ROSETTE_TOP_Y],
+      [0.0005, CEILING_ROSETTE_BOT_Y, 0.85],
+      [0.042, CEILING_ROSETTE_BOT_Y, 0.95],
+      [0.049, CEILING_ROSETTE_BOT_Y + 0.004, 1.0],
+      [0.055, CEILING_ROSETTE_BOT_Y + 0.0085, 0.92],
+      [0.058, CEILING_ROSETTE_BOT_Y + 0.0105, 0.14], // Inner turned oxidized recess ring
+      [0.062, CEILING_ROSETTE_BOT_Y + 0.0085, 0.96],
+      [0.075, CEILING_ROSETTE_BOT_Y + 0.012, 1.0],
+      [0.079, CEILING_ROSETTE_BOT_Y + 0.0145, 0.14], // Outer turned oxidized recess ring
+      [0.083, CEILING_ROSETTE_BOT_Y + 0.013, 0.96],
+      [CEILING_ROSETTE_RADIUS - 0.005, CEILING_ROSETTE_TOP_Y - 0.011, 1.0],
+      [CEILING_ROSETTE_RADIUS, CEILING_ROSETTE_TOP_Y - 0.006, 0.95],
+      [CEILING_ROSETTE_RADIUS, CEILING_ROSETTE_TOP_Y, 0.88],
+      [0.0005, CEILING_ROSETTE_TOP_Y, 0.85],
     ],
-    36
+    44
   );
   const ceilingColletGeo = createKnurledDrumGeometry(
     0.031,
@@ -2115,11 +2335,11 @@ export function buildEchoCubeAssembly(materials: EchoMaterialsContract): EchoCub
     [
       [0.0005, GLAND_BOT_Y],
       [0.0195, GLAND_BOT_Y],
-      [0.0245, (GLAND_BOT_Y + GLAND_TOP_Y) * 0.5],
-      [0.0285, GLAND_TOP_Y],
+      [0.0255, (GLAND_BOT_Y + GLAND_TOP_Y) * 0.5],
+      [0.0295, GLAND_TOP_Y],
       [0.0005, GLAND_TOP_Y],
     ],
-    24
+    28
   );
   const ceramicGrommetGeo = createOutwardLathe(
     [
@@ -2130,7 +2350,7 @@ export function buildEchoCubeAssembly(materials: EchoMaterialsContract): EchoCub
       [0.0195, GROMMET_TOP_Y],
       [0.0005, GROMMET_TOP_Y],
     ],
-    24
+    28
   );
 
   geometries.push(
@@ -2163,7 +2383,7 @@ export function buildEchoCubeAssembly(materials: EchoMaterialsContract): EchoCub
     frameHitMeshes.push(saddle);
 
     for (const sz of [-1, 1]) {
-      const sBolt = new THREE.Mesh(boltGeo, materials.satinBrass);
+      const sBolt = new THREE.Mesh(boltGeo, spunCopperMat);
       sBolt.name = `TopBridgeSaddle_${sx}_Bolt_${sz}`;
       sBolt.position.set(sx * 0.606, 0.638, sz * 0.014);
       sBolt.scale.setScalar(0.68);
@@ -2171,38 +2391,38 @@ export function buildEchoCubeAssembly(materials: EchoMaterialsContract): EchoCub
     }
   }
 
-  const extWasher = new THREE.Mesh(extBulkheadWasherGeo, materials.satinBrass);
+  const extWasher = new THREE.Mesh(extBulkheadWasherGeo, spunCopperMat);
   extWasher.name = 'TopBulkheadWasher';
   extWasher.castShadow = true;
   extWasher.receiveShadow = true;
   ceilingAnchorGroup.add(extWasher);
   frameHitMeshes.push(extWasher);
 
-  const extNut = new THREE.Mesh(extHexNutGeo, materials.satinBrass);
+  const extNut = new THREE.Mesh(extHexNutGeo, spunCopperMat);
   extNut.name = 'TopBulkheadHexNut';
   extNut.castShadow = true;
   extNut.receiveShadow = true;
   ceilingAnchorGroup.add(extNut);
   frameHitMeshes.push(extNut);
 
-  const extCrown = new THREE.Mesh(extCrownCapGeo, materials.satinBrass);
+  const extCrown = new THREE.Mesh(extCrownCapGeo, spunCopperMat);
   extCrown.name = 'TopBulkheadCrownCap';
   extCrown.castShadow = true;
   ceilingAnchorGroup.add(extCrown);
 
-  const rosetteMesh = new THREE.Mesh(rosetteCanopyGeo, materials.satinBrass);
+  const rosetteMesh = new THREE.Mesh(rosetteCanopyGeo, spunCopperMat);
   rosetteMesh.name = 'InteriorCeilingRosette';
   rosetteMesh.renderOrder = 1;
   ceilingAnchorGroup.add(rosetteMesh);
 
-  // 4 radial brass screws visibly bolting the ceiling rosette to the top mirror
+  // 4 radial spun-copper dome screws visibly bolting the ceiling rosette to the top mirror
   for (let i = 0; i < 4; i++) {
     const ang = (i * Math.PI) / 2 + Math.PI / 4;
-    const rBolt = new THREE.Mesh(boltGeo, materials.satinBrass);
+    const rBolt = new THREE.Mesh(boltGeo, spunCopperMat);
     rBolt.name = `CeilingRosetteBolt_${i}`;
-    rBolt.position.set(Math.cos(ang) * 0.072, CEILING_ROSETTE_BOT_Y + 0.008, Math.sin(ang) * 0.072);
+    rBolt.position.set(Math.cos(ang) * 0.072, CEILING_ROSETTE_BOT_Y + 0.011, Math.sin(ang) * 0.072);
     rBolt.rotation.x = Math.PI;
-    rBolt.scale.setScalar(0.76);
+    rBolt.scale.setScalar(0.74);
     rBolt.renderOrder = 1;
     ceilingAnchorGroup.add(rBolt);
   }
@@ -2213,7 +2433,7 @@ export function buildEchoCubeAssembly(materials: EchoMaterialsContract): EchoCub
   ceilingCollet.renderOrder = 1;
   ceilingAnchorGroup.add(ceilingCollet);
 
-  const ceilingGland = new THREE.Mesh(ceilingGlandGeo, materials.satinBrass);
+  const ceilingGland = new THREE.Mesh(ceilingGlandGeo, spunCopperMat);
   ceilingGland.name = 'CeilingStrainReliefGland';
   ceilingGland.renderOrder = 1;
   ceilingAnchorGroup.add(ceilingGland);
@@ -2225,8 +2445,8 @@ export function buildEchoCubeAssembly(materials: EchoMaterialsContract): EchoCub
 
   group.add(ceilingAnchorGroup);
 
-  // 5c. Articulated Woven Braided Cloth Pendant Cord (emerges cleanly from ceramic grommet into Edison socket)
-  const braidedCordGeo = createBraidedCordGeometry(20, 34);
+  // 5c. Early Turn-of-the-Century Tight Twin-Conductor Twisted Cloth-Braided Pendant Cord
+  const braidedCordGeo = createBraidedCordGeometry(14, 140);
   geometries.push(braidedCordGeo);
   const braidedCordMesh = new THREE.Mesh(braidedCordGeo, cordMat);
   braidedCordMesh.name = 'BraidedPendantCord';
@@ -2234,66 +2454,114 @@ export function buildEchoCubeAssembly(materials: EchoMaterialsContract): EchoCub
   braidedCordMesh.frustumCulled = false;
   group.add(braidedCordMesh);
 
-  // 5d. Swinging Vintage Brass Edison Socket + Crystal Prism Cage + ST64 Bulb + Squirrel-Cage Filament
+  // 5d. Swinging Spun-Copper BarnLamp-Inspired Vintage Edison Socket + Crystal Prism Cage + ST64 Bulb
   const lampHeadGroup = new THREE.Group();
   lampHeadGroup.name = 'SuspendedEdisonPrismLamp';
   lampHeadGroup.position.set(0, CORE_REST_Y, 0);
 
-  // Top brass cord-grip compression nut & hanging bail enclosing CORD_SOCKET_ATTACH_Y (+0.304)
+  // 1) Top spun-copper cord-grip compression nut & stepped bushing enclosing CORD_SOCKET_ATTACH_Y (+0.304)
   const socketGripNutGeo = createOutwardLathe(
     [
-      [0.0005, 0.272],
-      [0.028, 0.272],
-      [0.026, 0.286],
-      [0.0235, 0.290],
-      [0.0235, 0.306],
-      [0.019, 0.312],
-      [0.0155, SOCKET_TOP_Y],
-      [0.0005, SOCKET_TOP_Y],
-    ],
-    24
-  );
-  const socketCapGeo = createOutwardLathe(
-    [
-      [0.0005, SOCKET_CAP_BOT_Y],
-      [0.0505, SOCKET_CAP_BOT_Y],
-      [0.049, SOCKET_CAP_BOT_Y + 0.006],
-      [0.043, SOCKET_CAP_BOT_Y + 0.014],
-      [0.032, 0.272],
-      [0.027, 0.276],
-      [0.0005, 0.276],
+      [0.0005, 0.270, 0.9],
+      [0.0285, 0.270, 0.25],
+      [0.0285, 0.276, 0.95],
+      [0.0255, 0.283, 1.0],
+      [0.0235, 0.285, 0.2], // Crisp oxidized lathe step
+      [0.0242, 0.288, 0.95],
+      [0.0242, 0.305, 1.0],
+      [0.0195, 0.311, 0.96],
+      [0.016, SOCKET_TOP_Y, 0.92],
+      [0.0005, SOCKET_TOP_Y, 0.85],
     ],
     32
   );
+
+  // 2) Smooth spun-copper bell dome cap (`[SOCKET_CAP_BOT_Y = 0.246, 0.274]`) with turned oxidation groove
+  const socketCapGeo = createOutwardLathe(
+    [
+      [0.0005, SOCKET_CAP_BOT_Y, 0.9],
+      [0.0505, SOCKET_CAP_BOT_Y, 0.22],
+      [0.0512, SOCKET_CAP_BOT_Y + 0.0035, 0.98],
+      [0.0488, SOCKET_CAP_BOT_Y + 0.0085, 1.0],
+      [0.0442, SOCKET_CAP_BOT_Y + 0.0135, 0.96],
+      [0.0418, SOCKET_CAP_BOT_Y + 0.0155, 0.16], // Turned BarnLamp dome crevice ring
+      [0.0402, SOCKET_CAP_BOT_Y + 0.0175, 0.96],
+      [0.0338, 0.268, 1.0],
+      [0.028, 0.273, 0.92],
+      [0.025, 0.275, 0.22],
+      [0.0005, 0.275, 0.85],
+    ],
+    40
+  );
+
+  // 3) Crisp 4-sided diamond-knurled grip collar right beneath the dome cap (`[SOCKET_KNURL_BOT_Y = 0.220, 0.248]`)
+  const socketKnurlGeo = createKnurledDrumGeometry(
+    0.0518,
+    SOCKET_CAP_BOT_Y - SOCKET_KNURL_BOT_Y + 0.002,
+    42,
+    5,
+    0.0011,
+    0.003
+  );
+
+  // 4) Smooth spun antique-copper cylindrical lamp-holder barrel (`[SOCKET_VENT_BOT_Y + 0.011, SOCKET_KNURL_BOT_Y + 0.002]`)
+  //    Provides an uninterrupted spun-copper zone for vertical stretched anisotropic reflections + clean switch boss!
+  const socketBarrelGeo = createOutwardLathe(
+    [
+      [0.0005, SOCKET_VENT_BOT_Y + 0.011, 0.9],
+      [0.0488, SOCKET_VENT_BOT_Y + 0.011, 0.22],
+      [0.0498, SOCKET_VENT_BOT_Y + 0.014, 0.96],
+      [0.0492, SOCKET_VENT_BOT_Y + 0.022, 1.0],
+      [0.0492, SOCKET_KNURL_BOT_Y - 0.004, 1.0],
+      [0.0504, SOCKET_KNURL_BOT_Y - 0.0015, 0.95],
+      [0.0482, SOCKET_KNURL_BOT_Y + 0.002, 0.18], // Oxidized seam tucked cleanly under knurl collar
+      [0.0005, SOCKET_KNURL_BOT_Y + 0.002, 0.85],
+    ],
+    40
+  );
+
+  // 5) Subtle lower cooling louver collar (`[SOCKET_VENT_BOT_Y - 0.002, SOCKET_VENT_BOT_Y + 0.014]`)
   const ventBaffleGeo = createOutwardLathe(
     [
-      [0.0005, SOCKET_VENT_BOT_Y],
-      [0.0435, SOCKET_VENT_BOT_Y],
-      [0.0435, SOCKET_CAP_BOT_Y + 0.003],
-      [0.0005, SOCKET_CAP_BOT_Y + 0.003],
+      [0.0005, SOCKET_VENT_BOT_Y - 0.002],
+      [0.0438, SOCKET_VENT_BOT_Y - 0.002],
+      [0.0438, SOCKET_VENT_BOT_Y + 0.014],
+      [0.0005, SOCKET_VENT_BOT_Y + 0.014],
     ],
     28
   );
   const ventStrutsGeo = createSocketVentStrutsGeometry();
-  const socketKnurlGeo = createKnurledDrumGeometry(
-    0.0515,
-    SOCKET_VENT_BOT_Y - SOCKET_KNURL_BOT_Y + 0.002,
-    40,
-    5,
-    0.0011,
-    0.0032
-  );
+
+  // 6) Stepped flared BarnLamp-inspired spun-copper gallery collar (`[SOCKET_SKIRT_BOT_Y = 0.162, SOCKET_VENT_BOT_Y + 0.002]`)
   const socketSkirtGeo = createOutwardLathe(
     [
-      [0.0005, SOCKET_SKIRT_BOT_Y],
-      [0.0475, SOCKET_SKIRT_BOT_Y],
-      [0.0525, SOCKET_SKIRT_BOT_Y + 0.005],
-      [0.0505, SOCKET_SKIRT_BOT_Y + 0.012],
-      [0.0518, SOCKET_KNURL_BOT_Y + 0.002],
-      [0.0005, SOCKET_KNURL_BOT_Y + 0.002],
+      [0.0005, SOCKET_SKIRT_BOT_Y, 0.85],
+      [0.0465, SOCKET_SKIRT_BOT_Y, 0.92],
+      [0.0585, SOCKET_SKIRT_BOT_Y + 0.0035, 1.0],
+      [0.0605, SOCKET_SKIRT_BOT_Y + 0.007, 1.0],
+      [0.0598, SOCKET_SKIRT_BOT_Y + 0.0135, 0.96],
+      [0.0545, SOCKET_SKIRT_BOT_Y + 0.0175, 0.98],
+      [0.0512, SOCKET_VENT_BOT_Y - 0.002, 0.18], // Dark oxidized step right below louvers
+      [0.0495, SOCKET_VENT_BOT_Y + 0.002, 0.9],
+      [0.0005, SOCKET_VENT_BOT_Y + 0.002, 0.85],
     ],
-    32
+    40
   );
+
+  // 4 miniature radial spun-copper knurled gallery thumbscrews echoing the BarnLamp shade-holder screws!
+  const miniScrewGeo = createOutwardLathe(
+    [
+      [0.0005, 0.0, 0.85],
+      [0.0038, 0.0, 0.3],
+      [0.0038, 0.006, 0.85],
+      [0.0068, 0.007, 0.96],
+      [0.0072, 0.0135, 1.0],
+      [0.0056, 0.0155, 0.95],
+      [0.0005, 0.0155, 0.88],
+    ],
+    16
+  );
+
   const darkInsulatorGeo = createOutwardLathe(
     [
       [0.0005, SOCKET_INSULATOR_BOT_Y],
@@ -2303,19 +2571,29 @@ export function buildEchoCubeAssembly(materials: EchoMaterialsContract): EchoCub
     ],
     28
   );
-  // Vintage radial brass rotary paddle turn-key switch on the side of the Edison socket
+
+  // Vintage radial rotary paddle turn-key switch seated cleanly on a turned spun-copper barrel boss (`y = 0.206`)
+  const switchBossGeo = createOutwardLathe(
+    [
+      [0.0005, -0.006, 0.85],
+      [0.0125, -0.006, 0.2],
+      [0.0125, 0.0035, 0.95],
+      [0.0102, 0.0065, 1.0],
+      [0.0072, 0.0075, 0.25],
+      [0.0005, 0.0075, 0.85],
+    ],
+    20
+  );
   const switchStemGeo = createOutwardLathe(
     [
-      [0.0005, 0.0],
-      [0.009, 0.0],
-      [0.009, 0.008],
-      [0.0056, 0.012],
-      [0.0056, 0.028],
-      [0.0005, 0.028],
+      [0.0005, 0.004],
+      [0.0058, 0.004],
+      [0.0052, 0.025],
+      [0.0005, 0.025],
     ],
     16
   );
-  const switchPaddleGeo = createChamferedBlockGeometry(0.012, 0.016, 0.0044, 0.0018);
+  const switchPaddleGeo = createChamferedBlockGeometry(0.0125, 0.0165, 0.0044, 0.0018);
 
   // Threaded brass E27 Edison screw shell + glass-seal neck ring (visible inside the top of the prism!)
   const e27ScrewGeo = createHelicalLeadScrewGeometry(
@@ -2338,38 +2616,39 @@ export function buildEchoCubeAssembly(materials: EchoMaterialsContract): EchoCub
     28
   );
 
-  // Stepped brass prism gallery crown seating the top of the crystal prism + spider claws + edge-came ribs
+  // Stepped dark-bronze prism gallery crown seating the top of the crystal prism + spun-copper spider claws & ribs
   const galleryCrownGeo = createOutwardLathe(
     [
       [0.0005, 0.146],
       [0.035, 0.146],
-      [0.044, 0.156],
-      [0.0485, 0.172],
-      [0.047, 0.178],
-      [0.0005, 0.178],
+      [0.044, 0.155],
+      [0.0485, 0.167],
+      [0.047, 0.172],
+      [0.0005, 0.172],
     ],
-    28
+    32
   );
   const prismCageGeo = createPrismCageAndClawsGeometry();
   const eqBossGeo = createChamferedBlockGeometry(0.0092, 0.0092, 0.0092, 0.003);
 
-  // Sculpted machined brass bottom drop finial cradling the lower crystal prism apex
+  // Sculpted spun antique-copper bottom drop finial with oxidized turning rings cradling lower crystal prism apex
   const bottomFinialGeo = createOutwardLathe(
     [
-      [0.0005, FINIAL_TIP_Y],
-      [0.0038, FINIAL_TIP_Y + 0.006],
-      [0.0115, FINIAL_TIP_Y + 0.016],
-      [0.019, -0.212],
-      [0.0195, -0.200],
-      [0.0135, -0.188],
-      [0.0105, -0.180],
-      [0.0155, -0.172],
-      [0.024, -0.164],
-      [0.034, -0.154],
-      [0.0335, FINIAL_TOP_Y],
-      [0.0005, FINIAL_TOP_Y],
+      [0.0005, FINIAL_TIP_Y, 0.9],
+      [0.0038, FINIAL_TIP_Y + 0.006, 0.96],
+      [0.012, FINIAL_TIP_Y + 0.017, 1.0],
+      [0.0195, -0.212, 1.0],
+      [0.0198, -0.201, 0.96],
+      [0.014, -0.190, 0.85],
+      [0.0102, -0.183, 0.18], // Oxidized turned finial neck groove
+      [0.0108, -0.178, 0.25],
+      [0.0165, -0.172, 0.98],
+      [0.0255, -0.163, 1.0],
+      [0.0345, -0.154, 0.96],
+      [0.0338, FINIAL_TOP_Y, 0.3],
+      [0.0005, FINIAL_TOP_Y, 0.85],
     ],
-    28
+    36
   );
 
   // Glass exhaust pinch stem, central arbor & blown anchor buttons + 12 molybdenum hooks + 6-loop filament
@@ -2410,11 +2689,14 @@ export function buildEchoCubeAssembly(materials: EchoMaterialsContract): EchoCub
   geometries.push(
     socketGripNutGeo,
     socketCapGeo,
+    socketKnurlGeo,
+    socketBarrelGeo,
     ventBaffleGeo,
     ventStrutsGeo,
-    socketKnurlGeo,
     socketSkirtGeo,
+    miniScrewGeo,
     darkInsulatorGeo,
+    switchBossGeo,
     switchStemGeo,
     switchPaddleGeo,
     e27ScrewGeo,
@@ -2444,22 +2726,40 @@ export function buildEchoCubeAssembly(materials: EchoMaterialsContract): EchoCub
     return m;
   };
 
-  addLampPart('EdisonSocketCordGripNut', socketGripNutGeo, materials.satinBrass, 1);
-  addLampPart('EdisonSocketCap', socketCapGeo, materials.satinBrass, 1);
-  addLampPart('EdisonSocketVentBaffle', ventBaffleGeo, ventBaffleMat, 1);
-  addLampPart('EdisonSocketVentStruts', ventStrutsGeo, materials.satinBrass, 1);
+  addLampPart('EdisonSocketCordGripNut', socketGripNutGeo, spunCopperMat, 1);
+  addLampPart('EdisonSocketCap', socketCapGeo, spunCopperMat, 1);
 
   const socketKnurlMesh = addLampPart('EdisonSocketKnurledCollar', socketKnurlGeo, materials.knurledBrass, 1);
   socketKnurlMesh.position.y = SOCKET_KNURL_BOT_Y;
 
-  const switchStemMesh = addLampPart('EdisonSocketSwitchStem', switchStemGeo, materials.satinBrass, 1);
-  switchStemMesh.position.set(0.048, 0.212, 0);
+  addLampPart('EdisonSocketBarrel', socketBarrelGeo, spunCopperMat, 1);
+  addLampPart('EdisonSocketVentBaffle', ventBaffleGeo, ventBaffleMat, 1);
+  addLampPart('EdisonSocketVentStruts', ventStrutsGeo, spunCopperMat, 1);
+
+  const switchBossMesh = addLampPart('EdisonSocketSwitchBoss', switchBossGeo, spunCopperMat, 1);
+  switchBossMesh.position.set(0.048, 0.207, 0);
+  switchBossMesh.rotation.z = -Math.PI / 2;
+
+  const switchStemMesh = addLampPart('EdisonSocketSwitchStem', switchStemGeo, spunCopperMat, 1);
+  switchStemMesh.position.set(0.048, 0.207, 0);
   switchStemMesh.rotation.z = -Math.PI / 2;
 
   const switchPaddleMesh = addLampPart('EdisonSocketSwitchPaddle', switchPaddleGeo, materials.agedBronze, 1);
-  switchPaddleMesh.position.set(0.082, 0.212, 0);
+  switchPaddleMesh.position.set(0.079, 0.207, 0);
 
-  addLampPart('EdisonSocketSkirt', socketSkirtGeo, materials.satinBrass, 1);
+  addLampPart('EdisonSocketSkirt', socketSkirtGeo, spunCopperMat, 1);
+
+  // 4 radial mini spun-copper thumbscrews seated cleanly around the flared gallery collar (`45°` offsets)
+  for (let i = 0; i < 4; i++) {
+    const ang = (i * Math.PI) / 2 + Math.PI / 4;
+    const ms = addLampPart(`EdisonGalleryThumbscrew_${i}`, miniScrewGeo, spunCopperMat, 1);
+    const rMount = 0.056;
+    ms.position.set(Math.cos(ang) * rMount, SOCKET_SKIRT_BOT_Y + 0.010, -Math.sin(ang) * rMount);
+    ms.rotation.order = 'YXZ';
+    ms.rotation.y = ang;
+    ms.rotation.z = -Math.PI / 2;
+  }
+
   addLampPart('EdisonSocketCeramicRing', darkInsulatorGeo, darkCeramicMat, 1);
   addLampPart('EdisonE27ScrewBase', e27ScrewGeo, materials.satinBrass, 1);
   addLampPart('EdisonE27NeckRing', e27FlareGeo, materials.satinBrass, 1);
@@ -2468,12 +2768,12 @@ export function buildEchoCubeAssembly(materials: EchoMaterialsContract): EchoCub
 
   for (let i = 0; i < 4; i++) {
     const ang = (i * Math.PI) / 2;
-    const boss = addLampPart(`PrismEquatorBoss_${i}`, eqBossGeo, materials.satinBrass, 1);
+    const boss = addLampPart(`PrismEquatorBoss_${i}`, eqBossGeo, spunCopperMat, 1);
     boss.position.set(Math.cos(ang) * PRISM_EQUATOR_R, 0, -Math.sin(ang) * PRISM_EQUATOR_R);
     boss.rotation.y = Math.PI / 4;
   }
 
-  addLampPart('PrismBottomDropFinial', bottomFinialGeo, materials.satinBrass, 1);
+  addLampPart('PrismBottomDropFinial', bottomFinialGeo, spunCopperMat, 1);
   addLampPart('BulbMolybdenumHooks', molyHooksGeo, materials.bluedSteel, 1);
   addLampPart('EdisonSquirrelCageFilament', filamentGeo, filamentMat, 1);
 
