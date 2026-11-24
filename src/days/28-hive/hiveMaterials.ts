@@ -1,72 +1,66 @@
 import * as THREE from 'three/webgpu';
 import {
-  TWO_PI,
+  Fn,
   abs,
-  attribute,
   clamp,
-  cos,
-  cross,
   dot,
-  exp,
   float,
-  length,
+  max,
   mix,
   normalLocal,
-  normalView,
   normalize,
   positionLocal,
-  positionViewDirection,
-  pow,
-  select,
-  sin,
   smoothstep,
   transformNormalToView,
-  uv,
+  uniform,
   vec3,
 } from 'three/tsl';
+import { MINERAL_PALETTE } from '../../core/palette';
 import {
-  beerLambertTransmittance,
   createPigmentUniforms,
   kubelkaMunkGlaze,
   mineralToothFbm,
 } from '../../core/tslMaterials';
 
-export interface HiveStudioEnvironmentHandle {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type TslNode = any;
+
+export interface StudioEnvironmentHandle {
   texture: THREE.Texture;
   dispose: () => void;
 }
 
-export interface HiveMaterialsBundle {
-  readonly branchMat: THREE.MeshStandardNodeMaterial;
-  readonly innerCurtainMat: THREE.MeshStandardNodeMaterial;
-  readonly thoraxMat: THREE.MeshStandardNodeMaterial;
-  readonly abdomenMat: THREE.MeshStandardNodeMaterial;
-  readonly wingMat: THREE.MeshStandardNodeMaterial;
+export interface HiveMaterials {
+  limestone: THREE.MeshStandardNodeMaterial;
+  darkBronze: THREE.MeshStandardNodeMaterial;
+  satinBrass: THREE.MeshStandardNodeMaterial;
+  needleNorthCinnabar: THREE.MeshStandardNodeMaterial;
+  needleSouthPrussian: THREE.MeshStandardNodeMaterial;
+  lodestone: THREE.MeshStandardNodeMaterial;
+  polarityBand: THREE.MeshStandardNodeMaterial;
+  darkGrip: THREE.MeshStandardNodeMaterial;
+  /** 0 = Cinnabar North-pull (+1), 1 = Prussian South-pull (-1) */
+  uPolarityBlend: { value: number };
+  /** 0..1 stylus proximity/press engagement */
+  uStylusEngaged: { value: number };
+  /** Stylus tip position in specimen-local coordinates for subtle proximity rim sheen */
+  uStylusLocalPos: { value: THREE.Vector3 };
   dispose: () => void;
 }
 
-/**
- * Generates a smooth Gaussian-feathered softbox luminance texture so PMREM reflections
- * glide smoothly across curved insect chitin, gossamer wings, and dark-walnut bark.
- */
-function createFeatheredSoftboxTexture(
-  r: number,
-  g: number,
-  b: number,
-  size = 96
-): THREE.DataTexture {
+function createFeatheredSoftboxTexture(r: number, g: number, b: number, size = 128): THREE.DataTexture {
   const data = new Uint8Array(size * size * 4);
-  for (let py = 0; py < size; py++) {
-    const ny = (py / (size - 1)) * 2 - 1;
-    for (let px = 0; px < size; px++) {
-      const nx = (px / (size - 1)) * 2 - 1;
-      const dist = Math.hypot(nx, ny);
-      const falloff =
-        Math.exp(-dist * dist * 2.1) * Math.max(0, 1 - Math.pow(Math.min(1, dist), 4));
-      const idx = (py * size + px) * 4;
-      data[idx] = Math.min(255, Math.round(r * falloff * 255));
-      data[idx + 1] = Math.min(255, Math.round(g * falloff * 255));
-      data[idx + 2] = Math.min(255, Math.round(b * falloff * 255));
+  for (let y = 0; y < size; y++) {
+    const ny = (y / (size - 1)) * 2 - 1;
+    for (let x = 0; x < size; x++) {
+      const nx = (x / (size - 1)) * 2 - 1;
+      const d = Math.hypot(nx, ny);
+      const falloff = Math.max(0, Math.min(1, 1 - d * d));
+      const soft = falloff * falloff;
+      const idx = (y * size + x) * 4;
+      data[idx] = Math.min(255, Math.round(r * soft * 255));
+      data[idx + 1] = Math.min(255, Math.round(g * soft * 255));
+      data[idx + 2] = Math.min(255, Math.round(b * soft * 255));
       data[idx + 3] = 255;
     }
   }
@@ -79,16 +73,16 @@ function createFeatheredSoftboxTexture(
 }
 
 /**
- * Builds a broadly diffused natural-history studio softbox PMREM cubemap calibrated
- * so flipped golden-ochre tergites, translucent gossamer wings, and gnarled charred-oak
- * bark catch crisp studio highlights against Chalky Slate (#212529).
+ * Generates a broadly diffused photographer's studio softbox PMREM environment cubemap
+ * calibrated for satin brass honeycomb walls, oxidized bronze bezel, and blued-steel needles.
  */
 export function createHiveStudioEnvironment(
   renderer: THREE.WebGPURenderer
-): HiveStudioEnvironmentHandle {
+): StudioEnvironmentHandle {
   const pmrem = new THREE.PMREMGenerator(renderer);
   const envScene = new THREE.Scene();
-  envScene.background = new THREE.Color(0x0f1318);
+  // Warm-neutral museum studio ambient room (prevents vertical brass honeycomb walls from collapsing dark)
+  envScene.background = new THREE.Color(0x282b2f);
 
   const disposables: Array<{ dispose: () => void }> = [];
 
@@ -115,18 +109,24 @@ export function createHiveStudioEnvironment(
     disposables.push(geo, tex, mat);
   };
 
-  // 1. Broad warm overhead-front-left calcite softbox (catches upturned abdomens & wing flicks)
-  addSoftbox(11.5, 9.0, [-3.6, 6.2, 4.4], 1.0, 0.96, 0.88, 1.85);
-  // 2. Tall right warm-neutral studio scrim (sculpts the curved teardrop flank & bark relief)
-  addSoftbox(9.2, 10.2, [5.8, 2.5, 3.6], 0.98, 0.95, 0.90, 1.32);
-  // 3. Rear-top cool-calcite grazing rim strip (carves crisp silhouette rim against #212529)
-  addSoftbox(12.2, 5.4, [-1.2, 5.2, -5.8], 0.92, 0.96, 1.0, 1.62);
-  // 4. Rear-right fill scrim so 360-deg back-face orbit stays equally dimensional
-  addSoftbox(9.0, 7.5, [4.2, 1.8, -5.4], 0.96, 0.94, 0.90, 1.12);
-  // 5. Subtle warm bounce floor lifting the curved pendant underside
-  addSoftbox(10.5, 10.5, [0.0, -6.2, 0.6], 0.96, 0.89, 0.78, 0.58);
+  // Overhead-left broad warm calcite scrim softbox
+  addSoftbox(12.5, 10.0, [-4.8, 5.8, 4.2], 1.0, 0.96, 0.90, 1.95);
+  // Right-side tall warm studio scrim (illuminates vertical brass hex walls & stylus barrel)
+  addSoftbox(10.5, 10.5, [6.2, 2.8, 3.2], 0.99, 0.95, 0.88, 1.75);
+  // Front-horizon soft bounce strip (keeps front interior hex brass walls warm gold, not dark shadow)
+  addSoftbox(14.0, 5.5, [0.0, 1.4, 6.8], 0.98, 0.94, 0.87, 1.28);
+  // Left-horizon soft bounce strip
+  addSoftbox(11.0, 6.0, [-6.8, 1.8, -0.4], 0.96, 0.93, 0.88, 1.18);
+  // Overhead zenith studio bank (direct specular wrap on tilted compass needle roof facets)
+  addSoftbox(10.5, 10.5, [0.0, 7.6, 0.5], 0.97, 0.95, 0.91, 1.35);
+  // Rear-top cool-warm grazing rim scrim (carves bezel & limestone chamfers cleanly from #212529)
+  addSoftbox(12.5, 5.5, [-1.0, 4.8, -5.8], 0.92, 0.95, 1.0, 1.55);
+  // Rear-right cool accent scrim
+  addSoftbox(8.5, 6.5, [4.8, 2.2, -5.4], 0.90, 0.94, 1.0, 1.20);
+  // Subtle warm underside studio floor bounce (illuminates rear brass medallion cleanly)
+  addSoftbox(12.0, 12.0, [0, -6.2, 0], 0.95, 0.92, 0.88, 0.55);
 
-  const renderTarget = pmrem.fromScene(envScene, 0.082);
+  const renderTarget = pmrem.fromScene(envScene, 0.085);
   for (const item of disposables) item.dispose();
   pmrem.dispose();
 
@@ -139,349 +139,367 @@ export function createHiveStudioEnvironment(
 }
 
 /**
- * Builds all TSL PBR NodeMaterials for Day 28 - Hive strictly using physical mineral
- * and botanical pigments (`rawUmber`, `burntSienna`, `yellowOchre`, `realgarAmber`,
- * `sporeSulfur`, `boneCalcite`, `warmKaolin`, `mossUmbrous`).
+ * Analytical 4-tap tetrahedral 3D FBM micro-normal perturbation in object space.
+ * Zero derivatives, zero UV seams, uniform control flow.
  */
-export function createHiveMaterials(): HiveMaterialsBundle {
-  const umber = createPigmentUniforms('rawUmber');
-  const sienna = createPigmentUniforms('burntSienna');
-  const ochre = createPigmentUniforms('yellowOchre');
-  const amber = createPigmentUniforms('realgarAmber');
-  const sulfur = createPigmentUniforms('sporeSulfur');
-  const calcite = createPigmentUniforms('boneCalcite');
-  const kaolin = createPigmentUniforms('warmKaolin');
-  const moss = createPigmentUniforms('mossUmbrous');
+const perturbNormalAniso = Fn(
+  ([baseNorm_in, pos_in, scaleVec_in, strength_in]: [TslNode, TslNode, TslNode, TslNode]) => {
+    const n = normalize(vec3(baseNorm_in));
+    const p = vec3(pos_in).mul(vec3(scaleVec_in));
+    const eps = float(0.08);
+
+    const k1 = vec3(1.0, -1.0, -1.0);
+    const k2 = vec3(-1.0, -1.0, 1.0);
+    const k3 = vec3(-1.0, 1.0, -1.0);
+    const k4 = vec3(1.0, 1.0, 1.0);
+
+    const f1 = mineralToothFbm(p.add(k1.mul(eps)), float(1.0));
+    const f2 = mineralToothFbm(p.add(k2.mul(eps)), float(1.0));
+    const f3 = mineralToothFbm(p.add(k3.mul(eps)), float(1.0));
+    const f4 = mineralToothFbm(p.add(k4.mul(eps)), float(1.0));
+
+    const maxScale = max(
+      vec3(scaleVec_in).x,
+      max(vec3(scaleVec_in).y, max(vec3(scaleVec_in).z, float(1.0)))
+    );
+    const anisoDirWeight = vec3(scaleVec_in).div(maxScale);
+    const grad = k1
+      .mul(f1)
+      .add(k2.mul(f2))
+      .add(k3.mul(f3))
+      .add(k4.mul(f4))
+      .div(eps.mul(4.0))
+      .mul(anisoDirWeight);
+    const tanGrad = grad.sub(n.mul(dot(grad, n)));
+    return transformNormalToView(normalize(n.sub(tanGrad.mul(float(strength_in)))));
+  }
+);
+
+/**
+ * Identifies chamfer/bevel faces (neither strictly horizontal nor strictly vertical)
+ * for authentic worn-brass edge rubbing and honed limestone highlight catch.
+ */
+const computeChamferMask = Fn(([nObj_in]: [TslNode]) => {
+  const n = normalize(vec3(nObj_in));
+  const upness = abs(n.y);
+  // Peaks around 45° chamfers (abs(n.y) ~ 0.45..0.85)
+  const lowCut = smoothstep(float(0.18), float(0.45), upness);
+  const highCut = float(1.0).sub(smoothstep(float(0.84), float(0.96), upness));
+  return lowCut.mul(highCut);
+});
+
+export function createHiveMaterials(): HiveMaterials {
+  const uPolarityBlend = uniform(0);
+  const uStylusEngaged = uniform(0);
+  const uStylusLocalPos = uniform(new THREE.Vector3(0.86, 0.24, -0.78));
+
+  const pBone = createPigmentUniforms('boneCalcite');
+  const pKaolin = createPigmentUniforms('warmKaolin');
+  const pOchre = createPigmentUniforms('yellowOchre');
+  const pUmber = createPigmentUniforms('rawUmber');
+  const pCinnabar = createPigmentUniforms('cinnabarVermilion');
+  const pPrussian = createPigmentUniforms('azuritePrussian');
+
+  const boneRgb = vec3(...MINERAL_PALETTE.boneCalcite.rInfLinear);
+  const ochreRgb = vec3(...MINERAL_PALETTE.yellowOchre.rInfLinear);
+  const umberRgb = vec3(...MINERAL_PALETTE.rawUmber.rInfLinear);
+  const cinnabarRgb = vec3(...MINERAL_PALETTE.cinnabarVermilion.rInfLinear);
+  const prussianRgb = vec3(...MINERAL_PALETTE.azuritePrussian.rInfLinear);
+  const lapisRgb = vec3(...MINERAL_PALETTE.lapisUltramarine.rInfLinear);
 
   // ---------------------------------------------------------------------------
-  // 1. Gnarled Dark-Walnut / Charred-Oak Suspended Timber Branch
+  // 1. Honed Bone-Calcite Sedimentary Limestone Chassis & Recessed Chamber Deck
   // ---------------------------------------------------------------------------
-  const branchMat = new THREE.MeshStandardNodeMaterial({
-    roughness: 0.78,
+  const limestone = new THREE.MeshStandardNodeMaterial({
     metalness: 0.02,
+    roughness: 0.76,
+    envMapIntensity: 0.72,
   });
+  {
+    const nObj = normalize(normalLocal);
+    const chamfer = computeChamferMask(nObj);
 
-  const bPos = positionLocal;
-  const bUv = uv();
-  const aBarkData = attribute('aBarkData', 'vec4'); // [furrow01, burl01, endCut01, moss01]
-  const furrow01 = aBarkData.x;
-  const burl01 = aBarkData.y;
-  const endCut01 = aBarkData.z;
-  const mossMask = aBarkData.w;
+    // Calm sedimentary travertine/limestone grain (tight warm-neutral value range, zero yellow blotches)
+    const strata = mineralToothFbm(positionLocal.mul(vec3(2.4, 9.5, 2.4)), float(1.15));
+    const finePores = mineralToothFbm(positionLocal.mul(vec3(18.0, 18.0, 18.0)), float(1.35));
+    const microTooth = mineralToothFbm(positionLocal.mul(vec3(62.0, 62.0, 62.0)), float(1.2));
 
-  // Longitudinal charred-oak bark grain + fine cross-cracks in 3D object space (zero UV seams)
-  const barkCoarse = mineralToothFbm(
-    vec3(bPos.x.mul(3.4), bPos.y.mul(12.0), bPos.z.mul(12.0)),
-    float(2.1)
-  );
-  const barkFine = mineralToothFbm(
-    vec3(bPos.x.mul(11.0), bPos.y.mul(28.0), bPos.z.mul(28.0)),
-    float(2.4)
-  );
-  const crackPattern = smoothstep(float(0.28), float(0.76), barkCoarse.mul(0.58).add(furrow01.mul(0.42)));
+    const kaolinBase = kubelkaMunkGlaze(
+      pKaolin.K,
+      pKaolin.S,
+      float(0.85).add(strata.mul(0.35)),
+      boneRgb.mul(0.88)
+    );
+    // Whisper-subtle raw-umber mineral limestone grain + trace warm travertine tone
+    const mineralWash = kubelkaMunkGlaze(
+      pUmber.K,
+      pUmber.S,
+      smoothstep(float(0.42), float(0.88), strata).mul(0.055),
+      kaolinBase
+    );
+    const warmStone = kubelkaMunkGlaze(
+      pOchre.K,
+      pOchre.S,
+      smoothstep(float(0.55), float(0.92), finePores).mul(0.022),
+      mineralWash
+    );
 
-  // Deep charred-walnut crevices -> weathered warm umber ridges -> subtle silvered bone highlight
-  const creviceBark = umber.rInf.mul(0.16);
-  const ridgeBark = mix(
-    umber.rInf.mul(0.56),
-    mix(sienna.rInf.mul(0.44), kaolin.rInf.mul(0.38), float(0.22)),
-    clamp(burl01.mul(0.5).add(barkFine.mul(0.45)), 0.0, 1.0)
-  );
-  const weatheredBark = mix(creviceBark, ridgeBark, crackPattern);
+    // Crisp honed micro-tooth + subtle recessed-well depth + cool-pale edge polish on 45° chamfers
+    const poreDim = float(0.90).add(finePores.mul(0.09)).add(microTooth.sub(0.5).mul(0.045));
+    const deckSoftShade = mix(float(0.91), float(0.98), smoothstep(float(-0.02), float(0.055), positionLocal.y));
+    const col = mix(warmStone.mul(poreDim).mul(deckSoftShade), boneRgb.mul(0.94), chamfer.mul(0.22));
 
-  // Subtle dry bryophyte moss flecks nestled into upper bark hollows
-  const mossNoise = mineralToothFbm(bPos.mul(16.0), float(2.2));
-  const mossAmt = clamp(mossMask.mul(smoothstep(float(0.36), float(0.74), mossNoise)).mul(0.85), 0.0, 0.72);
-  const mossTint = mix(moss.rInf.mul(0.62), ochre.rInf.mul(0.48), barkFine.mul(0.35));
-  const barkWithMoss = mix(weatheredBark, mossTint, mossAmt);
-
-  // Oblique broken heartwood end-grain with concentric growth rings
-  const ringDist = length(bUv.sub(0.5));
-  const growthRings = sin(ringDist.mul(62.0).add(barkCoarse.mul(5.0))).mul(0.5).add(0.5);
-  const heartwood = mix(
-    umber.rInf.mul(0.65),
-    kubelkaMunkGlaze(
-      ochre.K,
-      ochre.S,
-      float(0.24).add(growthRings.mul(0.28)),
-      kaolin.rInf.mul(0.88)
-    ),
-    float(0.68)
-  );
-
-  branchMat.colorNode = mix(barkWithMoss, heartwood, smoothstep(float(0.4), float(0.85), endCut01));
-  branchMat.roughnessNode = clamp(
-    float(0.88)
-      .sub(crackPattern.mul(0.18))
-      .sub(barkFine.mul(0.12))
-      .add(mossAmt.mul(0.10))
-      .sub(endCut01.mul(0.14)),
-    0.52,
-    0.95
-  );
-
-  // Crisp bark micro-normal perturbation (view space via transformNormalToView)
-  const bN0 = normalize(normalLocal);
-  const bRef = select(abs(bN0.y).lessThan(0.9), vec3(0.0, 1.0, 0.0), vec3(1.0, 0.0, 0.0));
-  const bTanA = normalize(cross(bRef, bN0));
-  const bTanB = normalize(cross(bN0, bTanA));
-  const barkSlopeA = barkFine.sub(0.5).mul(0.36).add(furrow01.sub(0.5).mul(0.22));
-  const barkSlopeB = barkCoarse.sub(0.5).mul(0.24);
-  branchMat.normalNode = transformNormalToView(
-    normalize(bN0.add(bTanA.mul(barkSlopeA)).add(bTanB.mul(barkSlopeB)))
-  );
+    limestone.colorNode = clamp(col, 0.0, 1.0);
+    limestone.roughnessNode = clamp(
+      float(0.78).sub(chamfer.mul(0.14)).add(finePores.sub(0.5).mul(0.12)),
+      0.56,
+      0.92
+    );
+    limestone.normalNode = perturbNormalAniso(
+      nObj,
+      positionLocal,
+      vec3(28.0, 36.0, 28.0),
+      float(0.075)
+    );
+  }
 
   // ---------------------------------------------------------------------------
-  // 2. Dark Organic Inner Brood-Curtain Mantle (recessed warm shadow behind bees)
+  // 2. Oxidized Darkened-Bronze Bolted Bezel Frame & Underside Medallion Plate
   // ---------------------------------------------------------------------------
-  const innerCurtainMat = new THREE.MeshStandardNodeMaterial({
-    roughness: 0.86,
-    metalness: 0.01,
+  const darkBronze = new THREE.MeshStandardNodeMaterial({
+    metalness: 0.82,
+    roughness: 0.36,
+    envMapIntensity: 1.18,
   });
+  {
+    const nObj = normalize(normalLocal);
+    const chamfer = computeChamferMask(nObj);
 
-  const cPos = positionLocal;
-  const combMicro = mineralToothFbm(cPos.mul(18.0), float(2.3));
-  const deepNest = mix(umber.rInf.mul(0.18), sienna.rInf.mul(0.24), combMicro.mul(0.55));
-  const waxHint = mix(deepNest, ochre.rInf.mul(0.28), smoothstep(float(0.58), float(0.88), combMicro).mul(0.32));
-  innerCurtainMat.colorNode = waxHint;
-  innerCurtainMat.roughnessNode = clamp(float(0.82).add(combMicro.mul(0.14)), 0.72, 0.96);
+    const patina = mineralToothFbm(positionLocal.mul(vec3(9.5, 9.5, 9.5)), float(1.3));
+    const microBrush = mineralToothFbm(positionLocal.mul(vec3(54.0, 22.0, 54.0)), float(1.25));
+
+    // Deep dignified antique oil-rubbed bronze (dark cool-umber metal, not chocolate brown)
+    const deepBronze = umberRgb.mul(0.25).add(prussianRgb.mul(0.045)).add(vec3(0.020, 0.019, 0.017));
+    const rubbedBrass = ochreRgb.mul(0.58).add(boneRgb.mul(0.14));
+
+    const edgeWear = clamp(
+      chamfer.mul(0.62).add(smoothstep(float(0.65), float(0.93), patina).mul(0.18)),
+      0.0,
+      0.72
+    );
+    const bronzeCol = mix(deepBronze, rubbedBrass, edgeWear.mul(0.42))
+      .mul(float(0.90).add(microBrush.mul(0.18)));
+
+    darkBronze.colorNode = clamp(bronzeCol, 0.0, 1.0);
+    darkBronze.roughnessNode = clamp(
+      float(0.40).sub(chamfer.mul(0.14)).add(patina.sub(0.5).mul(0.12)),
+      0.20,
+      0.56
+    );
+    darkBronze.normalNode = perturbNormalAniso(
+      nObj,
+      positionLocal,
+      vec3(46.0, 24.0, 46.0),
+      float(0.055)
+    );
+  }
 
   // ---------------------------------------------------------------------------
-  // 3. Anchored *Apis dorsata* Head + Velvety Pubescent Thorax (InstancedMesh)
+  // 3. Machined Satin-Brass Honeycomb Matrix, Pivot Pins, Bolts & Stylus Barrel
   // ---------------------------------------------------------------------------
-  const thoraxMat = new THREE.MeshStandardNodeMaterial({
-    roughness: 0.72,
-    metalness: 0.04,
+  const satinBrass = new THREE.MeshStandardNodeMaterial({
+    metalness: 0.80,
+    roughness: 0.28,
+    envMapIntensity: 1.38,
   });
+  {
+    const nObj = normalize(normalLocal);
+    const chamfer = computeChamferMask(nObj);
+    const topLip = smoothstep(float(0.75), float(0.98), nObj.y);
 
-  const aThoraxData = attribute('aThoraxData', 'vec4'); // [alongY01, dorsal01, isHead01, eyeFlank01]
-  const aBeeStateT = attribute('aBeeState', 'vec4'); // [flip01, flashDrive, wingSpread, seed]
-  const tDorsal = aThoraxData.y;
-  const tIsHead = aThoraxData.z;
-  const tEyeFlank = aThoraxData.w;
-  const tFlash = aBeeStateT.y;
-  const tSeed = aBeeStateT.w;
+    const brush = mineralToothFbm(positionLocal.mul(vec3(62.0, 30.0, 62.0)), float(1.2));
+    const toneVar = mineralToothFbm(positionLocal.mul(vec3(5.5, 5.5, 5.5)), float(1.15));
 
-  const tNView = normalize(normalView);
-  const tVDir = normalize(positionViewDirection);
-  const tFresnel = pow(clamp(float(1.0).sub(abs(dot(tNView, tVDir))), 1e-4, 1.0), float(2.2));
+    // Luminous antique satin brass anchored in yellowOchre + boneCalcite
+    const baseBrass = mix(ochreRgb.mul(1.16), boneRgb.mul(0.98), float(0.36));
+    const shadedBrass = mix(baseBrass.mul(0.88), baseBrass.mul(1.08), toneVar);
+    // Warm gilded catchlight along top hexagonal crests & 45° bevel chamfers
+    const rimBright = mix(
+      shadedBrass,
+      mix(ochreRgb.mul(1.10), boneRgb.mul(1.02), float(0.54)),
+      chamfer.mul(0.36).add(topLip.mul(0.22))
+    );
 
-  // Velvety dark raw-umber thoracic pubescence with golden-ochre hair rim + dark glossy chitin head
-  const darkChitin = umber.rInf.mul(0.14);
-  const velvetThorax = mix(
-    umber.rInf.mul(0.34),
-    mix(ochre.rInf.mul(0.52), sienna.rInf.mul(0.45), float(0.42)),
-    clamp(tDorsal.mul(0.58).add(tFresnel.mul(0.42)).add(tSeed.sub(0.5).mul(0.14)), 0.0, 1.0)
-  );
-  const thoraxBase = mix(velvetThorax, darkChitin, smoothstep(float(0.32), float(0.78), tIsHead));
-  // Subtle warm setae lift as the defense wave ripples through the thorax
-  const setaeAlert = mix(ochre.rInf, amber.rInf, float(0.35)).mul(tFlash.mul(0.24).mul(float(1.0).sub(tIsHead.mul(0.6))));
-  thoraxMat.colorNode = clamp(thoraxBase.add(setaeAlert), 0.0, 1.0);
-  thoraxMat.roughnessNode = clamp(
-    mix(float(0.76).sub(tFlash.mul(0.12)), float(0.28).sub(tEyeFlank.mul(0.08)), tIsHead),
-    0.18,
-    0.88
-  );
+    satinBrass.colorNode = clamp(rimBright.mul(float(0.94).add(brush.mul(0.12))), 0.0, 1.0);
+    satinBrass.roughnessNode = clamp(
+      float(0.31).sub(chamfer.mul(0.09)).sub(topLip.mul(0.05)).add(brush.sub(0.5).mul(0.08)),
+      0.16,
+      0.42
+    );
+    satinBrass.normalNode = perturbNormalAniso(
+      nObj,
+      positionLocal,
+      vec3(68.0, 32.0, 68.0),
+      float(0.036)
+    );
+  }
 
   // ---------------------------------------------------------------------------
-  // 4. Articulated Hinged *Apis dorsata* Segmented Abdomen (InstancedMesh)
+  // 4. Glossy Vitreous Cinnabar-Vermilion Enamel (North Compass Needle Halves)
   // ---------------------------------------------------------------------------
-  const abdomenMat = new THREE.MeshStandardNodeMaterial({
-    roughness: 0.54,
-    metalness: 0.06,
+  const needleNorthCinnabar = new THREE.MeshStandardNodeMaterial({
+    metalness: 0.12,
+    roughness: 0.25,
+    envMapIntensity: 1.18,
   });
+  {
+    const nObj = normalize(normalLocal);
+    const fineGrain = mineralToothFbm(positionLocal.mul(vec3(72.0, 72.0, 72.0)), float(1.2));
+    const ridgeGlow = smoothstep(float(0.004), float(0.014), positionLocal.y);
 
-  // aAbdomenUv: [alongFromPetiole01, dorsal01, tergiteRidge01, sterniteRim01]
-  const aAbdUv = attribute('aAbdomenUv', 'vec4');
-  // aBeeState: [flip01, flashDrive, wingSpread, seed]
-  const aBeeState = attribute('aBeeState', 'vec4');
+    // Physical Kubelka-Munk glaze of Cinnabar Vermilion over pale calcite undercoat
+    const kmCinnabar = kubelkaMunkGlaze(
+      pCinnabar.K,
+      pCinnabar.S,
+      float(1.45).add(fineGrain.mul(0.45)),
+      boneRgb
+    );
+    const col = mix(kmCinnabar.mul(0.90), cinnabarRgb.mul(1.12), ridgeGlow.mul(0.28));
 
-  const alongT = aAbdUv.x; // 0 = petiole base (golden T1), 1 = apical tip (dark T6)
-  const dorsal01 = aAbdUv.y; // 1 = dorsal back, 0 = ventral sternites
-  const ridge01 = aAbdUv.z;
-  const sterniteRim = aAbdUv.w;
-
-  const flip01 = clamp(aBeeState.x, 0.0, 1.0);
-  const flashDrive = clamp(aBeeState.y, 0.0, 1.0);
-  const beeSeed = aBeeState.w;
-
-  const aNView = normalize(normalView);
-  const aVDir = normalize(positionViewDirection);
-  const aFresnel = pow(clamp(float(1.0).sub(abs(dot(aNView, aVDir))), 1e-4, 1.0), float(2.4));
-
-  // Crisp anatomical 5-tergite banding of giant honeybee Apis dorsata:
-  // - Basal tergites T1-T3 (alongT 0.05..0.58): vivid honey-gold Yellow Ochre & Realgar-Amber
-  // - Sharp dark Raw-Umber inter-tergite suture bands between segments
-  // - Apical tergites T4-T6 (alongT 0.60..1.0): deep velvety Raw Umber & Burnt Sienna
-  const segPhase = alongT.mul(5.2).add(beeSeed.mul(0.16));
-  const segWave = sin(segPhase.mul(TWO_PI)).mul(0.5).add(0.5);
-  const sutureStripe = smoothstep(float(0.12), float(0.46), segWave);
-  const basalZone = float(1.0).sub(smoothstep(float(0.44), float(0.68), alongT));
-  const paleHairFringe = smoothstep(float(0.76), float(0.96), segWave).mul(float(1.0).sub(smoothstep(float(0.75), float(0.96), alongT)));
-
-  // 2-flux Kubelka-Munk mineral pigment glazing (Yellow Ochre + Realgar-Amber over Bone Calcite)
-  const honeyOchreGlaze = kubelkaMunkGlaze(
-    mix(ochre.K, amber.K, float(0.32).add(beeSeed.mul(0.22))),
-    mix(ochre.S, amber.S, float(0.32).add(beeSeed.mul(0.22))),
-    float(0.48).add(ridge01.mul(0.24)),
-    calcite.rInf
-  );
-
-  // Bright ventral/inter-tergal flash tone (Spore Sulfur + Yellow Ochre + Realgar-Amber) revealed on flip!
-  const ventralGold = mix(
-    mix(ochre.rInf.mul(1.18), sulfur.rInf.mul(1.15), float(0.48)),
-    amber.rInf.mul(1.12),
-    float(0.22).add(dorsal01.mul(0.24))
-  );
-
-  // Dark velvety umber tergite sutures & apical stinger tip
-  const darkUmberBand = mix(umber.rInf.mul(0.20), sienna.rInf.mul(0.22), ridge01.mul(0.28));
-
-  // Combine dorsal striped pattern
-  const bandStrength = clamp(basalZone.mul(0.92).add(paleHairFringe.mul(0.42)), 0.0, 1.0);
-  const dorsalStriped = mix(darkUmberBand, honeyOchreGlaze, clamp(bandStrength.mul(sutureStripe).add(basalZone.mul(0.24)), 0.0, 1.0));
-
-  // Blend ventral pale-gold sternites & pleural rim (dramatically exposed as abdomen tilts 65-75 deg!)
-  const ventralWeight = clamp(
-    float(1.0).sub(dorsal01).mul(0.72).add(sterniteRim.mul(flip01).mul(0.48)),
-    0.0,
-    1.0
-  );
-  const bodyColor = mix(dorsalStriped, ventralGold, ventralWeight);
-
-  // At rest: bees overlap tightly like shingles -> muted, quiet deep Raw Umber & dark banded Ochre.
-  // On wave flip: shingle occlusion lifts away & bright golden tergites snap into studio light!
-  const restShingleOcclusion = mix(float(0.44), float(0.84), smoothstep(float(0.18), float(0.82), alongT));
-  const waveLift = mix(restShingleOcclusion, float(1.18), smoothstep(float(0.05), float(0.85), flip01));
-  const perBeeVar = float(0.90).add(beeSeed.mul(0.20));
-
-  const restToned = mix(umber.rInf.mul(0.32), bodyColor, float(0.66).add(flip01.mul(0.34)));
-  const finalAbdColor = clamp(restToned.mul(waveLift).mul(perBeeVar), 0.0, 1.0);
-
-  abdomenMat.colorNode = finalAbdColor;
-
-  // Chitin shifts from matte resting pubescence (0.62) to burnished specular golden carapace (0.26) during flip
-  abdomenMat.roughnessNode = clamp(
-    float(0.64)
-      .sub(flip01.mul(0.32))
-      .sub(ridge01.mul(0.08))
-      .sub(sutureStripe.mul(0.06)),
-    0.22,
-    0.76
-  );
-  abdomenMat.metalnessNode = clamp(float(0.04).add(flip01.mul(0.14)).add(paleHairFringe.mul(0.04)), 0.03, 0.22);
-
-  // Subtle physical mineral shimmer scatter along flipped golden tergites & sunlit rims (zero neon!)
-  const shimmerPalette = mix(
-    mix(ochre.rInf, amber.rInf, float(0.36)),
-    mix(sulfur.rInf, calcite.rInf, float(0.28)),
-    clamp(aFresnel.mul(0.65).add(basalZone.mul(0.35)), 0.0, 1.0)
-  );
-  const flipScatter = shimmerPalette
-    .mul(flashDrive)
-    .mul(float(0.14).add(aFresnel.mul(0.24)).add(basalZone.mul(0.12)))
-    .mul(float(0.75).add(sutureStripe.mul(0.25)));
-  abdomenMat.emissiveNode = clamp(flipScatter, 0.0, 0.34);
-
-  // Subtle tergite micro-step normal perturbation (view space via transformNormalToView)
-  const aN0 = normalize(normalLocal);
-  const aRef = select(abs(aN0.y).lessThan(0.9), vec3(0.0, 1.0, 0.0), vec3(1.0, 0.0, 0.0));
-  const aTanA = normalize(cross(aRef, aN0));
-  const aTanB = normalize(cross(aN0, aTanA));
-  const tergiteSlope = cos(segPhase.mul(TWO_PI)).mul(0.14);
-  abdomenMat.normalNode = transformNormalToView(
-    normalize(aN0.add(aTanB.mul(tergiteSlope)).add(aTanA.mul(ridge01.sub(0.5).mul(0.06))))
-  );
+    needleNorthCinnabar.colorNode = clamp(col, 0.0, 1.0);
+    needleNorthCinnabar.roughnessNode = clamp(
+      float(0.24).add(fineGrain.sub(0.5).mul(0.06)),
+      0.16,
+      0.36
+    );
+    needleNorthCinnabar.normalNode = perturbNormalAniso(
+      nObj,
+      positionLocal,
+      vec3(80.0, 80.0, 80.0),
+      float(0.022)
+    );
+  }
 
   // ---------------------------------------------------------------------------
-  // 5. Paired Translucent Gossamer Forewings (InstancedMesh, DoubleSide)
+  // 5. Heat-Blued Prussian Steel (South Compass Needle Halves)
   // ---------------------------------------------------------------------------
-  const wingMat = new THREE.MeshStandardNodeMaterial({
-    transparent: true,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-    roughness: 0.14,
+  const needleSouthPrussian = new THREE.MeshStandardNodeMaterial({
+    metalness: 0.78,
+    roughness: 0.28,
+    envMapIntensity: 1.35,
+  });
+  {
+    const nObj = normalize(normalLocal);
+    // Longitudinal fine brushed steel grain along needle axis (X)
+    const steelBrush = mineralToothFbm(positionLocal.mul(vec3(18.0, 95.0, 95.0)), float(1.25));
+    const ridgeLift = smoothstep(float(0.004), float(0.014), positionLocal.y);
+
+    const kmPrussian = kubelkaMunkGlaze(
+      pPrussian.K,
+      pPrussian.S,
+      float(1.55).add(steelBrush.mul(0.35)),
+      lapisRgb.mul(0.85)
+    );
+    const bluedSteel = mix(kmPrussian.mul(1.18), prussianRgb.mul(1.38).add(boneRgb.mul(0.08)), ridgeLift.mul(0.30));
+
+    needleSouthPrussian.colorNode = clamp(bluedSteel.mul(float(0.92).add(steelBrush.mul(0.16))), 0.0, 1.0);
+    needleSouthPrussian.roughnessNode = clamp(
+      float(0.28).sub(ridgeLift.mul(0.06)).add(steelBrush.sub(0.5).mul(0.08)),
+      0.16,
+      0.40
+    );
+    needleSouthPrussian.normalNode = perturbNormalAniso(
+      nObj,
+      positionLocal,
+      vec3(22.0, 110.0, 110.0),
+      float(0.036)
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // 6. Cleaved Dark Magnetite Lodestone Tip (Stylus Business End)
+  // ---------------------------------------------------------------------------
+  const lodestone = new THREE.MeshStandardNodeMaterial({
+    metalness: 0.58,
+    roughness: 0.44,
+    envMapIntensity: 1.15,
+  });
+  {
+    const nObj = normalize(normalLocal);
+    const crystal = mineralToothFbm(positionLocal.mul(vec3(55.0, 55.0, 55.0)), float(1.3));
+    const baseDark = umberRgb.mul(0.20).add(prussianRgb.mul(0.14)).add(vec3(0.028, 0.030, 0.035));
+    const tipMask = float(1.0).sub(smoothstep(float(0.0), float(0.07), positionLocal.y));
+    const col = baseDark.mul(float(0.88).add(crystal.mul(0.24))).add(boneRgb.mul(tipMask.mul(uStylusEngaged).mul(0.06)));
+
+    lodestone.colorNode = clamp(col, 0.0, 1.0);
+    lodestone.roughnessNode = clamp(float(0.46).add(crystal.sub(0.5).mul(0.16)), 0.28, 0.64);
+    lodestone.normalNode = perturbNormalAniso(
+      nObj,
+      positionLocal,
+      vec3(65.0, 65.0, 65.0),
+      float(0.095)
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // 7. Stylus Polarity Indicator Collar (Cinnabar <-> Prussian Smooth Blend)
+  // ---------------------------------------------------------------------------
+  const polarityBand = new THREE.MeshStandardNodeMaterial({
+    metalness: 0.24,
+    roughness: 0.26,
+    envMapIntensity: 1.22,
+  });
+  {
+    const activeCol = mix(cinnabarRgb.mul(1.08), prussianRgb.mul(1.35), clamp(uPolarityBlend, 0.0, 1.0));
+    polarityBand.colorNode = clamp(activeCol, 0.0, 1.0);
+  }
+
+  // ---------------------------------------------------------------------------
+  // 8. Ebonized Charred-Oak Upper Stylus Grip Sleeve
+  // ---------------------------------------------------------------------------
+  const darkGrip = new THREE.MeshStandardNodeMaterial({
     metalness: 0.08,
+    roughness: 0.48,
+    envMapIntensity: 0.90,
   });
+  {
+    const nObj = normalize(normalLocal);
+    const woodGrain = mineralToothFbm(positionLocal.mul(vec3(42.0, 9.0, 42.0)), float(1.25));
+    const kmUmber = kubelkaMunkGlaze(pUmber.K, pUmber.S, float(1.25).add(woodGrain.mul(0.4)), umberRgb.mul(0.22));
+    darkGrip.colorNode = clamp(kmUmber.mul(0.44).mul(float(0.88).add(woodGrain.mul(0.24))), 0.0, 1.0);
+    darkGrip.roughnessNode = clamp(float(0.50).add(woodGrain.sub(0.5).mul(0.14)), 0.34, 0.66);
+    darkGrip.normalNode = perturbNormalAniso(
+      nObj,
+      positionLocal,
+      vec3(52.0, 12.0, 52.0),
+      float(0.075)
+    );
+  }
 
-  // aWingUv: [uSpan (0=root..1=tip), vChord (-1=leading costal..+1=trailing), sideSign, camber01]
-  const aWingUv = attribute('aWingUv', 'vec4');
-  const aBeeStateW = attribute('aBeeState', 'vec4'); // [flip01, flashDrive, wingSpread, seed]
-
-  const uSpan = aWingUv.x;
-  const vChord = aWingUv.y;
-  const wFlip = clamp(aBeeStateW.x, 0.0, 1.0);
-  const wFlash = clamp(aBeeStateW.y, 0.0, 1.0);
-  const wSpread = clamp(aBeeStateW.z, 0.0, 1.0);
-  const wSeed = aBeeStateW.w;
-
-  const wNView = normalize(normalView);
-  const wVDir = normalize(positionViewDirection);
-  const wNdotV = abs(dot(wNView, wVDir));
-  const wFresnel = pow(clamp(float(1.0).sub(wNdotV), 1e-4, 1.0), float(2.1));
-
-  // Anatomical hymenopteran wing venation:
-  // - Thickened dark amber-umber leading costal margin (vChord near -1)
-  // - Pterostigma dark spot mid-leading edge (u ~ 0.52, v ~ -0.78)
-  // - Fine longitudinal & cross radial veins across translucent membrane
-  const costalMargin = float(1.0).sub(smoothstep(float(-0.98), float(-0.62), vChord));
-  const stigmaU = uSpan.sub(0.52);
-  const stigmaV = vChord.add(0.76);
-  const pterostigma = exp(stigmaU.mul(stigmaU).mul(95.0).add(stigmaV.mul(stigmaV).mul(42.0)).negate());
-  const veinLong = pow(clamp(abs(sin(vChord.mul(7.5).add(uSpan.mul(4.2)))), 1e-4, 1.0), float(10.0));
-  const veinCross = pow(clamp(abs(sin(uSpan.mul(14.0).sub(vChord.mul(3.0)))), 1e-4, 1.0), float(14.0));
-  const veinMask = clamp(costalMargin.mul(0.85).add(pterostigma.mul(0.75)).add(veinLong.mul(0.28)).add(veinCross.mul(0.20)), 0.0, 1.0);
-
-  // Beer-Lambert smoked-amber chitin membrane transmittance
-  const wingThickness = float(0.18).add(veinMask.mul(0.45)).add(float(1.0).sub(uSpan).mul(0.12));
-  const smokedTransmit = beerLambertTransmittance(umber.extinction, wingThickness);
-  const membraneTint = mix(
-    mix(kaolin.rInf, ochre.rInf, float(0.38)),
-    mix(umber.rInf.mul(0.52), sienna.rInf.mul(0.58), float(0.35)),
-    clamp(veinMask.mul(0.78).add(float(1.0).sub(smokedTransmit.y).mul(0.22)), 0.0, 1.0)
-  );
-
-  // Subtle sunlit specular sheen on translucent wing film when flicking open in a defense wave
-  const wingSheenTint = mix(
-    calcite.rInf,
-    mix(ochre.rInf, amber.rInf, float(0.45)),
-    clamp(float(0.35).add(wSeed.mul(0.25)).add(uSpan.mul(0.25)), 0.0, 1.0)
-  );
-  const wingGlint = clamp(
-    wFresnel.mul(0.55).add(wSpread.mul(0.55)).add(wFlash.mul(0.45)),
-    0.0,
-    1.25
-  );
-
-  wingMat.colorNode = mix(membraneTint, wingSheenTint, clamp(wSpread.mul(0.45).add(wFresnel.mul(0.35)), 0.0, 0.85));
-  wingMat.emissiveNode = clamp(
-    wingSheenTint.mul(wingGlint).mul(float(0.06).add(wSpread.mul(0.26)).add(wFlip.mul(0.14))),
-    0.0,
-    0.42
-  );
-  wingMat.roughnessNode = clamp(float(0.18).add(veinMask.mul(0.26)).sub(wSpread.mul(0.06)), 0.08, 0.48);
-
-  // Softly feathered wingtip & trailing edge so wings read as delicate gossamer rather than hard polygons
-  const tipFade = float(1.0).sub(smoothstep(float(0.86), float(1.0), uSpan));
-  const trailFade = float(1.0).sub(smoothstep(float(0.78), float(1.0), vChord));
-  const baseAlpha = float(0.20)
-    .add(veinMask.mul(0.34))
-    .add(wFresnel.mul(0.28))
-    .add(wSpread.mul(0.18));
-  wingMat.opacityNode = clamp(baseAlpha.mul(tipFade).mul(trailFade), 0.0, 0.86);
+  // Keep unused pigment pack references clean (boneCalcite used in KM backing)
+  void pBone;
 
   return {
-    branchMat,
-    innerCurtainMat,
-    thoraxMat,
-    abdomenMat,
-    wingMat,
+    limestone,
+    darkBronze,
+    satinBrass,
+    needleNorthCinnabar,
+    needleSouthPrussian,
+    lodestone,
+    polarityBand,
+    darkGrip,
+    uPolarityBlend,
+    uStylusEngaged,
+    uStylusLocalPos,
     dispose: () => {
-      branchMat.dispose();
-      innerCurtainMat.dispose();
-      thoraxMat.dispose();
-      abdomenMat.dispose();
-      wingMat.dispose();
+      limestone.dispose();
+      darkBronze.dispose();
+      satinBrass.dispose();
+      needleNorthCinnabar.dispose();
+      needleSouthPrussian.dispose();
+      lodestone.dispose();
+      polarityBand.dispose();
+      darkGrip.dispose();
     },
   };
 }

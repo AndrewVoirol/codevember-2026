@@ -343,9 +343,9 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
     'complete',
     'tsl',
     'yellowOchre',
-    'realgarAmber',
-    'Suspended gnarled dark-walnut and charred-oak limb draped with a curved open-air giant honeybee (Apis dorsata) teardrop bivouac of 2,643 shingled articulated insects—each with sculpted head, velvety thorax, hinged 5-tergite banded abdomen, and veined translucent gossamer forewings—coupled on a 3D surface k-NN excitable-media graph driving crisp 65°–75° abdomen-flip defense waves, head-on wave annihilation, rotating spirals, and physical pendulum recoil',
-    'Hover or sweep close to the hanging bivouac to ignite traveling golden-ochre defense waves and spiral eddies; click directly on the cluster for a radial shock-shimmer with pendulum recoil; drag across the curtain to launch colliding fronts; drag empty space to orbit 360°; double-click or press Space to quiet active waves or trigger a twin opposing-pole collision wave'
+    'cinnabarVermilion',
+    'Suspended chamfered Bone-Calcite limestone and oil-rubbed bronze hexagonal honeycomb apparatus divided by beveled satin-brass walls into 91 chambers—each housing a jewel-pivoted faceted Cinnabar-Vermilion and Prussian-blued steel magnetic compass needle interacting via exact all-pairs 1/r³ dipole-dipole coupling to form self-organizing magnetic flux vortices, murmuration spin waves, and domain-wall avalanches beneath a hovering brass-and-magnetite lodestone stylus',
+    'Hover over the honeycomb to glide the brass lodestone stylus and launch cascading magnetic spin waves; press and drag across cells to comb flux rivers or wind macroscopic vortices; quick-click a cell for a swirling radial shock pulse; click the outer bronze bezel (or press F) to flip stylus polarity; double-click or press Space for a thermal scatter that lets all 91 dipoles self-organize freshly; drag empty space to orbit 360°'
   ),
   createDay(
     29,

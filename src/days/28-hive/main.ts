@@ -1,708 +1,598 @@
 import * as THREE from 'three/webgpu';
 import { SpecimenStage } from '../../core/stage/SpecimenStage';
 import {
-  CURTAIN_PIVOT_Y,
-  HiveShimmerSimulation,
-  type HiveTelemetry,
-} from './shimmerGraph';
+  MagneticDipoleLattice,
+  NEEDLE_PIVOT_Y,
+  buildHexLatticeLayout,
+} from './magneticLattice';
 import {
-  buildBeeAbdomenGeometry,
-  buildBeeThoraxGeometry,
-  buildBeeWingsGeometry,
-  buildBranchGeometry,
-  buildCurtainShellGeometry,
+  BEZEL_BOLT_RADIUS,
+  BEZEL_INNER_CIRCUM_R,
+  BEZEL_TOP_Y,
+  SLAB_OUTER_CIRCUM_R,
+  buildBezelBoltGeometry,
+  buildBrassInnerTrimGeometry,
+  buildBronzeBezelGeometry,
+  buildHoneycombMatrixGeometry,
+  buildLimestoneSlabGeometry,
+  buildLodestoneStylusGeometries,
+  buildNeedleHalfGeometry,
+  buildPivotPinGeometry,
+  buildUndersideMedallionGeometry,
 } from './hiveGeometry';
 import {
   createHiveMaterials,
   createHiveStudioEnvironment,
 } from './hiveMaterials';
 
-/**
- * Day 28 — Hive: Shimmering Defense-Wave Cluster (*Apis dorsata*)
- *
- * Sculptural natural-history specimen suspended in the Chalky Slate (#212529) studio:
- * - Gnarled dark-walnut / charred-oak limb with broken side forks & bark micro-relief.
- * - ~2,640 shingled, articulated giant honeybees wrapping both sides and bottom crest
- *   of the hanging open-air teardrop bivouac (sculpted head+thorax, 5-tergite hinged
- *   abdomen, and paired veined translucent gossamer forewings).
- * - True 3D surface k-NN excitable-media defense-wave solver (Resting -> Firing ->
- *   Refractory -> Resting) driving crisp 65-75 deg abdomen flips, wing flicks,
- *   clean head-on wave annihilation, spiral eddies, and physical pendulum recoil.
- *
- * Tactile Gestures:
- * - Hover / sweep over or close to the cluster: triggers fast traveling golden-ochre waves.
- * - Click directly on the cluster: fires a high-amplitude synchronized radial shock-shimmer.
- * - Drag across the cluster: sweeps continuous predator triggers & colliding spiral fronts.
- * - Drag empty space: smooth 360-deg 3D orbit around the branch and both faces of the curtain.
- * - Double-click or Space: quiets active waves to hushed rest (or launches twin opposing-pole
- *   annihilation waves when already quiet).
- */
-
 declare global {
   interface Window {
-    __DAY28__?: {
-      getState: () => HiveTelemetry;
+    __HIVE__?: {
+      getState: () => Record<string, unknown>;
+      triggerPulse: (x?: number, z?: number) => void;
+      triggerThermalScatter: (intensity?: number) => void;
+      flipPolarity: () => 1 | -1;
+      seedTwinVortex: () => void;
+      seedMacroVortex: (handedness?: 1 | -1) => void;
+      setCameraPreset: (preset: 'hero' | 'top' | 'macro' | 'underside' | 'rear') => void;
     };
   }
 }
 
-// Pre-allocated scratch math objects (strictly zero allocations inside onTick / events)
+// Pre-allocated zero-GC scratch objects
 const _raycaster = new THREE.Raycaster();
 const _ndc = new THREE.Vector2();
-const _localHit = new THREE.Vector3();
-const _lastTriggerLocal = new THREE.Vector3(1e6, 1e6, 1e6);
-const _downHitLocal = new THREE.Vector3();
+const _deckPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -NEEDLE_PIVOT_Y);
+const _hitPoint = new THREE.Vector3();
+const _dummyMat = new THREE.Matrix4();
+const _dummyPos = new THREE.Vector3();
+const _dummyQuat = new THREE.Quaternion();
+const _dummyEuler = new THREE.Euler(0, 0, 0, 'YXZ');
+const _dummyScale = new THREE.Vector3(1, 1, 1);
 
-/**
- * Writes an orthonormal (T, U, N) frame rotated around local +X (T) by `-theta`
- * (so local -Y abdomen tips flip OUTWARD along +N and UPWARD toward +U)
- * directly into a Three.js InstancedMesh column-major Matrix4 Float32Array.
- */
-function writeHingedInstanceMatrix(
-  arr: Float32Array,
-  offset: number,
-  px: number,
-  py: number,
-  pz: number,
-  tx: number,
-  ty: number,
-  tz: number,
-  ux: number,
-  uy: number,
-  uz: number,
-  nx: number,
-  ny: number,
-  nz: number,
-  thetaRad: number,
-  scaleX: number,
-  scaleY: number,
-  scaleZ: number
-): void {
-  const c = Math.cos(thetaRad);
-  const s = Math.sin(thetaRad);
+const IDLE_STYLUS_X = 0.78;
+const IDLE_STYLUS_Z = -0.68;
+const IDLE_STYLUS_Y = 0.21;
 
-  // X' = T
-  // Y' = c * U - s * N
-  // Z' = s * U + c * N
-  const yx = c * ux - s * nx;
-  const yy = c * uy - s * ny;
-  const yz = c * uz - s * nz;
-
-  const zx = s * ux + c * nx;
-  const zy = s * uy + c * ny;
-  const zz = s * uz + c * nz;
-
-  arr[offset] = tx * scaleX;
-  arr[offset + 1] = ty * scaleX;
-  arr[offset + 2] = tz * scaleX;
-  arr[offset + 3] = 0;
-
-  arr[offset + 4] = yx * scaleY;
-  arr[offset + 5] = yy * scaleY;
-  arr[offset + 6] = yz * scaleY;
-  arr[offset + 7] = 0;
-
-  arr[offset + 8] = zx * scaleZ;
-  arr[offset + 9] = zy * scaleZ;
-  arr[offset + 10] = zz * scaleZ;
-  arr[offset + 11] = 0;
-
-  arr[offset + 12] = px;
-  arr[offset + 13] = py;
-  arr[offset + 14] = pz;
-  arr[offset + 15] = 1;
-}
-
-export async function bootDay28Hive(): Promise<SpecimenStage> {
+async function mountDay28Hive(): Promise<void> {
   const stage = await SpecimenStage.create({
     day: 28,
-    cameraPosition: [0.0, 0.14, 4.78],
-    fov: 35,
+    cameraPosition: [0.0, 3.68, 3.92],
+    fov: 34,
     enableOrbit: true,
     enableShadows: true,
   });
 
-  stage.controls.target.set(0.0, 0.10, 0.0);
-  stage.controls.minDistance = 1.55;
+  stage.controls.target.set(0, -0.04, 0.02);
+  stage.controls.minDistance = 1.65;
   stage.controls.maxDistance = 8.4;
-  stage.controls.minPolarAngle = 0.22;
-  stage.controls.maxPolarAngle = Math.PI * 0.85;
+  stage.controls.minPolarAngle = 0.08;
+  stage.controls.maxPolarAngle = Math.PI - 0.12;
   stage.controls.update();
 
-  // Studio softbox PMREM IBL so flipped ochre tergites, gossamer wings & dark-walnut bark read crisply
+  // Studio softbox PMREM environment for satin brass, dark bronze & blued steel
   const studioEnv = createHiveStudioEnvironment(stage.renderer);
   stage.scene.environment = studioEnv.texture;
   stage.scene.environmentIntensity = 1.18;
 
-  // Calibrate SpecimenStage studio lights & tight 2048x2048 PCF shadow frustum around the suspended specimen
-  let dirIdx = 0;
+  // Harmonize directional studio lights & upgrade shadow map to 2048x2048 tightly fitted to slab
+  let dirLightIdx = 0;
   for (const child of stage.scene.children) {
     if (child instanceof THREE.DirectionalLight) {
-      if (dirIdx === 0) {
-        // Warm overhead-front-left calcite softbox key light
-        child.position.set(-2.7, 4.7, 3.8);
-        child.color.setHex(0xf7efe0);
-        child.intensity = 2.18;
+      if (dirLightIdx === 0) {
+        child.position.set(-2.6, 5.4, 3.1);
+        child.intensity = 1.48;
         child.shadow.mapSize.set(2048, 2048);
-        const d = 2.15;
+        const d = 2.05;
         child.shadow.camera.left = -d;
         child.shadow.camera.right = d;
         child.shadow.camera.top = d;
         child.shadow.camera.bottom = -d;
         child.shadow.camera.near = 1.0;
-        child.shadow.camera.far = 12.5;
-        child.shadow.bias = -0.00028;
-        child.shadow.normalBias = 0.012;
+        child.shadow.camera.far = 12.0;
+        child.shadow.bias = -0.00025;
+        child.shadow.normalBias = 0.011;
         child.shadow.camera.updateProjectionMatrix();
-      } else if (dirIdx === 1) {
-        // Gentle opposing fill light sculpting the curved teardrop right flank
-        child.position.set(3.6, 0.9, 2.8);
-        child.color.setHex(0xd8cfc2);
-        child.intensity = 0.72;
-      } else if (dirIdx === 2) {
-        // Crisp grazing back-top calcite rim light separating branch & wing silhouettes from #212529
-        child.position.set(-1.3, 3.6, -4.1);
-        child.color.setHex(0xf3efe6);
-        child.intensity = 1.58;
+      } else if (dirLightIdx === 1) {
+        child.position.set(3.8, 2.2, 2.4);
+        child.intensity = 0.42;
+      } else if (dirLightIdx === 2) {
+        child.position.set(0.4, 3.6, -4.0);
+        child.intensity = 1.22;
       }
-      dirIdx++;
+      dirLightIdx++;
     } else if (child instanceof THREE.HemisphereLight) {
-      child.intensity = 0.48;
+      child.intensity = 0.44;
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // 1. Excitable-Media Simulation, Geometries & TSL Mineral Materials
-  // ---------------------------------------------------------------------------
-  const sim = new HiveShimmerSimulation();
-  const graph = sim.graph;
-  const unitCount = graph.unitCount;
-
+  // Build physics lattice, geometries & materials
+  const layout = buildHexLatticeLayout();
+  const lattice = new MagneticDipoleLattice(layout, 202628);
   const materials = createHiveMaterials();
 
-  const branchGeo = buildBranchGeometry();
-  const innerCurtainGeo = buildCurtainShellGeometry(0.945, 34, 52);
-  const raycastHullGeo = buildCurtainShellGeometry(1.075, 24, 36);
-  const thoraxGeo = buildBeeThoraxGeometry();
-  const abdomenGeo = buildBeeAbdomenGeometry();
-  const wingsGeo = buildBeeWingsGeometry();
+  // Root instrument assembly
+  const instrumentGroup = new THREE.Group();
+  instrumentGroup.name = 'MagneticHoneycombInstrument';
+  stage.specimenGroup.add(instrumentGroup);
 
-  // Shared per-instance GPU attribute: vec4(flip01, flashDrive, wingSpread, seed)
-  const beeStateArr = new Float32Array(unitCount * 4);
-  for (let i = 0; i < unitCount; i++) {
-    beeStateArr[i * 4 + 3] = graph.seeds[i];
+  // 1. Chamfered Honed Bone-Calcite Limestone Base Slab
+  const limestoneGeo = buildLimestoneSlabGeometry();
+  const limestoneMesh = new THREE.Mesh(limestoneGeo, materials.limestone);
+  limestoneMesh.castShadow = true;
+  limestoneMesh.receiveShadow = true;
+  instrumentGroup.add(limestoneMesh);
+
+  // 2. Darkened-Bronze Bolted Bezel Frame
+  const bezelGeo = buildBronzeBezelGeometry();
+  const bezelMesh = new THREE.Mesh(bezelGeo, materials.darkBronze);
+  bezelMesh.castShadow = true;
+  bezelMesh.receiveShadow = true;
+  instrumentGroup.add(bezelMesh);
+
+  // 3. Satin-Brass Inner Trim Pinstripe
+  const innerTrimGeo = buildBrassInnerTrimGeometry();
+  const innerTrimMesh = new THREE.Mesh(innerTrimGeo, materials.satinBrass);
+  innerTrimMesh.castShadow = true;
+  innerTrimMesh.receiveShadow = true;
+  instrumentGroup.add(innerTrimMesh);
+
+  // 4. Six Machined Satin-Brass Bezel Corner Rivet Bolts (Instanced)
+  const boltGeo = buildBezelBoltGeometry();
+  const boltsMesh = new THREE.InstancedMesh(boltGeo, materials.satinBrass, 6);
+  boltsMesh.castShadow = true;
+  boltsMesh.receiveShadow = true;
+  for (let k = 0; k < 6; k++) {
+    const ang = -k * (Math.PI / 3);
+    _dummyPos.set(
+      Math.cos(ang) * BEZEL_BOLT_RADIUS,
+      BEZEL_TOP_Y - 0.002,
+      Math.sin(ang) * BEZEL_BOLT_RADIUS
+    );
+    _dummyQuat.identity();
+    _dummyScale.set(1, 1, 1);
+    _dummyMat.compose(_dummyPos, _dummyQuat, _dummyScale);
+    boltsMesh.setMatrixAt(k, _dummyMat);
   }
-  const beeStateAttr = new THREE.InstancedBufferAttribute(beeStateArr, 4);
-  beeStateAttr.setUsage(THREE.DynamicDrawUsage);
+  boltsMesh.instanceMatrix.needsUpdate = true;
+  instrumentGroup.add(boltsMesh);
 
-  thoraxGeo.setAttribute('aBeeState', beeStateAttr);
-  abdomenGeo.setAttribute('aBeeState', beeStateAttr);
-  wingsGeo.setAttribute('aBeeState', beeStateAttr);
+  // 5. Watertight 91-Cell Satin-Brass Honeycomb Matrix
+  const honeycombGeo = buildHoneycombMatrixGeometry(layout);
+  const honeycombMesh = new THREE.Mesh(honeycombGeo, materials.satinBrass);
+  honeycombMesh.castShadow = true;
+  honeycombMesh.receiveShadow = true;
+  instrumentGroup.add(honeycombMesh);
 
-  // ---------------------------------------------------------------------------
-  // 2. Suspended Specimen Hierarchy (Branch + Articulated Hanging Bivouac)
-  // ---------------------------------------------------------------------------
-  const branchGroup = new THREE.Group();
-  branchGroup.name = 'GnarledWalnutBranchGroup';
-  stage.specimenGroup.add(branchGroup);
-
-  const branchMesh = new THREE.Mesh(branchGeo, materials.branchMat);
-  branchMesh.castShadow = true;
-  branchMesh.receiveShadow = true;
-  branchMesh.name = 'GnarledWalnutBranch';
-  branchGroup.add(branchMesh);
-
-  const curtainPivotGroup = new THREE.Group();
-  curtainPivotGroup.name = 'ApisDorsataCurtainPivot';
-  curtainPivotGroup.position.set(0, CURTAIN_PIVOT_Y, 0);
-  stage.specimenGroup.add(curtainPivotGroup);
-
-  // Dark recessed organic brood core beneath the shingled bee layer
-  const innerCurtainMesh = new THREE.Mesh(innerCurtainGeo, materials.innerCurtainMat);
-  innerCurtainMesh.castShadow = true;
-  innerCurtainMesh.receiveShadow = true;
-  innerCurtainMesh.name = 'InnerBroodCore';
-  curtainPivotGroup.add(innerCurtainMesh);
-
-  // Invisible smooth envelope for responsive hover/click predator-approach raycasting
-  const raycastHullMat = new THREE.MeshBasicMaterial({ visible: false });
-  const raycastHullMesh = new THREE.Mesh(raycastHullGeo, raycastHullMat);
-  raycastHullMesh.name = 'PredatorRaycastHull';
-  curtainPivotGroup.add(raycastHullMesh);
-
-  // Layer A: Static anchored fuzzy Head + Mesothorax (~2,640 instances, uploaded once)
-  const thoraxMesh = new THREE.InstancedMesh(thoraxGeo, materials.thoraxMat, unitCount);
-  thoraxMesh.castShadow = true;
-  thoraxMesh.receiveShadow = true;
-  thoraxMesh.frustumCulled = false;
-  thoraxMesh.name = 'BeeThoraces';
-  curtainPivotGroup.add(thoraxMesh);
-
-  // Layer B: Hinged 5-tergite Segmented Abdomens (~2,640 instances, snapped outward 65-75 deg on wave!)
-  const abdomenMesh = new THREE.InstancedMesh(abdomenGeo, materials.abdomenMat, unitCount);
-  abdomenMesh.castShadow = true;
-  abdomenMesh.receiveShadow = true;
-  abdomenMesh.frustumCulled = false;
-  abdomenMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-  abdomenMesh.name = 'BeeAbdomens';
-  curtainPivotGroup.add(abdomenMesh);
-
-  // Layer C: Paired Translucent Veined Gossamer Forewings (~2,640 instances, sunlit flicker on flip!)
-  const wingMesh = new THREE.InstancedMesh(wingsGeo, materials.wingMat, unitCount);
-  wingMesh.castShadow = false;
-  wingMesh.receiveShadow = false;
-  wingMesh.frustumCulled = false;
-  wingMesh.renderOrder = 2;
-  wingMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-  wingMesh.name = 'BeeGossamerWings';
-  curtainPivotGroup.add(wingMesh);
-
-  // Populate static thorax matrices & resting abdomen/wing poses once at init
-  const thoraxArr = thoraxMesh.instanceMatrix.array as Float32Array;
-  const abdomenArr = abdomenMesh.instanceMatrix.array as Float32Array;
-  const wingArr = wingMesh.instanceMatrix.array as Float32Array;
-
-  const pos = graph.positions;
-  const norms = graph.normals;
-  const ups = graph.upDirs;
-  const tangs = graph.tangents;
-  const scales = graph.scales;
-  const restTilts = graph.restTilts;
-  const seeds = graph.seeds;
-
-  for (let i = 0; i < unitCount; i++) {
-    const i3 = i * 3;
-    const o = i * 16;
-    const px = pos[i3];
-    const py = pos[i3 + 1];
-    const pz = pos[i3 + 2];
-    const tx = tangs[i3];
-    const ty = tangs[i3 + 1];
-    const tz = tangs[i3 + 2];
-    const ux = ups[i3];
-    const uy = ups[i3 + 1];
-    const uz = ups[i3 + 2];
-    const nx = norms[i3];
-    const ny = norms[i3 + 1];
-    const nz = norms[i3 + 2];
-    const s = scales[i];
-
-    // Anchored thorax sits flush on the curtain with minimal natural posture tilt
-    writeHingedInstanceMatrix(
-      thoraxArr,
-      o,
-      px,
-      py,
-      pz,
-      tx,
-      ty,
-      tz,
-      ux,
-      uy,
-      uz,
-      nx,
-      ny,
-      nz,
-      0.04,
-      s,
-      s,
-      s
-    );
-    writeHingedInstanceMatrix(
-      abdomenArr,
-      o,
-      px,
-      py,
-      pz,
-      tx,
-      ty,
-      tz,
-      ux,
-      uy,
-      uz,
-      nx,
-      ny,
-      nz,
-      restTilts[i],
-      s,
-      s,
-      s
-    );
-    const wpx = px + (0.015 * ux + 0.017 * nx) * s;
-    const wpy = py + (0.015 * uy + 0.017 * ny) * s;
-    const wpz = pz + (0.015 * uz + 0.017 * nz) * s;
-    writeHingedInstanceMatrix(
-      wingArr,
-      o,
-      wpx,
-      wpy,
-      wpz,
-      tx,
-      ty,
-      tz,
-      ux,
-      uy,
-      uz,
-      nx,
-      ny,
-      nz,
-      restTilts[i] * 0.85 + 0.05,
-      s,
-      s,
-      s
-    );
+  // 6. 91 Turned Brass Pivot Pins & Crowning Jewel Caps (Static Instanced)
+  const pivotGeo = buildPivotPinGeometry();
+  const pivotsMesh = new THREE.InstancedMesh(pivotGeo, materials.satinBrass, layout.cellCount);
+  pivotsMesh.castShadow = true;
+  pivotsMesh.receiveShadow = true;
+  for (let i = 0; i < layout.cellCount; i++) {
+    const cell = layout.cells[i];
+    _dummyPos.set(cell.x, 0, cell.z);
+    _dummyQuat.identity();
+    _dummyScale.set(1, 1, 1);
+    _dummyMat.compose(_dummyPos, _dummyQuat, _dummyScale);
+    pivotsMesh.setMatrixAt(i, _dummyMat);
   }
-  thoraxMesh.instanceMatrix.needsUpdate = true;
-  abdomenMesh.instanceMatrix.needsUpdate = true;
-  wingMesh.instanceMatrix.needsUpdate = true;
+  pivotsMesh.instanceMatrix.needsUpdate = true;
+  instrumentGroup.add(pivotsMesh);
+
+  // 7. 91 Faceted Magnetic Compass Needles (Synchronized North Cinnabar + South Prussian InstancedMeshes)
+  const northGeo = buildNeedleHalfGeometry(1);
+  const southGeo = buildNeedleHalfGeometry(-1);
+  const northMesh = new THREE.InstancedMesh(
+    northGeo,
+    materials.needleNorthCinnabar,
+    layout.cellCount
+  );
+  const southMesh = new THREE.InstancedMesh(
+    southGeo,
+    materials.needleSouthPrussian,
+    layout.cellCount
+  );
+  northMesh.castShadow = true;
+  northMesh.receiveShadow = true;
+  southMesh.castShadow = true;
+  southMesh.receiveShadow = true;
+  instrumentGroup.add(northMesh);
+  instrumentGroup.add(southMesh);
+
+  // 8. Underside Machined Dark-Bronze Medallion & Brass Compass Ring
+  const undersideGeos = buildUndersideMedallionGeometry();
+  const undersidePlateMesh = new THREE.Mesh(undersideGeos.bronzePlate, materials.darkBronze);
+  const undersideRingMesh = new THREE.Mesh(undersideGeos.brassRing, materials.satinBrass);
+  undersidePlateMesh.receiveShadow = true;
+  undersideRingMesh.receiveShadow = true;
+  instrumentGroup.add(undersidePlateMesh);
+  instrumentGroup.add(undersideRingMesh);
+
+  // 9. Hovering Turned Satin-Brass & Dark Magnetite Lodestone Stylus Wand
+  const stylusGeos = buildLodestoneStylusGeometries();
+  const stylusGroup = new THREE.Group();
+  stylusGroup.name = 'LodestoneStylusWand';
+  const tipMesh = new THREE.Mesh(stylusGeos.lodestoneTip, materials.lodestone);
+  const bandMesh = new THREE.Mesh(stylusGeos.polarityBand, materials.polarityBand);
+  const bodyMesh = new THREE.Mesh(stylusGeos.brassBody, materials.satinBrass);
+  const gripMesh = new THREE.Mesh(stylusGeos.darkGrip, materials.darkGrip);
+  const pommelMesh = new THREE.Mesh(stylusGeos.brassPommel, materials.satinBrass);
+  for (const m of [tipMesh, bandMesh, bodyMesh, gripMesh, pommelMesh]) {
+    m.castShadow = true;
+    m.receiveShadow = true;
+    stylusGroup.add(m);
+  }
+  stylusGroup.position.set(IDLE_STYLUS_X, IDLE_STYLUS_Y, IDLE_STYLUS_Z);
+  stylusGroup.rotation.order = 'YXZ';
+  stylusGroup.rotation.set(-0.34, 0.25, -0.68);
+  instrumentGroup.add(stylusGroup);
+
+  // Helper: sync all 91 compass needle instance matrices from lattice state (zero allocations)
+  const syncNeedles = () => {
+    const cells = layout.cells;
+    const angles = lattice.angles;
+    const wp = lattice.wobblePitch;
+    const wr = lattice.wobbleRoll;
+    _dummyScale.set(1, 1, 1);
+
+    for (let i = 0; i < layout.cellCount; i++) {
+      const c = cells[i];
+      _dummyPos.set(c.x, NEEDLE_PIVOT_Y, c.z);
+      _dummyEuler.set(wr[i], angles[i], wp[i], 'YXZ');
+      _dummyQuat.setFromEuler(_dummyEuler);
+      _dummyMat.compose(_dummyPos, _dummyQuat, _dummyScale);
+      northMesh.setMatrixAt(i, _dummyMat);
+      southMesh.setMatrixAt(i, _dummyMat);
+    }
+    northMesh.instanceMatrix.needsUpdate = true;
+    southMesh.instanceMatrix.needsUpdate = true;
+  };
+  syncNeedles();
 
   // ---------------------------------------------------------------------------
-  // 3. Tactile Predator-Approach Hover, Click Shock-Shimmer & Orbit Routing
+  // Interactive Pointer, Lodestone Drag & Orbit Ergonomics
   // ---------------------------------------------------------------------------
   const canvas = stage.shell.canvas;
-  let isDraggingCluster = false;
+  const bootTimeMs = performance.now();
+  let hoverArmed = false;
+  let lastRawClientX = -1;
+  let lastRawClientY = -1;
+  let accumulatedMovePx = 0;
+
+  let pointerInsideHoneycomb = false;
+  let pointerDraggingLattice = false;
+  let pointerDownOnRim = false;
   let pointerDownX = 0;
   let pointerDownY = 0;
   let pointerDownTimeMs = 0;
-  let downHitTarget: 'none' | 'cluster' | 'branch' = 'none';
-  let hasUserInteracted = false;
-  let hasTriggeredBootWave = false;
-  let isHoveringCluster = false;
-  let hoverDwellSec = 0;
-  let lastMoveClientX = -1e6;
-  let lastMoveClientY = -1e6;
+  let lastClickTimeMs = 0;
 
-  function updateNdc(clientX: number, clientY: number): void {
-    const rect = canvas.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) return;
-    _ndc.x = ((clientX - rect.left) / rect.width) * 2 - 1;
-    _ndc.y = -((clientY - rect.top) / rect.height) * 2 + 1;
-  }
+  // Smooth stylus kinematics
+  let stylusTargetX = IDLE_STYLUS_X;
+  let stylusTargetZ = IDLE_STYLUS_Z;
+  let stylusTargetY = IDLE_STYLUS_Y;
+  let stylusCurX = IDLE_STYLUS_X;
+  let stylusCurZ = IDLE_STYLUS_Z;
+  let stylusCurY = IDLE_STYLUS_Y;
+  let stylusVelX = 0;
+  let stylusVelZ = 0;
+  let pulseDip = 0;
+  let polarityFlipSpin = 0;
+  let polarityBlendCur = 0;
+  let engagedCur = 0;
 
-  function raycastTarget(clientX: number, clientY: number): 'none' | 'cluster' | 'branch' {
-    updateNdc(clientX, clientY);
-    _raycaster.setFromCamera(_ndc, stage.camera);
-
-    curtainPivotGroup.updateMatrixWorld();
-    const clusterHits = _raycaster.intersectObject(raycastHullMesh, false);
-    if (clusterHits.length > 0) {
-      _localHit.copy(clusterHits[0].point);
-      curtainPivotGroup.worldToLocal(_localHit);
-      return 'cluster';
-    }
-
-    const branchHits = _raycaster.intersectObject(branchMesh, false);
-    if (branchHits.length > 0) {
-      _localHit.copy(branchHits[0].point);
-      return 'branch';
-    }
-
-    return 'none';
-  }
-
-  const onPointerDown = (ev: PointerEvent) => {
-    if (ev.button !== 0) return;
-    hasUserInteracted = true;
-    pointerDownX = ev.clientX;
-    pointerDownY = ev.clientY;
-    pointerDownTimeMs = performance.now();
-
-    const hit = raycastTarget(ev.clientX, ev.clientY);
-    downHitTarget = hit;
-
-    if (hit === 'cluster') {
-      isDraggingCluster = true;
-      _downHitLocal.copy(_localHit);
-      _lastTriggerLocal.copy(_localHit);
-      stage.controls.enabled = false;
-      canvas.style.cursor = 'crosshair';
-      // Immediate crisp ignition right where the user touches the living curtain
-      sim.exciteAtPoint(_localHit.x, _localHit.y, _localHit.z, 0.165, 1.18, 0.14);
-      try {
-        canvas.setPointerCapture(ev.pointerId);
-      } catch {
-        // ignore
-      }
-    } else if (hit === 'branch') {
-      stage.controls.enabled = false;
-      canvas.style.cursor = 'pointer';
-    } else {
-      isDraggingCluster = false;
-      stage.controls.enabled = true;
-      canvas.style.cursor = 'grabbing';
-    }
+  // Compute flat-top hexagon inradius test at local XZ
+  const isInsideFlatTopHex = (x: number, z: number, circumR: number): boolean => {
+    const inR = circumR * (Math.sqrt(3) * 0.5);
+    const ax = Math.abs(x);
+    const az = Math.abs(z);
+    if (az > inR) return false;
+    // Flat-top hex 6-plane boundary check
+    return az <= inR && ax * 0.8660254 + az * 0.5 <= inR;
   };
 
-  const onPointerMove = (ev: PointerEvent) => {
-    const movePx = Math.hypot(ev.clientX - lastMoveClientX, ev.clientY - lastMoveClientY);
-    lastMoveClientX = ev.clientX;
-    lastMoveClientY = ev.clientY;
+  const raycastDeckPlane = (clientX: number, clientY: number): boolean => {
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return false;
+    _ndc.set(
+      ((clientX - rect.left) / rect.width) * 2 - 1,
+      -(((clientY - rect.top) / rect.height) * 2 - 1)
+    );
+    _raycaster.setFromCamera(_ndc, stage.camera);
+    return _raycaster.ray.intersectPlane(_deckPlane, _hitPoint) !== null;
+  };
 
-    // If orbiting empty space, let OrbitControls run smoothly without triggering waves
-    if (ev.buttons !== 0 && !isDraggingCluster) {
+  const onPointerMove = (e: PointerEvent) => {
+    // Boot-settle cursor guard: prevent stationary parked OS cursors or macOS activation bursts
+    // from hijacking the opening twin-vortex equilibrium before intentional travel
+    if (!hoverArmed) {
+      if (lastRawClientX >= 0) {
+        accumulatedMovePx += Math.hypot(e.clientX - lastRawClientX, e.clientY - lastRawClientY);
+      }
+      lastRawClientX = e.clientX;
+      lastRawClientY = e.clientY;
+      if (performance.now() - bootTimeMs >= 320 && accumulatedMovePx >= 8) {
+        hoverArmed = true;
+      } else if (!pointerDraggingLattice) {
+        return;
+      }
+    }
+
+    if (!raycastDeckPlane(e.clientX, e.clientY)) {
+      if (!pointerDraggingLattice) {
+        pointerInsideHoneycomb = false;
+        canvas.style.cursor = 'grab';
+      }
       return;
     }
 
-    const hit = raycastTarget(ev.clientX, ev.clientY);
+    const inComb = isInsideFlatTopHex(_hitPoint.x, _hitPoint.z, BEZEL_INNER_CIRCUM_R - 0.02);
+    const inSlab = isInsideFlatTopHex(_hitPoint.x, _hitPoint.z, SLAB_OUTER_CIRCUM_R);
 
-    if (hit === 'cluster') {
-      hasUserInteracted = true;
+    if (pointerDraggingLattice) {
+      // Clamp stylus smoothly inside the bronze bezel perimeter while sculpting
+      const r = Math.hypot(_hitPoint.x, _hitPoint.z);
+      const maxR = BEZEL_INNER_CIRCUM_R * 0.84;
+      const clampScale = r > maxR ? maxR / r : 1.0;
+      stylusTargetX = _hitPoint.x * clampScale;
+      stylusTargetZ = _hitPoint.z * clampScale;
+      stylusTargetY = 0.135;
+      pointerInsideHoneycomb = true;
       canvas.style.cursor = 'crosshair';
-      const enteredFresh = !isHoveringCluster;
-      isHoveringCluster = true;
-
-      const distMoved = _localHit.distanceTo(_lastTriggerLocal);
-      if (enteredFresh || distMoved >= 0.055 || (isDraggingCluster && distMoved >= 0.04)) {
-        const radius = isDraggingCluster ? 0.165 : 0.145;
-        const boost = isDraggingCluster ? 1.22 : 1.05;
-        const recoil = isDraggingCluster ? 0.12 : 0.08;
-        sim.exciteAtPoint(_localHit.x, _localHit.y, _localHit.z, radius, boost, recoil);
-        _lastTriggerLocal.copy(_localHit);
-        hoverDwellSec = 0;
-      } else if (movePx > 2.5) {
-        hoverDwellSec += 0.06;
-      }
+    } else if (inComb) {
+      stylusTargetX = _hitPoint.x;
+      stylusTargetZ = _hitPoint.z;
+      stylusTargetY = 0.22;
+      pointerInsideHoneycomb = true;
+      canvas.style.cursor = 'crosshair';
     } else {
-      isHoveringCluster = false;
-      hoverDwellSec = 0;
-      _lastTriggerLocal.set(1e6, 1e6, 1e6);
-      if (!isDraggingCluster) {
-        canvas.style.cursor = hit === 'branch' ? 'pointer' : 'grab';
-      }
+      pointerInsideHoneycomb = false;
+      stylusTargetX = IDLE_STYLUS_X;
+      stylusTargetZ = IDLE_STYLUS_Z;
+      stylusTargetY = IDLE_STYLUS_Y;
+      canvas.style.cursor = inSlab ? 'pointer' : 'grab';
     }
   };
 
-  const onPointerUp = (ev: PointerEvent) => {
-    const travelPx = Math.hypot(ev.clientX - pointerDownX, ev.clientY - pointerDownY);
+  const onPointerDown = (e: PointerEvent) => {
+    if (e.button !== 0) return;
+    hoverArmed = true;
+    pointerDownX = e.clientX;
+    pointerDownY = e.clientY;
+    pointerDownTimeMs = performance.now();
+    pointerDownOnRim = false;
+
+    if (!raycastDeckPlane(e.clientX, e.clientY)) return;
+
+    const inComb = isInsideFlatTopHex(_hitPoint.x, _hitPoint.z, BEZEL_INNER_CIRCUM_R - 0.02);
+    const inSlab = isInsideFlatTopHex(_hitPoint.x, _hitPoint.z, SLAB_OUTER_CIRCUM_R);
+
+    if (inComb) {
+      pointerDraggingLattice = true;
+      pointerInsideHoneycomb = true;
+      stage.controls.enabled = false;
+      stylusTargetX = _hitPoint.x;
+      stylusTargetZ = _hitPoint.z;
+      stylusTargetY = 0.132;
+      canvas.style.cursor = 'crosshair';
+    } else if (inSlab) {
+      pointerDownOnRim = true;
+    }
+  };
+
+  const onPointerUp = (e: PointerEvent) => {
+    const moveDist = Math.hypot(e.clientX - pointerDownX, e.clientY - pointerDownY);
     const heldMs = performance.now() - pointerDownTimeMs;
-    const isCleanClick = travelPx < 8 && heldMs < 420;
+    const isQuickClick = moveDist < 9 && heldMs < 360;
 
-    if (isDraggingCluster) {
-      try {
-        canvas.releasePointerCapture(ev.pointerId);
-      } catch {
-        // ignore
+    if (pointerDraggingLattice) {
+      pointerDraggingLattice = false;
+      stage.controls.enabled = true;
+      stylusTargetY = pointerInsideHoneycomb ? 0.22 : IDLE_STYLUS_Y;
+
+      if (isQuickClick) {
+        const now = performance.now();
+        if (now - lastClickTimeMs < 330) {
+          // Double-click inside comb -> demagnetizing thermal scatter so hive re-organizes freshly
+          lattice.triggerThermalScatter(1.0);
+          pulseDip = 1.0;
+          lastClickTimeMs = 0;
+        } else {
+          // Single quick click -> radial swirling shock pulse at clicked cell
+          lattice.triggerPulse(stylusTargetX, stylusTargetZ, lattice.stylus.polarity, 1.05, 0.65);
+          pulseDip = 0.85;
+          lastClickTimeMs = now;
+        }
+      }
+    } else if (pointerDownOnRim && isQuickClick) {
+      // Quick click on bronze bezel or limestone rim flips stylus polarity with baton flourish
+      lattice.flipStylusPolarity();
+      polarityFlipSpin = Math.PI * 2;
+      pointerDownOnRim = false;
+    } else {
+      pointerDownOnRim = false;
+      // Double-click empty space -> thermal scatter fresh self-organization
+      if (isQuickClick) {
+        const now = performance.now();
+        if (now - lastClickTimeMs < 330) {
+          lattice.triggerThermalScatter(1.0);
+          lastClickTimeMs = 0;
+        } else {
+          lastClickTimeMs = now;
+        }
       }
     }
-
-    if (isCleanClick) {
-      if (downHitTarget === 'cluster') {
-        // High-amplitude synchronized radial shock-shimmer with physical pendulum recoil
-        sim.triggerShockWave(_downHitLocal.x, _downHitLocal.y, _downHitLocal.z);
-      } else if (downHitTarget === 'branch') {
-        // Tapping the gnarled branch shakes the upper collar & sends a cascading downward ripple
-        sim.swayVelX += 0.14;
-        sim.swayVelZ += 0.11;
-        sim.exciteAtPoint(0.0, -0.06, 0.24, 0.28, 1.15, 0.16);
-      }
-    }
-
-    isDraggingCluster = false;
-    downHitTarget = 'none';
-    stage.controls.enabled = true;
-    canvas.style.cursor = isHoveringCluster ? 'crosshair' : 'grab';
-  };
-
-  const onPointerCancel = (ev: PointerEvent) => {
-    try {
-      canvas.releasePointerCapture(ev.pointerId);
-    } catch {
-      // ignore
-    }
-    isDraggingCluster = false;
-    downHitTarget = 'none';
-    stage.controls.enabled = true;
-    canvas.style.cursor = 'grab';
   };
 
   const onPointerLeave = () => {
-    isHoveringCluster = false;
-    hoverDwellSec = 0;
-    _lastTriggerLocal.set(1e6, 1e6, 1e6);
-  };
-
-  const triggerQuietOrTwinDemo = () => {
-    hasUserInteracted = true;
-    if (sim.activeFiringCount + sim.refractoryCount > 40) {
-      sim.quietAll();
-    } else {
-      sim.triggerTwinCollision();
+    if (!pointerDraggingLattice) {
+      pointerInsideHoneycomb = false;
+      stylusTargetX = IDLE_STYLUS_X;
+      stylusTargetZ = IDLE_STYLUS_Z;
+      stylusTargetY = IDLE_STYLUS_Y;
     }
   };
 
-  const onDoubleClick = () => {
-    triggerQuietOrTwinDemo();
-  };
-
-  const onKeyDown = (ev: KeyboardEvent) => {
-    if (ev.code === 'Space') {
-      ev.preventDefault();
-      triggerQuietOrTwinDemo();
+  const onKeyDown = (e: KeyboardEvent) => {
+    if (e.code === 'Space') {
+      e.preventDefault();
+      lattice.triggerThermalScatter(1.0);
+      pulseDip = 0.9;
+    } else if (e.key === 'f' || e.key === 'F') {
+      lattice.flipStylusPolarity();
+      polarityFlipSpin = Math.PI * 2;
+    } else if (e.key === 'r' || e.key === 'R') {
+      lattice.seedTwinVortexEquilibrium();
     }
   };
 
-  canvas.addEventListener('pointerdown', onPointerDown);
   canvas.addEventListener('pointermove', onPointerMove);
+  canvas.addEventListener('pointerdown', onPointerDown);
   window.addEventListener('pointerup', onPointerUp);
-  canvas.addEventListener('pointercancel', onPointerCancel);
   canvas.addEventListener('pointerleave', onPointerLeave);
-  canvas.addEventListener('dblclick', onDoubleClick);
   window.addEventListener('keydown', onKeyDown);
 
-  // Read-only diagnostic telemetry hook matching verification contract
-  window.__DAY28__ = {
-    getState: () => sim.getTelemetry(),
+  // Expose non-invasive live diagnostic & camera preset hook
+  window.__HIVE__ = {
+    getState: () => ({
+      ...lattice.getTelemetry(),
+      stylusPos: [
+        Number(stylusCurX.toFixed(3)),
+        Number(stylusCurY.toFixed(3)),
+        Number(stylusCurZ.toFixed(3)),
+      ],
+      stylusActive: lattice.stylus.active,
+      draggingLattice: pointerDraggingLattice,
+    }),
+    triggerPulse: (x = 0, z = 0) => {
+      lattice.triggerPulse(x, z, lattice.stylus.polarity, 1.1, 0.65);
+      pulseDip = 0.9;
+    },
+    triggerThermalScatter: (intensity = 1.0) => {
+      lattice.triggerThermalScatter(intensity);
+    },
+    flipPolarity: () => {
+      polarityFlipSpin = Math.PI * 2;
+      return lattice.flipStylusPolarity();
+    },
+    seedTwinVortex: () => {
+      lattice.seedTwinVortexEquilibrium();
+    },
+    seedMacroVortex: (handedness = 1) => {
+      lattice.seedMacroVortex(handedness);
+    },
+    setCameraPreset: (preset) => {
+      if (preset === 'hero') {
+        stage.camera.position.set(0.0, 3.68, 3.92);
+        stage.controls.target.set(0, -0.04, 0.02);
+      } else if (preset === 'top') {
+        stage.camera.position.set(0.0, 4.45, 0.35);
+        stage.controls.target.set(0, 0, 0);
+      } else if (preset === 'macro') {
+        stage.camera.position.set(0.55, 1.12, 1.18);
+        stage.controls.target.set(0.12, 0.04, -0.04);
+      } else if (preset === 'underside') {
+        stage.camera.position.set(0.85, -2.55, 2.35);
+        stage.controls.target.set(0, -0.15, 0);
+      } else if (preset === 'rear') {
+        stage.camera.position.set(-0.35, 2.75, -3.55);
+        stage.controls.target.set(0, -0.04, 0);
+      }
+      stage.controls.update();
+    },
   };
 
+  // ---------------------------------------------------------------------------
+  // Main Animation Loop (Strictly Zero Per-Frame Allocations)
+  // ---------------------------------------------------------------------------
+  const unsubTick = stage.onTick(({ elapsedSec, dtSec }) => {
+    const smoothK = 1 - Math.exp(-15.0 * dtSec);
+    const prevX = stylusCurX;
+    const prevZ = stylusCurZ;
+
+    stylusCurX += (stylusTargetX - stylusCurX) * smoothK;
+    stylusCurZ += (stylusTargetZ - stylusCurZ) * smoothK;
+    stylusCurY += (stylusTargetY - stylusCurY) * smoothK;
+
+    const rawVx = (stylusCurX - prevX) / Math.max(0.004, dtSec);
+    const rawVz = (stylusCurZ - prevZ) / Math.max(0.004, dtSec);
+    const velSmooth = 1 - Math.exp(-12.0 * dtSec);
+    stylusVelX += (rawVx - stylusVelX) * velSmooth;
+    stylusVelZ += (rawVz - stylusVelZ) * velSmooth;
+
+    // Decay click dip & polarity baton flourish
+    pulseDip *= Math.exp(-9.5 * dtSec);
+    polarityFlipSpin *= Math.exp(-7.5 * dtSec);
+
+    const targetPolarityBlend = lattice.stylus.polarity === 1 ? 0.0 : 1.0;
+    polarityBlendCur += (targetPolarityBlend - polarityBlendCur) * (1 - Math.exp(-10.0 * dtSec));
+    materials.uPolarityBlend.value = polarityBlendCur;
+
+    const targetEngaged = pointerDraggingLattice ? 1.0 : pointerInsideHoneycomb ? 0.48 : 0.08;
+    engagedCur += (targetEngaged - engagedCur) * (1 - Math.exp(-10.0 * dtSec));
+    materials.uStylusEngaged.value = engagedCur;
+
+    // Gentle idle hover float when parked at upper-right rest position
+    const idleFloat = pointerInsideHoneycomb || pointerDraggingLattice ? 0.0 : Math.sin(elapsedSec * 1.8) * 0.014;
+    const dipOffset = pulseDip * 0.095;
+    const tipY = Math.max(NEEDLE_PIVOT_Y + 0.065, stylusCurY + idleFloat - dipOffset);
+
+    stylusGroup.position.set(stylusCurX, tipY, stylusCurZ);
+    // Natural handheld 38° slant leaning out toward upper-right + subtle inertia lag during sweep
+    const tiltLagX = Math.max(-0.22, Math.min(0.22, -stylusVelZ * 0.055));
+    const tiltLagZ = Math.max(-0.22, Math.min(0.22, stylusVelX * 0.055));
+    stylusGroup.rotation.set(
+      -0.28 + tiltLagX + polarityFlipSpin,
+      0.22,
+      -0.78 + tiltLagZ
+    );
+
+    materials.uStylusLocalPos.value.set(stylusCurX, tipY, stylusCurZ);
+
+    // Feed live 3D wand kinematics into coupled magnetic dipole physics
+    // At idle parked flank, keep gentle localized magnetic influence active so nearby corner
+    // cells subtly acknowledge the hovering lodestone just like the concept render!
+    lattice.stylus.active = true;
+    lattice.stylus.x = stylusCurX;
+    lattice.stylus.z = stylusCurZ;
+    lattice.stylus.height = Math.max(0.12, tipY - NEEDLE_PIVOT_Y);
+    lattice.stylus.strength = pointerDraggingLattice
+      ? 2.85
+      : pointerInsideHoneycomb
+        ? 1.15
+        : 0.34;
+    lattice.stylus.vx = pointerDraggingLattice ? stylusVelX * 1.45 : pointerInsideHoneycomb ? stylusVelX * 0.55 : 0;
+    lattice.stylus.vz = pointerDraggingLattice ? stylusVelZ * 1.45 : pointerInsideHoneycomb ? stylusVelZ * 0.55 : 0;
+
+    // Step coupled 91-dipole physics & sync instanced needle matrices
+    lattice.step(dtSec);
+    syncNeedles();
+  });
+
+  // Clean disposal on page unload
   stage.shell.registerDispose(() => {
-    canvas.removeEventListener('pointerdown', onPointerDown);
+    unsubTick();
     canvas.removeEventListener('pointermove', onPointerMove);
+    canvas.removeEventListener('pointerdown', onPointerDown);
     window.removeEventListener('pointerup', onPointerUp);
-    canvas.removeEventListener('pointercancel', onPointerCancel);
     canvas.removeEventListener('pointerleave', onPointerLeave);
-    canvas.removeEventListener('dblclick', onDoubleClick);
     window.removeEventListener('keydown', onKeyDown);
-    delete window.__DAY28__;
 
-    stage.scene.environment = null;
-    studioEnv.dispose();
-    branchGeo.dispose();
-    innerCurtainGeo.dispose();
-    raycastHullGeo.dispose();
-    raycastHullMat.dispose();
-    thoraxGeo.dispose();
-    abdomenGeo.dispose();
-    wingsGeo.dispose();
+    limestoneGeo.dispose();
+    bezelGeo.dispose();
+    innerTrimGeo.dispose();
+    boltGeo.dispose();
+    honeycombGeo.dispose();
+    pivotGeo.dispose();
+    northGeo.dispose();
+    southGeo.dispose();
+    undersideGeos.bronzePlate.dispose();
+    undersideGeos.brassRing.dispose();
+    stylusGeos.dispose();
     materials.dispose();
-  });
-
-  // ---------------------------------------------------------------------------
-  // 4. Main Zero-GC Animation Loop (Excitable-Media Step + Instanced Articulation)
-  // ---------------------------------------------------------------------------
-  const peakFlipRef = HiveShimmerSimulation.PEAK_FLIP_RAD;
-  const flipAngles = sim.flipAngle;
-  const wingSpreads = sim.wingSpread;
-  const flashInt = sim.flashIntensity;
-
-  stage.onTick(({ dtSec, elapsedSec }) => {
-    // Launch one subtle initial natural defense ripple on landing so the living curtain
-    // immediately demonstrates its golden shimmering wave before settling to calm rest
-    if (!hasTriggeredBootWave && !hasUserInteracted && elapsedSec >= 0.24) {
-      hasTriggeredBootWave = true;
-      sim.exciteAtPoint(-0.62, -0.32, 0.34, 0.19, 1.15, 0.14);
-    }
-
-    // Subtle predator-dwell warning pulse when pointer holds poised right in front of the cluster
-    if (isHoveringCluster && !isDraggingCluster) {
-      hoverDwellSec += dtSec;
-      if (hoverDwellSec >= 0.85 && _lastTriggerLocal.x < 1e4) {
-        hoverDwellSec = 0;
-        sim.exciteAtPoint(_lastTriggerLocal.x, _lastTriggerLocal.y, _lastTriggerLocal.z, 0.14, 1.0, 0.06);
-      }
-    }
-
-    sim.step(dtSec);
-
-    // Physical pendulum recoil sway of the heavy hanging bivouac & slight timber flex
-    curtainPivotGroup.rotation.set(sim.swayX, 0, sim.swayZ);
-    branchGroup.rotation.z = sim.swayZ * 0.075;
-    branchGroup.rotation.x = sim.swayX * 0.055;
-
-    // Update all ~2,640 articulated abdomens, gossamer wings & per-instance shader states (0 heap allocs)
-    const invPeak = 1.0 / peakFlipRef;
-    for (let i = 0; i < unitCount; i++) {
-      const i3 = i * 3;
-      const o = i * 16;
-      const o4 = i * 4;
-
-      const px = pos[i3];
-      const py = pos[i3 + 1];
-      const pz = pos[i3 + 2];
-      const tx = tangs[i3];
-      const ty = tangs[i3 + 1];
-      const tz = tangs[i3 + 2];
-      const ux = ups[i3];
-      const uy = ups[i3 + 1];
-      const uz = ups[i3 + 2];
-      const nx = norms[i3];
-      const ny = norms[i3 + 1];
-      const nz = norms[i3 + 2];
-      const s = scales[i];
-      const seed = seeds[i];
-
-      // Subtle quiet living breathing rhythm while hushed at rest
-      const breathe = Math.sin(elapsedSec * 1.45 + seed * 6.28318 + py * 2.15) * 0.022;
-      const fAng = flipAngles[i];
-      const wSpr = wingSpreads[i];
-      const fl = flashInt[i];
-
-      const abdTheta = restTilts[i] + fAng + breathe;
-      writeHingedInstanceMatrix(
-        abdomenArr,
-        o,
-        px,
-        py,
-        pz,
-        tx,
-        ty,
-        tz,
-        ux,
-        uy,
-        uz,
-        nx,
-        ny,
-        nz,
-        abdTheta,
-        s,
-        s,
-        s
-      );
-
-      // Gossamer wings hinge from dorsal mesothorax, pitching outward & flaring laterally during snap
-      const wingBuzz = Math.sin(elapsedSec * 46.0 + seed * 23.7) * 0.055 * wSpr;
-      const wingTheta = restTilts[i] * 0.8 + 0.05 + fAng * 0.54 + wSpr * 0.26 + wingBuzz + breathe * 0.7;
-      const wingSpanX = s * (1.0 + 0.38 * wSpr);
-      const wpx = px + (0.015 * ux + 0.017 * nx) * s;
-      const wpy = py + (0.015 * uy + 0.017 * ny) * s;
-      const wpz = pz + (0.015 * uz + 0.017 * nz) * s;
-
-      writeHingedInstanceMatrix(
-        wingArr,
-        o,
-        wpx,
-        wpy,
-        wpz,
-        tx,
-        ty,
-        tz,
-        ux,
-        uy,
-        uz,
-        nx,
-        ny,
-        nz,
-        wingTheta,
-        wingSpanX,
-        s,
-        s
-      );
-
-      const flipNorm = fAng * invPeak;
-      beeStateArr[o4] = flipNorm > 1 ? 1 : flipNorm < 0 ? 0 : flipNorm;
-      beeStateArr[o4 + 1] = fl;
-      beeStateArr[o4 + 2] = wSpr;
-    }
-
-    abdomenMesh.instanceMatrix.needsUpdate = true;
-    wingMesh.instanceMatrix.needsUpdate = true;
-    beeStateAttr.needsUpdate = true;
-  });
-
-  return stage;
-}
-
-if (typeof document !== 'undefined' && document.getElementById('app')) {
-  void bootDay28Hive().catch((err) => {
-    console.error('[Day 28 - Hive] Failed to initialize WebGPU specimen:', err);
+    studioEnv.dispose();
   });
 }
+
+void mountDay28Hive();
