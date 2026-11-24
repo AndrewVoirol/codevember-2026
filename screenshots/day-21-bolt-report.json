@@ -1,0 +1,46 @@
+{
+  "day": 21,
+  "slug": "21-bolt",
+  "expectedHeader": "Day 21 - Bolt",
+  "domAudit": {
+    "headerText": "Day 21 - Bolt",
+    "bodyBg": "rgb(33, 37, 41)",
+    "drawerCount": 30
+  },
+  "telemetry": {
+    "frameCount": 347,
+    "avgFrameMs": 8.27,
+    "p95FrameMs": 10.3,
+    "sceneState": {
+      "day": 21,
+      "slug": "21-bolt",
+      "headerLabel": "Day 21 - Bolt",
+      "frameCount": 347,
+      "cameraPos": [
+        -1.6361853860024023,
+        3.5401911250552267,
+        0.7291501455431474
+      ],
+      "pointerWorld": [
+        0.0060161796096327436,
+        -0.07389102611972875,
+        0.3880348870358037
+      ],
+      "pointerSpeed": 0,
+      "pointerDwellSec": 1.8797,
+      "pointerImpulse": 0.0009
+    }
+  },
+  "metrics": {
+    "specimenCoverageRatio": 0.3403,
+    "interactionMad": 9.149
+  },
+  "gpuErrors": [],
+  "gateFailures": [],
+  "artifacts": {
+    "contactSheet": "screenshots/day-21-bolt-contact-sheet.png",
+    "initial": "screenshots/day-21-bolt-initial.png",
+    "drawer": "screenshots/day-21-bolt-drawer.png"
+  },
+  "passed": true
+}
