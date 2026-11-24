@@ -12,6 +12,8 @@ declare global {
     __DAY19__?: {
       getState: () => {
         exposedFraction: number;
+        remainingRockFraction: number;
+        centerRockRadius: number;
         totalCarvedVolume: number;
         isBlasting: boolean;
         activeParticles: number;
@@ -281,6 +283,8 @@ async function mountDay19Erosion(): Promise<void> {
   window.__DAY19__ = {
     getState: () => ({
       exposedFraction: Number(erosionField.exposedFraction.toFixed(4)),
+      remainingRockFraction: Number(erosionField.remainingRockFraction.toFixed(4)),
+      centerRockRadius: Number(erosionField.sampleMatrixRadius(0, 0, 1).toFixed(4)),
       totalCarvedVolume: Number(erosionField.totalCarvedVolume.toFixed(5)),
       isBlasting: isBlasting || clickBurstTimer > 0,
       activeParticles: particles.activeParticles,
@@ -333,6 +337,9 @@ async function mountDay19Erosion(): Promise<void> {
     //    bind to the EXACT post-carve live crater floor (zero stale pre-carve lag!)
     let avgFossilRatio = _rayHit.isFossil ? 1.0 : 0.0;
     if (activeBlastNow) {
+      const rdx = _raycaster.ray.direction.x;
+      const rdy = _raycaster.ray.direction.y;
+      const rdz = _raycaster.ray.direction.z;
       if (hasPrevBlastDir) {
         const angStep = Math.acos(Math.max(-1, Math.min(1, _lastBlastDir.dot(_rayHit.direction))));
         const subSteps = Math.max(1, Math.min(6, Math.ceil(angStep / 0.032)));
@@ -345,7 +352,17 @@ async function mountDay19Erosion(): Promise<void> {
             .copy(_lastBlastDir)
             .lerp(_rayHit.direction, frac)
             .normalize();
-          const res = erosionField.carveAt(_interpDir.x, _interpDir.y, _interpDir.z, subDt, 1.0);
+          const res = erosionField.carveAt(
+            _interpDir.x,
+            _interpDir.y,
+            _interpDir.z,
+            subDt,
+            1.0,
+            undefined,
+            rdx,
+            rdy,
+            rdz
+          );
           fossilSum += res.hitFossilRatio;
         }
         avgFossilRatio = fossilSum / subSteps;
@@ -355,7 +372,11 @@ async function mountDay19Erosion(): Promise<void> {
           _rayHit.direction.y,
           _rayHit.direction.z,
           dtSec,
-          1.15
+          1.15,
+          undefined,
+          rdx,
+          rdy,
+          rdz
         );
         avgFossilRatio = res.hitFossilRatio;
       }

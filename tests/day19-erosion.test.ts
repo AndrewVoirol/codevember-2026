@@ -165,15 +165,14 @@ describe('Day 19 - Erosion: Pneumatic Air-Abrasion Fossil Prep Nodule', () => {
     for (let iy = 1; iy <= field.inner; iy++) {
       for (let ix = 1; ix <= field.inner; ix++) {
         const idx = iy * field.size + ix;
+        // Zero artificial excavation floor anywhere on the nodule!
+        expect(field.matrixFloor[idx]).toBe(MIN_CORE_FLOOR_RADIUS);
+        expect(MIN_CORE_FLOOR_RADIUS).toBe(0);
         if (field.fossilRadius[idx] > 0) {
           fossilCells++;
           // Unfractured limestone concretion must strictly enclose the fossil by >= MIN_FOSSIL_OVERBURDEN
           expect(field.unfracturedRadius[idx]).toBeGreaterThanOrEqual(
             field.fossilRadius[idx] + MIN_FOSSIL_OVERBURDEN - 1e-5
-          );
-          expect(field.matrixFloor[idx]).toBeCloseTo(
-            Math.max(0.10, field.fossilRadius[idx] - FOSSIL_MATRIX_RECESS),
-            5
           );
         }
       }
@@ -212,26 +211,21 @@ describe('Day 19 - Erosion: Pneumatic Air-Abrasion Fossil Prep Nodule', () => {
       lastFossilHitRatio = res.hitFossilRatio;
     }
 
-    // Matrix must erode down to expose the fossil cleanly, triggering high fossil ricochet ratio
-    const carvedMatR = field.sampleGridBilinear(
-      field.currentRadius,
-      blastDir.x,
-      blastDir.y,
-      blastDir.z
-    );
-    expect(carvedMatR).toBeLessThan(fossilRAtBlast);
-    expect(carvedMatR).toBeGreaterThanOrEqual(fossilRAtBlast - FOSSIL_MATRIX_RECESS - 0.008);
+    // Matrix must erode all the way down to zero rock thickness, exposing the fossil cleanly
+    const carvedMatR = field.sampleMatrixRadius(blastDir.x, blastDir.y, blastDir.z);
+    expect(carvedMatR).toBeLessThan(0.005);
     expect(lastFossilHitRatio).toBeGreaterThan(0.75);
 
     // Combined solid surface at blast center MUST remain >= fossilRadius (fossil never cut!)
     const solidSurfR = field.sampleCombinedRadius(blastDir.x, blastDir.y, blastDir.z);
     expect(solidSurfR).toBeGreaterThanOrEqual(fossilRAtBlast - 1e-4);
 
-    // Also blast bare limestone outer rim far outside fossil and confirm core floor holds
+    // Also blast outer rim aggressively and confirm limestone clears all the way to 0 (no collar floor lock)
     const rimDir = new THREE.Vector3(0.96, 0.22, 0.18).normalize();
     for (let step = 0; step < 300; step++) {
       field.carveAt(rimDir.x, rimDir.y, rimDir.z, 1 / 30, 1.5);
     }
+    expect(field.sampleMatrixRadius(rimDir.x, rimDir.y, rimDir.z)).toBeLessThan(0.005);
 
     // Exhaustive grid invariant sweep
     for (let iy = 1; iy <= field.inner; iy++) {
@@ -239,15 +233,12 @@ describe('Day 19 - Erosion: Pneumatic Air-Abrasion Fossil Prep Nodule', () => {
         const idx = iy * field.size + ix;
         // Fossil surface is strictly immutable
         expect(field.fossilRadius[idx]).toBe(fossilSnapshot[idx]);
-        // Matrix never violates floor or exceeds starting surface
-        expect(field.currentRadius[idx]).toBeGreaterThanOrEqual(field.matrixFloor[idx] - 1e-6);
+        // Matrix never goes negative or exceeds starting surface
+        expect(field.currentRadius[idx]).toBeGreaterThanOrEqual(0);
         expect(field.currentRadius[idx]).toBeLessThanOrEqual(field.startRadius[idx] + 1e-6);
         // Combined solid surface never drops below fossil surface
         const combined = Math.max(field.currentRadius[idx], field.fossilRadius[idx]);
         expect(combined).toBeGreaterThanOrEqual(field.fossilRadius[idx]);
-        if (field.fossilRadius[idx] === 0) {
-          expect(field.currentRadius[idx]).toBeGreaterThanOrEqual(MIN_CORE_FLOOR_RADIUS - 1e-6);
-        }
       }
     }
 
@@ -317,11 +308,12 @@ describe('Day 19 - Erosion: Pneumatic Air-Abrasion Fossil Prep Nodule', () => {
     );
     expect(hit.distance).toBeGreaterThan(distBefore + 0.02);
 
-    // HalfFloat texture packing sanity (channel R stores signed deltaR = currentRadius - R_base(d))
+    // HalfFloat texture packing sanity (channel R stores multiplicative scaleR = currentRadius / R_base(d))
     field.stepAndUpload(0.016);
-    const deltaVal = THREE.DataUtils.fromHalfFloat(field.textureData[(128 * 256 + 128) * 4]);
-    expect(Number.isFinite(deltaVal)).toBe(true);
-    expect(evalBaseBoulderRadiusCpu(0, 0, 1) + deltaVal).toBeGreaterThan(0.15);
+    const scaleVal = THREE.DataUtils.fromHalfFloat(field.textureData[(128 * 256 + 128) * 4]);
+    expect(Number.isFinite(scaleVal)).toBe(true);
+    expect(scaleVal).toBeGreaterThanOrEqual(0);
+    expect(evalBaseBoulderRadiusCpu(0, 0, 1) * scaleVal).toBeGreaterThanOrEqual(0);
 
     // Reset with new seed re-encrusts fresh nodule and zeros carved volume
     const prevAxis = field.strataAxis.clone();
@@ -457,7 +449,48 @@ describe('Day 19 - Erosion: Pneumatic Air-Abrasion Fossil Prep Nodule', () => {
         expect(res.signedVolume, `${obj.name} signedVolume`).toBeGreaterThan(0);
         // For turned lathe solids around the Z axis, verify every side-wall quad faces radially outward
         // (n_xy . p_xy >= 0) and front/back end caps face -Z / +Z outward (zero inverted faces)
-        if (obj.name !== 'PneumaticAirHose') {
+        if (obj.name === 'PneumaticAirHose') {
+          // Verify seam-duplicated braided hose UVs (zero backward wrap jump) & orthonormal tangent frame
+          const g = obj.geometry;
+          const uvAttr = g.attributes.uv as THREE.BufferAttribute;
+          const tanAttr = g.attributes.aHoseTangent as THREE.BufferAttribute;
+          const circAttr = g.attributes.aHoseCircum as THREE.BufferAttribute;
+          const normAttr = g.attributes.normal as THREE.BufferAttribute;
+          const gIdx = g.index!;
+          expect(tanAttr).toBeDefined();
+          expect(circAttr).toBeDefined();
+          let maxV = 0;
+          let maxU = 0;
+          for (let vIdx = 0; vIdx < uvAttr.count; vIdx++) {
+            const u = uvAttr.getX(vIdx);
+            const v = uvAttr.getY(vIdx);
+            if (u > maxU) maxU = u;
+            if (v > maxV) maxV = v;
+            const tl = Math.hypot(tanAttr.getX(vIdx), tanAttr.getY(vIdx), tanAttr.getZ(vIdx));
+            const cl = Math.hypot(circAttr.getX(vIdx), circAttr.getY(vIdx), circAttr.getZ(vIdx));
+            expect(Math.abs(tl - 1)).toBeLessThan(1e-4);
+            expect(Math.abs(cl - 1)).toBeLessThan(1e-4);
+            const ndot = Math.abs(
+              normAttr.getX(vIdx) * tanAttr.getX(vIdx) +
+                normAttr.getY(vIdx) * tanAttr.getY(vIdx) +
+                normAttr.getZ(vIdx) * tanAttr.getZ(vIdx)
+            );
+            // Side-wall rings are strictly orthogonal; cap centers have normal || tangent
+            if (vIdx < uvAttr.count - 2) {
+              expect(ndot).toBeLessThan(1e-4);
+            }
+          }
+          expect(maxV).toBeCloseTo(1.0, 5);
+          expect(maxU).toBeGreaterThan(0.65);
+          // Zero backward UV.y seam smear across every side-wall triangle
+          const sideTriCount = gIdx.count / 3 - 64; // exclude 32+32 start/end cap triangles
+          for (let t = 0; t < sideTriCount; t++) {
+            const v0 = uvAttr.getY(gIdx.getX(t * 3));
+            const v1 = uvAttr.getY(gIdx.getX(t * 3 + 1));
+            const v2 = uvAttr.getY(gIdx.getX(t * 3 + 2));
+            expect(Math.max(v0, v1, v2) - Math.min(v0, v1, v2)).toBeLessThan(0.15);
+          }
+        } else {
           const g = obj.geometry;
           const p = g.attributes.position as THREE.BufferAttribute;
           const gIdx = g.index!;
@@ -488,7 +521,7 @@ describe('Day 19 - Erosion: Pneumatic Air-Abrasion Fossil Prep Nodule', () => {
         }
       }
     });
-    expect(solidMeshCount).toBe(7);
+    expect(solidMeshCount).toBe(8);
     nozzle.dispose();
     dummy.dispose();
   });
@@ -668,7 +701,7 @@ describe('Day 19 - Erosion: Pneumatic Air-Abrasion Fossil Prep Nodule', () => {
       expect(Math.abs(corr), `zSign=${zSign} rib ghosting corr`).toBeLessThan(0.18);
     }
 
-    // 3. Exact GPU reconstruction (R_base(d) + HalfFloat deltaR) must have zero sharp kink across y=0 and x=0
+    // 3. Exact GPU reconstruction (R_base(d) * HalfFloat scaleR) must have zero sharp kink across y=0 and x=0
     const uvScratch: [number, number] = [0, 0];
     const sampleGpuRadius = (dx: number, dy: number, dz: number) => {
       dirToOctUv(dx, dy, dz, uvScratch, field.size);
@@ -678,12 +711,12 @@ describe('Day 19 - Erosion: Pneumatic Air-Abrasion Fossil Prep Nodule', () => {
       const y0 = Math.max(0, Math.min(field.size - 2, Math.floor(fy)));
       const tx = fx - x0;
       const ty = fy - y0;
-      const readDelta = (x: number, y: number) =>
+      const readScale = (x: number, y: number) =>
         THREE.DataUtils.fromHalfFloat(field.textureData[(y * field.size + x) * 4]);
-      const dR =
-        (readDelta(x0, y0) * (1 - tx) + readDelta(x0 + 1, y0) * tx) * (1 - ty) +
-        (readDelta(x0, y0 + 1) * (1 - tx) + readDelta(x0 + 1, y0 + 1) * tx) * ty;
-      return evalBaseBoulderRadiusCpu(dx, dy, dz) + dR;
+      const sR =
+        (readScale(x0, y0) * (1 - tx) + readScale(x0 + 1, y0) * tx) * (1 - ty) +
+        (readScale(x0, y0 + 1) * (1 - tx) + readScale(x0 + 1, y0 + 1) * tx) * ty;
+      return evalBaseBoulderRadiusCpu(dx, dy, dz) * Math.max(0, sR);
     };
 
     const eps = 0.005;
@@ -838,6 +871,114 @@ describe('Day 19 - Erosion: Pneumatic Air-Abrasion Fossil Prep Nodule', () => {
       const jetEnd = ctrl.tipPos.clone().addScaledVector(ctrl.aimDir, ctrl.jetLength);
       expect(jetEnd.distanceTo(hitPos)).toBeLessThan(1e-4);
     }
+
+    field.dispose();
+    ammoniteGeo.dispose();
+  });
+
+  it('allows 100% limestone blast-away at the center umbilicus and across the full 360-deg sphere, preserves full-shaft braided-hose clearance when fully excavated, and re-encrusts cleanly', () => {
+    const { geometry: ammoniteGeo } = buildAmmoniteGeometry(220, 30);
+    const field = new ErosionField(ammoniteGeo, 1);
+
+    expect(field.remainingRockFraction).toBeCloseTo(1.0, 5);
+    expect(field.sampleMatrixRadius(0, 0, 1)).toBeGreaterThan(0.35);
+
+    // 1. Sustained center-targeted blast from front camera clears the ENTIRE central umbilicus
+    //    and adjacent inter-whorl valleys (including (-0.16, -0.16)!) all the way to 0 rock!
+    for (let step = 0; step < 60; step++) {
+      field.carveAt(0, 0, 1, 1 / 30, 1.2, undefined, 0, 0, -1);
+    }
+    expect(field.sampleMatrixRadius(0, 0, 1)).toBe(0);
+    // Check umbilical cone (within ~25 deg of +Z) cleared completely down to 0
+    for (const [dx, dy] of [
+      [0.0, 0.0],
+      [0.12, 0.0],
+      [-0.12, 0.0],
+      [0.0, 0.12],
+      [0.0, -0.12],
+      [-0.16, -0.16],
+      [0.16, -0.14],
+    ]) {
+      const dz = Math.sqrt(1 - dx * dx - dy * dy);
+      expect(
+        field.sampleMatrixRadius(dx, dy, dz),
+        `center umbilical residual at (${dx},${dy})`
+      ).toBeLessThan(0.01);
+    }
+
+    // 2. Sustained multi-angle full excavation across 360-deg Fibonacci directions blasts EVERY
+    //    limestone texel on the entire sphere all the way down to 0 (zero stuck floor anywhere!)
+    const fibN = 260;
+    for (let pass = 0; pass < 3; pass++) {
+      for (let i = 0; i < fibN; i++) {
+        const z = 1.0 - (2.0 * (i + 0.5)) / fibN;
+        const r = Math.sqrt(Math.max(0, 1 - z * z));
+        const phi = i * 2.399963229728653;
+        const dx = Math.cos(phi) * r;
+        const dy = Math.sin(phi) * r;
+        field.carveAt(dx, dy, z, 0.06, 1.5, undefined, -dx, -dy, -z);
+      }
+    }
+
+    let maxRemainingRadius = 0;
+    for (let iy = 1; iy <= field.inner; iy++) {
+      const row = iy * field.size;
+      for (let ix = 1; ix <= field.inner; ix++) {
+        const r = field.currentRadius[row + ix];
+        if (r > maxRemainingRadius) maxRemainingRadius = r;
+      }
+    }
+    expect(maxRemainingRadius).toBe(0);
+    expect(field.remainingRockFraction).toBeLessThan(1e-5);
+    expect(field.exposedFraction).toBeGreaterThan(0.999);
+    // Exact volume conservation holds all the way to 100% complete excavation!
+    expect(Math.abs(field.totalCarvedVolume - field.computeExactCarvedVolume())).toBeLessThan(1e-5);
+
+    // 3. Full-shaft nozzle, crimped ferrule, strain-relief boot & braided-hose clearance holds
+    //    even when 100% of limestone is blasted away and the nozzle tracks the bare ammonite!
+    const sampleBareAmmonite = (dx: number, dy: number, dz: number) =>
+      field.sampleCombinedRadius(dx, dy, dz);
+    const ctrl = new NozzleController();
+    const outTip = new THREE.Vector3();
+    const outQuat = new THREE.Quaternion();
+    const outAim = new THREE.Vector3();
+    const normScratch = new THREE.Vector3();
+
+    const bareProbes: Array<{ cam: [number, number, number]; dir: [number, number, number] }> = [
+      { cam: [0, 0.14, 4.35], dir: [0, 0, 1] },
+      { cam: [0, 0.14, 4.35], dir: [-0.72, -0.34, 0.60] },
+      { cam: [0, 0.14, 4.35], dir: [0.82, 0.25, 0.51] },
+      { cam: [0, 0.1, -4.35], dir: [0, 0, -1] },
+      { cam: [3.8, 0.4, 2.0], dir: [0.95, 0.0, 0.30] },
+    ];
+    for (const p of bareProbes) {
+      const dir = new THREE.Vector3(...p.dir).normalize();
+      const rSurf = field.sampleCombinedRadius(dir.x, dir.y, dir.z);
+      const hitPos = dir.clone().multiplyScalar(rSurf);
+      const hitNorm = field.sampleCombinedNormal(dir.x, dir.y, dir.z, normScratch).clone();
+      const input: NozzlePoseInput = {
+        isHoveringRock: true,
+        isBlasting: true,
+        isOrbiting: false,
+        hitPos,
+        hitNormal: hitNorm,
+        cameraPos: new THREE.Vector3(...p.cam),
+        cameraUp: new THREE.Vector3(0, 1, 0),
+        elapsedSec: 2.0,
+        sampleSurfaceRadius: sampleBareAmmonite,
+      };
+      ctrl.computeTargetPose(input, outTip, outQuat, outAim);
+      const minClr = measureNozzleMinRockClearance(outTip, outQuat, sampleBareAmmonite);
+      expect(minClr, `bare ammonite clearance at ${p.dir.join(',')}`).toBeGreaterThan(0.01);
+    }
+
+    // 4. Clean re-encrust reset restores full fresh nodule after 100% excavation
+    field.reset(5);
+    expect(field.remainingRockFraction).toBeCloseTo(1.0, 5);
+    expect(field.totalCarvedVolume).toBe(0);
+    expect(field.sampleMatrixRadius(0, 0, 1)).toBeGreaterThan(0.35);
+    expect(field.exposedFraction).toBeGreaterThan(0.015);
+    expect(field.exposedFraction).toBeLessThan(0.22);
 
     field.dispose();
     ammoniteGeo.dispose();

@@ -1,6 +1,7 @@
 import * as THREE from 'three/webgpu';
 import {
   Fn,
+  PI,
   TWO_PI,
   abs,
   atan,
@@ -12,6 +13,8 @@ import {
   dot,
   exp,
   float,
+  floor,
+  fract,
   length,
   max,
   mix,
@@ -26,6 +29,7 @@ import {
   sin,
   smoothstep,
   sqrt,
+  step,
   texture,
   transformNormalToView,
   uniform,
@@ -216,15 +220,17 @@ export function createErosionMaterials(erosionTex: THREE.DataTexture): ErosionMa
     metalness: 0.02,
     roughness: 0.88,
     envMapIntensity: 0.56,
+    alphaTest: 0.5,
   });
   {
     const unitDirVert = normalize(positionGeometry);
     const vUnitDir = unitDirVert.toVarying('vNoduleUnitDir');
 
-    // Vertex displacement: exact C-infinity analytical boulder hull + isotropic octahedral deltaR
+    // Vertex displacement: exact C-infinity analytical boulder hull * multiplicative scaleFactor
+    // Eliminates 100% of octahedral x=0 / y=0 creases at EVERY carve depth from intact (1.0) down to zero (0.0)
     const octUvVert = octDirToUvTsl(unitDirVert);
     const hSampleVert = texture(erosionTex, octUvVert).level(float(0.0));
-    const rVert = evalBaseBoulderRadiusTsl(unitDirVert).add(hSampleVert.r);
+    const rVert = evalBaseBoulderRadiusTsl(unitDirVert).mul(max(float(0.0), hSampleVert.r));
     const displacedVert = unitDirVert.mul(rVert);
     // Pass TRUE interpolated 3D displaced position to fragment shader so steep carved crater walls
     // slice cleanly across horizontal 3D strata beds with ZERO radial waterfall streak smearing!
@@ -234,9 +240,10 @@ export function createErosionMaterials(erosionTex: THREE.DataTexture): ErosionMa
     // Fragment evaluation (strictly uniform control flow for every texture tap)
     const d = normalize(vec3(vUnitDir));
     const pObj = vec3(vDisplacedPos);
+    const rFragObj = length(pObj);
     const octUvFrag = octDirToUvTsl(d);
     const hSample = texture(erosionTex, octUvFrag).level(float(0.0));
-    const rCenter = evalBaseBoulderRadiusTsl(d).add(hSample.r);
+    const rCenter = evalBaseBoulderRadiusTsl(d).mul(max(float(0.0), hSample.r));
     const cutDepth = max(float(0.0), hSample.g);
     const freshChalk = clamp(hSample.b, 0.0, 1.0);
     const fossilClearance = hSample.a;
@@ -253,22 +260,22 @@ export function createErosionMaterials(erosionTex: THREE.DataTexture): ErosionMa
     const dBp = normalize(d.add(B.mul(eps)));
     const dBm = normalize(d.sub(B.mul(eps)));
 
-    const rTp = evalBaseBoulderRadiusTsl(dTp).add(
-      texture(erosionTex, octDirToUvTsl(dTp)).level(float(0.0)).r
+    const rTp = evalBaseBoulderRadiusTsl(dTp).mul(
+      max(float(0.0), texture(erosionTex, octDirToUvTsl(dTp)).level(float(0.0)).r)
     );
-    const rTm = evalBaseBoulderRadiusTsl(dTm).add(
-      texture(erosionTex, octDirToUvTsl(dTm)).level(float(0.0)).r
+    const rTm = evalBaseBoulderRadiusTsl(dTm).mul(
+      max(float(0.0), texture(erosionTex, octDirToUvTsl(dTm)).level(float(0.0)).r)
     );
-    const rBp = evalBaseBoulderRadiusTsl(dBp).add(
-      texture(erosionTex, octDirToUvTsl(dBp)).level(float(0.0)).r
+    const rBp = evalBaseBoulderRadiusTsl(dBp).mul(
+      max(float(0.0), texture(erosionTex, octDirToUvTsl(dBp)).level(float(0.0)).r)
     );
-    const rBm = evalBaseBoulderRadiusTsl(dBm).add(
-      texture(erosionTex, octDirToUvTsl(dBm)).level(float(0.0)).r
+    const rBm = evalBaseBoulderRadiusTsl(dBm).mul(
+      max(float(0.0), texture(erosionTex, octDirToUvTsl(dBm)).level(float(0.0)).r)
     );
 
     const drdt = clamp(rTp.sub(rTm).div(eps.mul(2.0)), -1.85, 1.85);
     const drdb = clamp(rBp.sub(rBm).div(eps.mul(2.0)), -1.85, 1.85);
-    const nMacro = normalize(d.mul(rCenter).sub(T.mul(drdt)).sub(B.mul(drdb)));
+    const nMacro = normalize(d.mul(max(rCenter, float(0.02))).sub(T.mul(drdt)).sub(B.mul(drdb)));
 
     // 3D Object-Space Jurassic Calcareous Limestone Petrography evaluated on TRUE 3D `pObj`
     const seedShift = vec3(
@@ -412,6 +419,9 @@ export function createErosionMaterials(erosionTex: THREE.DataTexture): ErosionMa
 
     limestone.normalNode = transformNormalToView(nStratified);
     limestone.colorNode = finalColor;
+    // Clean opaque alpha-cutout retirement once limestone is blasted away to zero thickness
+    // (discards strictly inside the ammonite core / collapsed origin in both color & shadow passes)
+    limestone.opacityNode = step(float(0.018), rFragObj);
     limestone.roughnessNode = clamp(
       float(0.86)
         .add(fineOolite.sub(0.5).mul(0.14))
@@ -606,13 +616,24 @@ export function createErosionMaterials(erosionTex: THREE.DataTexture): ErosionMa
     const latheBand = mineralToothFbm(vec3(zLoc.mul(52.0), float(1.7), float(3.1)), float(1.8));
     const microPatina = mineralToothFbm(positionLocal, float(190.0));
 
-    // Machined patina deepening inside recessed collet neck & chamfer grooves
+    // Machined patina deepening inside recessed collet neck, chamfer grooves & rear crimped ferrule flutes
     const neckGroove = smoothstep(float(0.175), float(0.188), zLoc).mul(
       float(1.0).sub(smoothstep(float(0.212), float(0.226), zLoc))
     );
     const foreChamfer = exp(zLoc.sub(0.252).mul(zLoc.sub(0.252)).mul(-18000.0));
     const aftChamfer = exp(zLoc.sub(0.524).mul(zLoc.sub(0.524)).mul(-18000.0));
-    const grooveShadow = clamp(neckGroove.mul(0.45).add(foreChamfer.mul(0.32)).add(aftChamfer.mul(0.32)), 0.0, 0.55);
+    const crimpGroove1 = exp(zLoc.sub(1.036).mul(zLoc.sub(1.036)).mul(-22000.0));
+    const crimpGroove2 = exp(zLoc.sub(1.078).mul(zLoc.sub(1.078)).mul(-22000.0));
+    const grooveShadow = clamp(
+      neckGroove
+        .mul(0.45)
+        .add(foreChamfer.mul(0.32))
+        .add(aftChamfer.mul(0.32))
+        .add(crimpGroove1.mul(0.52))
+        .add(crimpGroove2.mul(0.52)),
+      0.0,
+      0.62
+    );
 
     // True Cylindrical Helical 45-deg Diamond Knurling on ergonomic grip barrel (z in [0.264, 0.514])
     // Exact integer tooth count N = 32 guarantees 100% seamless 360-deg wrap around atan2(y, x)!
@@ -679,8 +700,12 @@ export function createErosionMaterials(erosionTex: THREE.DataTexture): ErosionMa
   });
   {
     const zLoc = positionLocal.z;
+    const radXY = sqrt(positionLocal.x.mul(positionLocal.x).add(positionLocal.y.mul(positionLocal.y)));
     const latheMicro = sin(zLoc.mul(620.0)).mul(0.5).add(0.5);
     const grain = mineralToothFbm(positionLocal, float(95.0));
+    // Recessed valley darkening inside the 4-rib accordion strain-relief boot (z > 1.12)
+    const bootMask = smoothstep(float(1.116), float(1.126), zLoc);
+    const bootValley = smoothstep(float(0.0218), float(0.0188), radXY).mul(bootMask);
     // Oil-blackened Prussian-blued forged steel derived strictly from Raw Umber + Azurite Prussian + Bone Calcite
     const ironDeep = mix(pUmber.rInf, pAzurite.rInf, float(0.55)).mul(0.32);
     const ironSheen = mix(
@@ -688,11 +713,17 @@ export function createErosionMaterials(erosionTex: THREE.DataTexture): ErosionMa
       pCalcite.rInf.mul(0.24),
       float(0.32)
     );
-    darkIron.colorNode = mix(ironDeep, ironSheen, clamp(grain.mul(0.82).add(latheMicro.mul(0.14)), 0.0, 1.0));
+    const ironBase = mix(ironDeep, ironSheen, clamp(grain.mul(0.82).add(latheMicro.mul(0.14)), 0.0, 1.0));
+    darkIron.colorNode = mix(ironBase, ironDeep.mul(0.42), bootValley.mul(0.68));
     darkIron.normalNode = transformNormalToView(
       perturbNormal3DFbm(normalLocal, positionLocal, float(125.0), float(0.018))
     );
-    darkIron.roughnessNode = clamp(float(0.28).add(grain.mul(0.10)), 0.22, 0.42);
+    darkIron.roughnessNode = clamp(
+      float(0.28).add(grain.mul(0.10)).add(bootMask.mul(0.14)).add(bootValley.mul(0.24)),
+      0.22,
+      0.72
+    );
+    darkIron.metalnessNode = mix(float(0.84), float(0.36), bootMask);
   }
 
   const carbideTip = new THREE.MeshStandardNodeMaterial({
@@ -719,20 +750,135 @@ export function createErosionMaterials(erosionTex: THREE.DataTexture): ErosionMa
     carbideTip.metalnessNode = mix(float(0.90), float(0.10), boreMask);
   }
 
+  // Genuine 2-over-2 Interlocking Woven Braided Stainless-Steel & Bronze-Hemp Overbraid Mesh Sheath
   const hoseRubber = new THREE.MeshStandardNodeMaterial({
-    metalness: 0.10,
-    roughness: 0.70,
-    envMapIntensity: 0.72,
+    metalness: 0.78,
+    roughness: 0.34,
+    envMapIntensity: 1.48,
   });
   {
-    const braid = sin(uv().x.mul(140.0).add(uv().y.mul(TWO_PI).mul(6.0)))
-      .mul(sin(uv().x.mul(140.0).sub(uv().y.mul(TWO_PI).mul(6.0))))
-      .mul(0.5)
-      .add(0.5);
-    const hoseDark = mix(pUmber.rInf, pAzurite.rInf, float(0.35)).mul(0.18);
-    const hoseLight = mix(pUmber.rInf, pKaolin.rInf, float(0.22)).mul(0.30);
-    hoseRubber.colorNode = mix(hoseDark, hoseLight, braid);
-    hoseRubber.roughnessNode = clamp(float(0.62).add(braid.mul(0.18)), 0.52, 0.84);
+    const vHoseTan = attribute('aHoseTangent', 'vec3').toVarying('vHoseTan');
+    const vHoseCirc = attribute('aHoseCircum', 'vec3').toVarying('vHoseCirc');
+
+    // True physical arc-length s = uv().x and seamless seam-duplicated thetaNorm = uv().y ∈ [0, 1]
+    const sArc = uv().x;
+    const thetaNorm = uv().y;
+
+    // 8 helical carriers in each handedness (divisible by 4 -> exact seamless 360-deg 2-over-2 wrap!)
+    // +64.0 integer multiple of 4 guarantees strictly positive fract() inputs on Apple Silicon Metal
+    const uA = sArc.mul(76.0).add(thetaNorm.mul(8.0)).add(64.0);
+    const uB = sArc.mul(76.0).sub(thetaNorm.mul(8.0)).add(64.0);
+
+    const fA = fract(uA).sub(0.5);
+    const fB = fract(uB).sub(0.5);
+
+    // Crisp carrier ribbon masks leaving genuine dark diamond mesh pores between woven bundles
+    const wA = smoothstep(float(0.455), float(0.355), abs(fA));
+    const wB = smoothstep(float(0.455), float(0.355), abs(fB));
+
+    // Rounded cylindrical ribbon cross-section arch
+    const nfA = clamp(fA.div(0.44), -1.0, 1.0);
+    const nfB = clamp(fB.div(0.44), -1.0, 1.0);
+    const crownA = sqrt(max(float(0.0), float(1.0).sub(nfA.mul(nfA))));
+    const crownB = sqrt(max(float(0.0), float(1.0).sub(nfB.mul(nfB))));
+
+    // 4 tightly-packed parallel metallic wire filaments per woven carrier bundle
+    const wirePhaseA = fA.mul(4.0).mul(TWO_PI);
+    const wirePhaseB = fB.mul(4.0).mul(TWO_PI);
+    const wireA = cos(wirePhaseA).mul(0.5).add(0.5);
+    const wireB = cos(wirePhaseB).mul(0.5).add(0.5);
+
+    // Exact 2-over-2 interlocking twill/basket height wave (exactly out-of-phase at every crossing!)
+    const halfPi = PI.mul(0.5);
+    const phaseA = uB.add(floor(uA)).mul(halfPi);
+    const phaseB = uA.add(floor(uB)).mul(halfPi);
+    const waveA = cos(phaseA);
+    const waveB = cos(phaseB).negate();
+
+    const zA = wA.mul(float(0.52).add(waveA.mul(0.32)).add(crownA.mul(0.14)).add(wireA.mul(0.06)));
+    const zB = wB.mul(float(0.52).add(waveB.mul(0.32)).add(crownB.mul(0.14)).add(wireB.mul(0.06)));
+
+    const aOverB = smoothstep(float(-0.032), float(0.032), zA.sub(zB));
+    const strandCov = max(wA, wB);
+    const activeCrown = mix(crownB, crownA, aOverB);
+    const activeWave = mix(waveB, waveA, aOverB);
+    const activeWire = mix(wireB, wireA, aOverB);
+
+    // Deep ambient occlusion in weave recesses & right where under-strands duck beneath crossing crowns
+    const bothMask = wA.mul(wB);
+    const underLight = smoothstep(float(-0.78), float(0.58), activeWave);
+    const overlapLipAO = float(1.0).sub(
+      bothMask
+        .mul(float(1.0).sub(smoothstep(float(0.0), float(0.22), abs(zA.sub(zB)))))
+        .mul(0.56)
+    );
+    const weaveAO = clamp(
+      float(0.28).add(underLight.mul(0.52)).add(activeCrown.mul(0.20)),
+      0.16,
+      1.0
+    ).mul(overlapLipAO);
+
+    // Analytical tangent-space micro-normals along exact Frenet hose basis (zero dpdx/dpdy aliasing!)
+    const n0 = normalize(normalLocal);
+    const rawTan = vec3(vHoseTan);
+    const rawCirc = vec3(vHoseCirc);
+    const tS = normalize(rawTan.sub(n0.mul(dot(rawTan, n0))).add(vec3(1e-5, 0.0, 0.0)));
+    const tC = normalize(rawCirc.sub(n0.mul(dot(rawCirc, n0))).add(vec3(0.0, 1e-5, 0.0)));
+    const dirA = normalize(tS.add(tC));
+    const dirB = normalize(tS.sub(tC));
+
+    const dHA_dA = fA.mul(-2.1).sub(sin(wirePhaseA).mul(0.62));
+    const dHA_dB = sin(phaseA).mul(-0.58);
+    const dHB_dB = fB.mul(-2.1).sub(sin(wirePhaseB).mul(0.62));
+    const dHB_dA = sin(phaseB).mul(0.58);
+
+    const slopeA = mix(dHB_dA, dHA_dA, aOverB).mul(strandCov);
+    const slopeB = mix(dHB_dB, dHA_dB, aOverB).mul(strandCov);
+    const nBraid = normalize(
+      n0.sub(dirA.mul(slopeA.mul(0.38))).sub(dirB.mul(slopeB.mul(0.38)))
+    );
+
+    // Subtle handling wear & bend-zone oil patina near the rear strain-relief collar
+    const wearNoise = mineralToothFbm(positionLocal, float(26.0));
+    const ferruleWear = float(0.76).add(smoothstep(float(0.0), float(0.16), sArc).mul(0.24));
+    const patinaTone = float(0.86).add(wearNoise.mul(0.22)).mul(ferruleWear);
+
+    // Canonical natural mineral pigment metallic overbraid:
+    // Woven satin stainless-steel carriers interleaved with subtle warm bronze-hemp tonal anisotropy
+    // over a deep oil-blackened inner pressure-tube core peeking through diamond interstices
+    const steelCarrier = mix(pCalcite.rInf, pAzurite.rInf, float(0.16)).mul(0.58);
+    const bronzeCarrier = mix(
+      mix(pKaolin.rInf, pOchre.rInf, float(0.28)).mul(0.46),
+      pUmber.rInf.mul(0.40),
+      float(0.22)
+    );
+    const carrierBase = mix(bronzeCarrier, steelCarrier, aOverB);
+    const wireHighlight = mix(
+      carrierBase.mul(0.74),
+      carrierBase.mul(1.22),
+      clamp(activeWire.mul(0.72).add(activeCrown.mul(0.28)), 0.0, 1.0)
+    );
+    const innerCore = mix(pUmber.rInf, pAzurite.rInf, float(0.35)).mul(0.055);
+
+    hoseRubber.colorNode = mix(innerCore, wireHighlight.mul(weaveAO).mul(patinaTone), strandCov);
+    hoseRubber.normalNode = transformNormalToView(nBraid);
+    hoseRubber.metalnessNode = mix(
+      float(0.06),
+      clamp(float(0.74).add(activeWire.mul(0.14)).add(activeCrown.mul(0.08)), 0.62, 0.94),
+      strandCov
+    );
+    hoseRubber.roughnessNode = mix(
+      float(0.90),
+      clamp(
+        float(0.35)
+          .sub(activeWire.mul(0.13))
+          .sub(activeCrown.mul(0.06))
+          .add(float(1.0).sub(underLight).mul(0.16)),
+        0.16,
+        0.58
+      ),
+      strandCov
+    );
   }
 
   // -------------------------------------------------------------------------

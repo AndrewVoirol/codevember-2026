@@ -16,14 +16,16 @@ import { bakeAmmoniteRadialEnvelope } from './ammonite';
 
 /** Minimum expected rock clearance above the buried ammonite (verified across seeds without clamping to raw ribs) */
 export const MIN_FOSSIL_OVERBURDEN = 0.04;
-/** Recess depth below fossil ribs to clear limestone inter-rib valleys cleanly without z-fighting */
+/** Recess depth below fossil ribs at which a texel is counted as fully exposed */
 export const FOSSIL_MATRIX_RECESS = 0.022;
-/** Maximum carve depth into bare limestone collar outside the ammonite footprint */
-export const MAX_COLLAR_CARVE_DEPTH = 0.24;
-/** Minimum solid inner shale pedestal radius anywhere on the nodule */
-export const MIN_CORE_FLOOR_RADIUS = 0.24;
+/** Depth past fossil surface over which inter-rib calcite chalk brushes completely clean */
+export const FOSSIL_CHALK_CLEAR_DEPTH = 0.042;
+/** Zero artificial excavation floor: limestone blasts completely away down to 0 everywhere */
+export const MIN_CORE_FLOOR_RADIUS = 0.0;
 /** Nominal air-abrasive jet cone half-angle on the unit sphere (radians) */
 export const JET_CONE_RADIUS_RAD = 0.185;
+/** Consistent minimum 3D world-space jet radius so center umbilicus carves as cleanly as outer rim */
+export const JET_WORLD_MIN_RADIUS = 0.148;
 
 export interface CarveResult {
   carvedVolumeDelta: number;
@@ -88,7 +90,7 @@ export class ErosionField {
   readonly startRadius: Float32Array;
   /** Live carvable limestone matrix radial surface */
   readonly currentRadius: Float32Array;
-  /** Signed isotropic displacement delta `currentRadius - baseBoulderRadius` (zero y=0 fold kink) */
+  /** Isotropic multiplicative ratio `currentRadius / baseBoulderRadius` (zero y=0 / x=0 fold kink at ANY carve depth!) */
   readonly deltaRadius: Float32Array;
   /** Differential-hardness erosion floor (stops matrix erosion cleanly at fossil / core bed) */
   readonly matrixFloor: Float32Array;
@@ -106,6 +108,8 @@ export class ErosionField {
 
   strataSeed = 1;
   totalCarvedVolume = 0;
+  initialRockVolume = 0;
+  remainingRockFraction = 1;
   exposedFraction = 0;
 
   private fossilTotalSolidAngle = 0;
@@ -318,27 +322,16 @@ export class ErosionField {
         const plateNoise = fbm3DCpu(dx * 4.4 + 3.1, dy * 4.4 + 7.4, dz * 4.4 - 2.2, 3.0);
         this.strataHardness[idx] = 0.58 + 0.44 * ironBand * ironBand + (plateNoise - 0.5) * 0.26;
 
-        // Differential-hardness erosion floor (smoothly feathered collar outside fossil perimeter)
-        let floorR: number;
+        // Zero artificial excavation floor: limestone can be blasted 100% away down to r = 0
+        // across the center umbilicus, inter-whorl valleys, ribs, and outer collar alike,
+        // freeing the complete 3D pyritized ammonite without stuck center caps or skirts!
         if (fR > 0) {
-          // Soft limestone clears down just beneath the proud ammonite surface so 3D ribs stand out cleanly
-          floorR = Math.max(0.10, fR - FOSSIL_MATRIX_RECESS);
           this.fossilTotalSolidAngle += dOmega;
-        } else {
-          const baseCollarFloor = Math.max(MIN_CORE_FLOOR_RADIUS, r - MAX_COLLAR_CARVE_DEPTH);
-          const prox = this.fossilProximity[idx];
-          const nearFossilFloor = this.smoothFossilFloor[idx];
-          if (prox > 0.001 && nearFossilFloor > 0) {
-            const blend = prox * prox * (3.0 - 2.0 * prox);
-            floorR = Math.max(
-              MIN_CORE_FLOOR_RADIUS,
-              baseCollarFloor + (nearFossilFloor - baseCollarFloor) * blend * 0.72
-            );
-          } else {
-            floorR = baseCollarFloor;
-          }
         }
-        this.matrixFloor[idx] = floorR;
+        this.matrixFloor[idx] = MIN_CORE_FLOOR_RADIUS;
+
+        // Boot-only fracture-window clamp keeps the resting museum peek subtle & crisp
+        const bootWindowFloor = fR > 0 ? Math.max(0.10, fR - FOSSIL_MATRIX_RECESS) : 0.24;
 
         // Sculpt natural C1-beveled chiseled limestone spall window on front flank peeking onto pyrite ribs
         // Strictly band-limited conchoidal edge irregularity + zero pow(<1) cliff singularity!
@@ -360,7 +353,7 @@ export class ErosionField {
             // Smooth geological spall depth independent of buried ammonite whorl jumps:
             // eliminates 100% of shark-tooth cliff tearing on the visible limestone crater wall!
             const maxSpallDepth = 0.34;
-            startR = Math.max(floorR, r - maxSpallDepth * beveledCut);
+            startR = Math.max(bootWindowFloor, r - maxSpallDepth * beveledCut);
             // Restrained crushed dolomite powder strictly along freshly cleaved basin rim
             const rimBand = smoothstep(0.08, 0.42, tCut) * (1.0 - smoothstep(0.68, 0.96, tCut));
             chalk = rimBand * 0.24 + tCut * 0.07;
@@ -369,13 +362,12 @@ export class ErosionField {
 
         this.startRadius[idx] = startR;
         this.currentRadius[idx] = startR;
-        this.deltaRadius[idx] = startR - rBase;
+        this.deltaRadius[idx] = startR / Math.max(1e-5, rBase);
         this.freshChalk[idx] = chalk;
       }
     }
 
-    // 3-pass gentle physical spall-slope bevel across the initial fracture window so no 1-texel radial
-    // spikes exist at boot (clamped strictly to [matrixFloor, unfracturedRadius] -> 0% rib clipping)
+    // 3-pass gentle isotropic 8-neighbor physical spall-slope bevel across the initial fracture window
     mirrorOctahedralScalarGutter(this.startRadius, this.size);
     const maxInitStep = 0.015;
     for (let pass = 0; pass < 3; pass++) {
@@ -386,20 +378,27 @@ export class ErosionField {
           const idx = row + ix;
           const cur = this.startRadius[idx];
           const unfrac = this.unfracturedRadius[idx];
+          const fR = this.fossilRadius[idx];
+          const bootFloor = fR > 0 ? Math.max(0.10, fR - FOSSIL_MATRIX_RECESS) : 0.24;
           const nAvg =
-            0.25 *
-            (this.startRadius[idx - 1] +
-              this.startRadius[idx + 1] +
-              this.startRadius[idx - this.size] +
-              this.startRadius[idx + this.size]);
+            0.15 *
+              (this.startRadius[idx - 1] +
+                this.startRadius[idx + 1] +
+                this.startRadius[idx - this.size] +
+                this.startRadius[idx + this.size]) +
+            0.10 *
+              (this.startRadius[idx - this.size - 1] +
+                this.startRadius[idx - this.size + 1] +
+                this.startRadius[idx + this.size - 1] +
+                this.startRadius[idx + this.size + 1]);
           const excess = cur - nAvg - maxInitStep;
           if (excess > 0 && cur < unfrac - 1e-4) {
-            const relaxed = Math.max(this.matrixFloor[idx], cur - excess * 0.48);
+            const relaxed = Math.max(bootFloor, cur - excess * 0.48);
             this.spallScratch[idx] = relaxed;
           } else if (cur >= unfrac - 1e-4 && cur - nAvg > maxInitStep * 1.45) {
             // Feather only steep fractured outer lip overhanging an adjacent pit
             const lipDrop = (cur - nAvg - maxInitStep * 1.45) * 0.36;
-            this.spallScratch[idx] = Math.max(this.matrixFloor[idx], cur - lipDrop);
+            this.spallScratch[idx] = Math.max(bootFloor, cur - lipDrop);
           }
         }
       }
@@ -407,19 +406,22 @@ export class ErosionField {
       mirrorOctahedralScalarGutter(this.startRadius, this.size);
     }
 
-    // Sync currentRadius, deltaRadius, and exact initial exposedSolidAngle after spall beveling
+    // Sync currentRadius, scaleFactor (`deltaRadius`), initial rock volume, and exact initial exposedSolidAngle
+    this.initialRockVolume = 0;
     for (let iy = 1; iy <= this.inner; iy++) {
       const row = iy * this.size;
       for (let ix = 1; ix <= this.inner; ix++) {
         const idx = row + ix;
         const sr = this.startRadius[idx];
         this.currentRadius[idx] = sr;
-        this.deltaRadius[idx] = sr - this.baseBoulderRadius[idx];
+        this.deltaRadius[idx] = sr / Math.max(1e-5, this.baseBoulderRadius[idx]);
+        this.initialRockVolume += (sr * sr * sr * this.solidAngle[idx]) / 3.0;
         if (this.fossilRadius[idx] > 0) {
           this.exposedSolidAngle += this.evalTexelExposure(idx) * this.solidAngle[idx];
         }
       }
     }
+    this.remainingRockFraction = 1.0;
 
     mirrorOctahedralScalarGutter(this.unfracturedRadius, this.size);
     mirrorOctahedralScalarGutter(this.startRadius, this.size);
@@ -445,21 +447,21 @@ export class ErosionField {
   private writeTexelHalfFloat(idx: number): void {
     const toHalf = THREE.DataUtils.toHalfFloat;
     const curR = this.currentRadius[idx];
-    // Pack signed isotropic offset `deltaR = curR - baseBoulderRadius` so GPU evaluates C-infinity
-    // analytical R_base(d) with zero bilinear V-trough creases across octahedral y = 0 / x = 0 folds!
-    const deltaR = curR - this.baseBoulderRadius[idx];
+    // Pack multiplicative ratio `scaleR = curR / baseBoulderRadius` so GPU evaluates C-infinity
+    // analytical R_base(d) * bilinear(scaleR) with ZERO octahedral x=0 / y=0 crease at EVERY carve depth (1 -> 0)!
+    const scaleR = curR / Math.max(1e-5, this.baseBoulderRadius[idx]);
     const cutDepth = Math.max(0, this.unfracturedRadius[idx] - curR);
     const chalk = this.freshChalk[idx];
     const fR = this.fossilRadius[idx];
     let fossilClearance: number;
     if (fR > 0) {
-      fossilClearance = Math.max(-1.0, Math.min(1.0, (fR - curR) / FOSSIL_MATRIX_RECESS));
+      fossilClearance = Math.max(-1.0, Math.min(1.0, (fR - curR) / FOSSIL_CHALK_CLEAR_DEPTH));
     } else {
       // Smoothly feather collar clearance outside fossil perimeter so AO/chalk seam never pinches abruptly
       const prox = this.fossilProximity[idx];
       const nearFloor = this.smoothFossilFloor[idx];
       if (prox > 0.01 && nearFloor > 0) {
-        const approxClear = Math.max(-1.0, Math.min(0.45, (nearFloor + FOSSIL_MATRIX_RECESS - curR) / FOSSIL_MATRIX_RECESS));
+        const approxClear = Math.max(-1.0, Math.min(0.45, (nearFloor + FOSSIL_MATRIX_RECESS - curR) / FOSSIL_CHALK_CLEAR_DEPTH));
         fossilClearance = -1.0 + (approxClear + 1.0) * prox;
       } else {
         fossilClearance = -1.0;
@@ -467,7 +469,7 @@ export class ErosionField {
     }
 
     const base = idx * 4;
-    this.textureData[base] = toHalf(deltaR);
+    this.textureData[base] = toHalf(scaleR);
     this.textureData[base + 1] = toHalf(cutDepth);
     this.textureData[base + 2] = toHalf(chalk);
     this.textureData[base + 3] = toHalf(fossilClearance);
@@ -487,8 +489,10 @@ export class ErosionField {
 
   /**
    * Fires the pneumatic micro-abrasive dolomite grit jet centered at unit direction `hitDir`,
-   * stripping soft stratified limestone down to the differential-hardness floor while
-   * keeping the pyritized ammonite completely uncut.
+   * stripping soft stratified limestone all the way down to zero rock thickness while keeping
+   * the pyritized ammonite completely uncut. Uses true 3D world-space jet cylinder distance
+   * alongside angular reach so the central umbilicus & deep inter-whorl valleys blast away
+   * just as cleanly as the outer limestone rim.
    */
   carveAt(
     hitDirX: number,
@@ -496,17 +500,41 @@ export class ErosionField {
     hitDirZ: number,
     dtSec: number,
     intensity = 1.0,
-    jetRadiusRad = JET_CONE_RADIUS_RAD
+    jetRadiusRad = JET_CONE_RADIUS_RAD,
+    rayDirX?: number,
+    rayDirY?: number,
+    rayDirZ?: number
   ): CarveResult {
     const invLen = 1.0 / Math.max(1e-8, Math.hypot(hitDirX, hitDirY, hitDirZ));
     const hx = hitDirX * invLen;
     const hy = hitDirY * invLen;
     const hz = hitDirZ * invLen;
 
-    const maxAng = jetRadiusRad * 1.48;
-    const cosLimit = Math.cos(maxAng);
-    // Brisk, tactile 90-PSI air-abrasive stripping rate so 1-2s sweeps strip limestone off bold pyrite ribs
-    const baseRate = 6.9 * Math.max(0, dtSec) * Math.max(0, intensity);
+    const hitR = this.sampleCombinedRadius(hx, hy, hz);
+    const hitPosX = hx * hitR;
+    const hitPosY = hy * hitR;
+    const hitPosZ = hz * hitR;
+
+    // 3D jet axis pointing into the rock from the nozzle/camera ray (or radially inward if omitted)
+    let jx = -hx;
+    let jy = -hy;
+    let jz = -hz;
+    if (rayDirX !== undefined && rayDirY !== undefined && rayDirZ !== undefined) {
+      const rInv = 1.0 / Math.max(1e-8, Math.hypot(rayDirX, rayDirY, rayDirZ));
+      jx = rayDirX * rInv;
+      jy = rayDirY * rInv;
+      jz = rayDirZ * rInv;
+    }
+
+    // Physical 3D world-space jet cone radius stays consistent from center umbilicus to outer rim
+    const jetWorldR = Math.max(JET_WORLD_MIN_RADIUS, hitR * jetRadiusRad);
+    const maxSpreadRad = Math.min(
+      1.38,
+      Math.max(jetRadiusRad * 1.48, Math.atan2(jetWorldR * 1.55, Math.max(0.12, hitR * 0.70)))
+    );
+    const cosLimit = Math.max(0.05, Math.cos(maxSpreadRad));
+    // Brisk, tactile 90-PSI air-abrasive stripping rate so sweeps cleanly clear rock down to zero
+    const baseRate = 7.4 * Math.max(0, dtSec) * Math.max(0, intensity);
 
     let carvedVolumeDelta = 0;
     let touchedTexels = 0;
@@ -529,8 +557,40 @@ export class ErosionField {
         const cosAng = dx * hx + dy * hy + dz * hz;
         if (cosAng < cosLimit) continue;
 
+        const oldR = this.currentRadius[idx];
+        const floorR = this.matrixFloor[idx];
+        const fR = this.fossilRadius[idx];
+
         const ang = Math.acos(Math.min(1, cosAng));
-        const normR = ang / Math.max(1e-4, jetRadiusRad);
+        const normAng = ang / Math.max(1e-4, jetRadiusRad);
+
+        // True 3D world-space jet reach evaluated on both the live rock surface AND the exposed
+        // ammonite reference envelope so inter-whorl valleys & center umbilicus clear cleanly to 0
+        let normWorld = normAng;
+        const rx = dx * oldR - hitPosX;
+        const ry = dy * oldR - hitPosY;
+        const rz = dz * oldR - hitPosZ;
+        const alongRock = rx * jx + ry * jy + rz * jz;
+        if (alongRock > -0.48 && alongRock < 0.44) {
+          const perpSq = Math.max(0, rx * rx + ry * ry + rz * rz - alongRock * alongRock);
+          const axialPen = Math.max(0, Math.abs(alongRock) - 0.18) * 0.80;
+          const dRock = Math.sqrt(perpSq + axialPen * axialPen) / jetWorldR;
+          if (dRock < normWorld) normWorld = dRock;
+        }
+        if (fR > oldR) {
+          const fx = dx * fR - hitPosX;
+          const fy = dy * fR - hitPosY;
+          const fz = dz * fR - hitPosZ;
+          const alongFos = fx * jx + fy * jy + fz * jz;
+          if (alongFos > -0.36 && alongFos < 0.38) {
+            const perpSqF = Math.max(0, fx * fx + fy * fy + fz * fz - alongFos * alongFos);
+            const axialPenF = Math.max(0, Math.abs(alongFos) - 0.16) * 0.80;
+            const dFos = Math.sqrt(perpSqF + axialPenF * axialPenF) / jetWorldR;
+            if (dFos < normWorld) normWorld = dFos;
+          }
+        }
+
+        const normR = normWorld;
 
         // Band-limited mineral fracture modulation so pits spall cleanly along strata seams without 1-texel needles
         const hard = this.strataHardness[idx];
@@ -543,9 +603,6 @@ export class ErosionField {
         if (coreJet <= 1e-4) continue;
 
         const dOmega = this.solidAngle[idx];
-        const oldR = this.currentRadius[idx];
-        const floorR = this.matrixFloor[idx];
-        const fR = this.fossilRadius[idx];
 
         totalContactWeight += coreJet;
         if (fR > 0 && oldR <= fR + 0.008) {
@@ -554,14 +611,21 @@ export class ErosionField {
 
         const prevExp = fR > 0 ? this.evalTexelExposure(idx) : 0;
 
-        // Differential hardness: matrix erodes inversely with local strata hardness, strictly clamped at matrixFloor
-        const cutAmount = (baseRate * coreJet * microChip) / hard;
-        const newR = Math.max(floorR, oldR - cutAmount);
+        // Differential hardness: matrix erodes all the way down to zero (matrixFloor = 0),
+        // normalized smoothly for radial boulder thickness so outer collar strips as briskly as center,
+        // with accelerated air-stream flushing once thin residual matrix recedes below exposed ribs
+        const rimPace = 0.72 + 0.56 * (this.baseBoulderRadius[idx] / 0.42);
+        const recessFlushBoost = fR > 0 && oldR <= fR + 0.025 ? 2.15 : 1.0;
+        const cutAmount = (baseRate * coreJet * microChip * rimPace * recessFlushBoost) / hard;
+        let newR = Math.max(floorR, oldR - cutAmount);
+        if (newR < 0.004 && floorR <= 0.0) {
+          newR = 0.0;
+        }
         const actualDelta = oldR - newR;
 
         if (actualDelta > 1e-7) {
           this.currentRadius[idx] = newR;
-          this.deltaRadius[idx] = newR - this.baseBoulderRadius[idx];
+          this.deltaRadius[idx] = newR / Math.max(1e-5, this.baseBoulderRadius[idx]);
           const volDelta = ((oldR * oldR * oldR - newR * newR * newR) * dOmega) / 3.0;
           carvedVolumeDelta += volDelta;
           depthSum += actualDelta;
@@ -576,10 +640,10 @@ export class ErosionField {
           if (iy > maxIy) maxIy = iy;
         }
 
-        // Restrained powdery dolomite chalk bloom on actively blasted limestone rims (clears off exposed pyrite)
+        // Restrained powdery dolomite chalk bloom on actively blasted limestone rims (clears off exposed pyrite & zeroed rock)
         const chalkBoost =
-          fR > 0 && newR <= fR - FOSSIL_MATRIX_RECESS * 0.65
-            ? -coreJet * dtSec * 3.0
+          (fR > 0 && newR <= fR - FOSSIL_MATRIX_RECESS * 0.65) || newR <= 0.02
+            ? -coreJet * dtSec * 3.5
             : coreJet * (actualDelta > 1e-6 ? 0.34 : 0.10);
         const nextChalk = Math.max(0, Math.min(0.85, this.freshChalk[idx] + chalkBoost));
         if (Math.abs(nextChalk - this.freshChalk[idx]) > 1e-4 || actualDelta > 1e-7) {
@@ -597,20 +661,20 @@ export class ErosionField {
       }
     }
 
-    // Physical rock-spall angle-of-repose cliff bevel (2 local passes) around actively carved cells:
-    // Prevents vertical 1-texel stretched cliff needles while conserving removed volume exactly!
+    // Metric-invariant isotropic 8-neighbor cliff bevel strictly inside the active jet halo:
+    // Scales repose threshold by exact spherical texel arc-length sqrt(dOmega) so carved pits stay
+    // circularly symmetric with ZERO octahedral x=0 / y=0 4-leaf clover creases, and never creep
+    // outward into unblasted rock!
     if (minIx <= maxIx && minIy <= maxIy) {
-      const x0 = Math.max(1, minIx - 2);
-      const x1 = Math.min(this.inner, maxIx + 2);
-      const y0 = Math.max(1, minIy - 2);
-      const y1 = Math.min(this.inner, maxIy + 2);
-      const maxCliffStep = 0.0125;
+      const x0 = Math.max(1, minIx - 1);
+      const x1 = Math.min(this.inner, maxIx + 1);
+      const y0 = Math.max(1, minIy - 1);
+      const y1 = Math.min(this.inner, maxIy + 1);
 
       for (let spallPass = 0; spallPass < 2; spallPass++) {
         if (touchedEdge) {
           mirrorOctahedralScalarGutter(this.currentRadius, this.size);
         }
-        // Snapshot active window into scratch before lowering steep overhangs
         for (let iy = y0 - 1; iy <= y1 + 1; iy++) {
           const row = iy * this.size;
           for (let ix = x0 - 1; ix <= x1 + 1; ix++) {
@@ -622,18 +686,34 @@ export class ErosionField {
           const row = iy * this.size;
           for (let ix = x0; ix <= x1; ix++) {
             const idx = row + ix;
+            // Only relax cells inside the active blast footprint (zero runaway erosion across uncarved boulder)
+            const dx = this.dirX[idx];
+            const dy = this.dirY[idx];
+            const dz = this.dirZ[idx];
+            if (dx * hx + dy * hy + dz * hz < cosLimit) continue;
+
             const oldR = this.spallScratch[idx];
             const nAvg =
-              0.25 *
-              (this.spallScratch[idx - 1] +
-                this.spallScratch[idx + 1] +
-                this.spallScratch[idx - this.size] +
-                this.spallScratch[idx + this.size]);
-            const excess = oldR - nAvg - maxCliffStep;
+              0.15 *
+                (this.spallScratch[idx - 1] +
+                  this.spallScratch[idx + 1] +
+                  this.spallScratch[idx - this.size] +
+                  this.spallScratch[idx + this.size]) +
+              0.10 *
+                (this.spallScratch[idx - this.size - 1] +
+                  this.spallScratch[idx - this.size + 1] +
+                  this.spallScratch[idx + this.size - 1] +
+                  this.spallScratch[idx + this.size + 1]);
+            // Exact spherical texel spacing sqrt(dOmega) keeps cliff slope isotropic across all azimuths
+            const localCliffStep = Math.sqrt(this.solidAngle[idx]) * 2.8;
+            const excess = oldR - nAvg - localCliffStep;
             if (excess > 0) {
               const floorR = this.matrixFloor[idx];
-              const spallDrop = excess * 0.48;
-              const newR = Math.max(floorR, oldR - spallDrop);
+              const spallDrop = excess * 0.42;
+              let newR = Math.max(floorR, oldR - spallDrop);
+              if (newR < 0.004 && floorR <= 0.0) {
+                newR = 0.0;
+              }
               const actualDelta = oldR - newR;
               if (actualDelta > 1e-7) {
                 const fR = this.fossilRadius[idx];
@@ -641,7 +721,7 @@ export class ErosionField {
                 const prevExp = fR > 0 ? this.evalTexelExposure(idx) : 0;
 
                 this.currentRadius[idx] = newR;
-                this.deltaRadius[idx] = newR - this.baseBoulderRadius[idx];
+                this.deltaRadius[idx] = newR / Math.max(1e-5, this.baseBoulderRadius[idx]);
                 carvedVolumeDelta += ((oldR * oldR * oldR - newR * newR * newR) * dOmega) / 3.0;
                 depthSum += actualDelta;
 
@@ -663,6 +743,10 @@ export class ErosionField {
 
     if (carvedVolumeDelta > 0) {
       this.totalCarvedVolume += carvedVolumeDelta;
+      this.remainingRockFraction =
+        this.initialRockVolume > 1e-6
+          ? Math.max(0, Math.min(1, 1.0 - this.totalCarvedVolume / this.initialRockVolume))
+          : 0;
       this.exposedFraction =
         this.fossilTotalSolidAngle > 1e-6
           ? Math.max(0, Math.min(1, this.exposedSolidAngle / this.fossilTotalSolidAngle))
@@ -699,7 +783,9 @@ export class ErosionField {
       const idx = this.activeChalkIndices[i];
       const cutDepth = Math.max(0, this.unfracturedRadius[idx] - this.currentRadius[idx]);
       const fR = this.fossilRadius[idx];
-      const isCleanFossil = fR > 0 && this.currentRadius[idx] <= fR - FOSSIL_MATRIX_RECESS * 0.65;
+      const isCleanFossil =
+        (fR > 0 && this.currentRadius[idx] <= fR - FOSSIL_MATRIX_RECESS * 0.65) ||
+        this.currentRadius[idx] <= 0.02;
       // Freshly carved limestone retains a subtle permanent powdery matte floor (~0.14)
       const restChalk = isCleanFossil ? 0.0 : smoothstep(0.008, 0.055, cutDepth) * 0.14;
       const cur = this.freshChalk[idx];
@@ -759,12 +845,12 @@ export class ErosionField {
 
   /**
    * Evaluates the live matrix surface radius identically to GPU reconstruction:
-   * `evalBaseBoulderRadiusCpu(d) + bilinear(deltaRadius)` (zero octahedral y=0 / x=0 crease).
+   * `evalBaseBoulderRadiusCpu(d) * max(0, bilinear(scaleFactor))` (zero octahedral x=0 / y=0 crease at every depth!).
    */
   sampleMatrixRadius(dx: number, dy: number, dz: number): number {
     return (
-      evalBaseBoulderRadiusCpu(dx, dy, dz) +
-      this.sampleGridBilinear(this.deltaRadius, dx, dy, dz)
+      evalBaseBoulderRadiusCpu(dx, dy, dz) *
+      Math.max(0, this.sampleGridBilinear(this.deltaRadius, dx, dy, dz))
     );
   }
 
@@ -853,7 +939,7 @@ export class ErosionField {
     const tFar = -b + sqrtDisc;
     if (tFar <= tNear) return false;
 
-    const steps = 48;
+    const steps = 72;
     const dt = (tFar - tNear) / steps;
 
     let prevT = tNear;

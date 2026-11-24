@@ -161,7 +161,12 @@ function buildClosedLatheAlongZ(
 }
 
 /**
- * Builds a watertight capped curved tube along a cubic spline with guaranteed outward winding.
+ * Builds a watertight, strictly outward-wound capped curved tube along a cubic spline with:
+ *  - Duplicated circumferential UV seam (`radialSegments + 1` vertices per ring, `v ∈ [0, 1]`)
+ *    so braided mesh textures wrap 360 deg with ZERO backward UV interpolation smear.
+ *  - True physical arc-length `u = s` (`[0, curveLength]`) so braid pitch stays distortion-free.
+ *  - Exact orthonormal tangent-frame attributes (`aHoseTangent`, `aHoseCircum`) for crisp
+ *    analytical tangent-space micro-normals on woven multi-strand overbraid wire bundles.
  */
 function buildCappedTubeAlongCurve(
   curve: THREE.Curve<THREE.Vector3>,
@@ -171,68 +176,111 @@ function buildCappedTubeAlongCurve(
   radialSegments: number
 ): THREE.BufferGeometry {
   const frames = curve.computeFrenetFrames(tubularSegments, false);
+  const totalLen = curve.getLength();
   const ringCount = tubularSegments + 1;
-  const totalVerts = ringCount * radialSegments + 2;
-  const startCapIdx = ringCount * radialSegments;
+  const cols = radialSegments + 1; // Duplicate seam vertex at j = radialSegments (v = 1.0)
+  const totalVerts = ringCount * cols + 2;
+  const startCapIdx = ringCount * cols;
   const endCapIdx = startCapIdx + 1;
 
   const positions = new Float32Array(totalVerts * 3);
+  const normals = new Float32Array(totalVerts * 3);
   const uvs = new Float32Array(totalVerts * 2);
+  const tangents = new Float32Array(totalVerts * 3);
+  const circums = new Float32Array(totalVerts * 3);
   const p = new THREE.Vector3();
 
   for (let i = 0; i <= tubularSegments; i++) {
     const u = i / tubularSegments;
+    const arcS = u * totalLen;
     curve.getPointAt(u, p);
+    const T = frames.tangents[i];
     const N = frames.normals[i];
     const B = frames.binormals[i];
     const rad = radiusStart + (radiusEnd - radiusStart) * u;
 
-    for (let j = 0; j < radialSegments; j++) {
+    for (let j = 0; j <= radialSegments; j++) {
       const v = j / radialSegments;
-      const ang = v * Math.PI * 2;
+      // Ensure j === radialSegments lands bit-exact on j === 0 position (0 gap on seam)
+      const ang = j === radialSegments ? 0 : v * Math.PI * 2;
       const cosA = Math.cos(ang);
       const sinA = Math.sin(ang);
-      const idx = i * radialSegments + j;
+      const idx = i * cols + j;
 
-      positions[idx * 3] = p.x + rad * (cosA * N.x + sinA * B.x);
-      positions[idx * 3 + 1] = p.y + rad * (cosA * N.y + sinA * B.y);
-      positions[idx * 3 + 2] = p.z + rad * (cosA * N.z + sinA * B.z);
-      uvs[idx * 2] = u;
+      const nx = cosA * N.x + sinA * B.x;
+      const ny = cosA * N.y + sinA * B.y;
+      const nz = cosA * N.z + sinA * B.z;
+
+      positions[idx * 3] = p.x + rad * nx;
+      positions[idx * 3 + 1] = p.y + rad * ny;
+      positions[idx * 3 + 2] = p.z + rad * nz;
+
+      normals[idx * 3] = nx;
+      normals[idx * 3 + 1] = ny;
+      normals[idx * 3 + 2] = nz;
+
+      tangents[idx * 3] = T.x;
+      tangents[idx * 3 + 1] = T.y;
+      tangents[idx * 3 + 2] = T.z;
+
+      // Unit circumferential tangent d/dTheta = -sinA * N + cosA * B
+      circums[idx * 3] = -sinA * N.x + cosA * B.x;
+      circums[idx * 3 + 1] = -sinA * N.y + cosA * B.y;
+      circums[idx * 3 + 2] = -sinA * N.z + cosA * B.z;
+
+      uvs[idx * 2] = arcS;
       uvs[idx * 2 + 1] = v;
     }
   }
 
   // Start & end cap centers
   curve.getPointAt(0, p);
-  positions[startCapIdx * 3] = p.x - frames.tangents[0].x * 0.002;
-  positions[startCapIdx * 3 + 1] = p.y - frames.tangents[0].y * 0.002;
-  positions[startCapIdx * 3 + 2] = p.z - frames.tangents[0].z * 0.002;
+  const t0 = frames.tangents[0];
+  positions[startCapIdx * 3] = p.x - t0.x * 0.002;
+  positions[startCapIdx * 3 + 1] = p.y - t0.y * 0.002;
+  positions[startCapIdx * 3 + 2] = p.z - t0.z * 0.002;
+  normals[startCapIdx * 3] = -t0.x;
+  normals[startCapIdx * 3 + 1] = -t0.y;
+  normals[startCapIdx * 3 + 2] = -t0.z;
+  tangents[startCapIdx * 3] = t0.x;
+  tangents[startCapIdx * 3 + 1] = t0.y;
+  tangents[startCapIdx * 3 + 2] = t0.z;
+  circums[startCapIdx * 3] = frames.binormals[0].x;
+  circums[startCapIdx * 3 + 1] = frames.binormals[0].y;
+  circums[startCapIdx * 3 + 2] = frames.binormals[0].z;
   uvs[startCapIdx * 2] = 0;
   uvs[startCapIdx * 2 + 1] = 0.5;
 
   curve.getPointAt(1, p);
-  positions[endCapIdx * 3] = p.x + frames.tangents[tubularSegments].x * 0.002;
-  positions[endCapIdx * 3 + 1] = p.y + frames.tangents[tubularSegments].y * 0.002;
-  positions[endCapIdx * 3 + 2] = p.z + frames.tangents[tubularSegments].z * 0.002;
-  uvs[endCapIdx * 2] = 1;
+  const tEnd = frames.tangents[tubularSegments];
+  positions[endCapIdx * 3] = p.x + tEnd.x * 0.002;
+  positions[endCapIdx * 3 + 1] = p.y + tEnd.y * 0.002;
+  positions[endCapIdx * 3 + 2] = p.z + tEnd.z * 0.002;
+  normals[endCapIdx * 3] = tEnd.x;
+  normals[endCapIdx * 3 + 1] = tEnd.y;
+  normals[endCapIdx * 3 + 2] = tEnd.z;
+  tangents[endCapIdx * 3] = tEnd.x;
+  tangents[endCapIdx * 3 + 1] = tEnd.y;
+  tangents[endCapIdx * 3 + 2] = tEnd.z;
+  circums[endCapIdx * 3] = frames.binormals[tubularSegments].x;
+  circums[endCapIdx * 3 + 1] = frames.binormals[tubularSegments].y;
+  circums[endCapIdx * 3 + 2] = frames.binormals[tubularSegments].z;
+  uvs[endCapIdx * 2] = totalLen;
   uvs[endCapIdx * 2 + 1] = 0.5;
 
-  // Check Frenet frame handedness: T x N = B (right-handed -> (d/du) x (d/dv) = T x (-sin N + cos B) = -sin B - cos N = INWARD!)
-  // Therefore outward quads use (a, c, b) and (a, d, c)! Let's verify:
-  // (c - a) x (b - a) = (T + d/dv) x T = (d/dv) x T = (-sin N + cos B) x T = +sin B + cos N = OUTWARD!
+  // Outward quads: (c - a) x (b - a) = (d/dv) x T = +sin B + cos N = OUTWARD
   const triCount = tubularSegments * radialSegments * 2 + radialSegments * 2;
   const indices = new Uint32Array(triCount * 3);
   let ptr = 0;
 
   for (let i = 0; i < tubularSegments; i++) {
-    const r0 = i * radialSegments;
-    const r1 = (i + 1) * radialSegments;
+    const r0 = i * cols;
+    const r1 = (i + 1) * cols;
     for (let j = 0; j < radialSegments; j++) {
-      const jNext = (j + 1) % radialSegments;
       const a = r0 + j;
       const b = r1 + j;
-      const c = r1 + jNext;
-      const d = r0 + jNext;
+      const c = r1 + j + 1;
+      const d = r0 + j + 1;
 
       indices[ptr++] = a;
       indices[ptr++] = c;
@@ -244,28 +292,28 @@ function buildCappedTubeAlongCurve(
     }
   }
 
-  // Start cap (faces -T): (center, ring(0, jNext), ring(0, j)) -> (N x B = T, so B x N = -T)
+  // Start cap (faces -T)
   for (let j = 0; j < radialSegments; j++) {
-    const jNext = (j + 1) % radialSegments;
     indices[ptr++] = startCapIdx;
-    indices[ptr++] = jNext;
+    indices[ptr++] = j + 1;
     indices[ptr++] = j;
   }
 
-  // End cap (faces +T): (center, ring(last, j), ring(last, jNext)) -> N x B = +T
-  const lastRow = tubularSegments * radialSegments;
+  // End cap (faces +T)
+  const lastRow = tubularSegments * cols;
   for (let j = 0; j < radialSegments; j++) {
-    const jNext = (j + 1) % radialSegments;
     indices[ptr++] = endCapIdx;
     indices[ptr++] = lastRow + j;
-    indices[ptr++] = lastRow + jNext;
+    indices[ptr++] = lastRow + j + 1;
   }
 
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
   geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+  geo.setAttribute('aHoseTangent', new THREE.BufferAttribute(tangents, 3));
+  geo.setAttribute('aHoseCircum', new THREE.BufferAttribute(circums, 3));
   geo.setIndex(new THREE.BufferAttribute(indices, 1));
-  geo.computeVertexNormals();
   return geo;
 }
 
@@ -361,7 +409,7 @@ export function buildNozzleAssembly(materials: NozzleMaterials): NozzleAssembly 
   ironSleeveMesh.receiveShadow = true;
   group.add(ironSleeveMesh);
 
-  // 4. Twin Precision Chamfered Satin-Brass Accent Trim Rings & Stepped Rear Hose Barb Fitting
+  // 4. Twin Precision Chamfered Satin-Brass Accent Trim Rings, Crimped Brass Ferrule & Ribbed Strain-Relief Collar
   const ring1Geo = buildClosedLatheAlongZ(
     [
       [0.0002, 0.617],
@@ -384,23 +432,53 @@ export function buildNozzleAssembly(materials: NozzleMaterials): NozzleAssembly 
     ],
     36
   );
+  // Machined swivel nut + twin-grooved crimped satin-brass hose ferrule (z = 0.950 -> 1.132)
   const barbGeo = buildClosedLatheAlongZ(
     [
-      [0.0002, 0.95],
-      [0.0285, 0.954],
-      [0.0315, 0.962],
-      [0.0315, 0.99],
-      [0.0285, 0.996],
-      [0.0215, 1.006],
-      [0.0245, 1.03],
-      [0.0175, 1.05],
-      [0.0205, 1.074],
-      [0.0148, 1.106],
-      [0.0002, 1.114],
+      [0.0002, 0.950],
+      [0.0288, 0.954],
+      [0.0322, 0.962],
+      [0.0322, 0.992],
+      [0.0285, 0.998],
+      [0.0254, 1.004],
+      [0.0266, 1.012],
+      [0.0266, 1.024],
+      [0.0234, 1.030],
+      [0.0234, 1.042],
+      [0.0262, 1.048],
+      [0.0262, 1.066],
+      [0.0230, 1.072],
+      [0.0230, 1.084],
+      [0.0254, 1.090],
+      [0.0254, 1.116],
+      [0.0226, 1.126],
+      [0.0002, 1.132],
     ],
-    32
+    36
   );
-  geometries.push(ring1Geo, ring2Geo, barbGeo);
+  // 4-ribbed accordion strain-relief collar clamping cleanly onto braided mesh sheath (z = 1.118 -> 1.216)
+  const strainReliefGeo = buildClosedLatheAlongZ(
+    [
+      [0.0002, 1.118],
+      [0.0222, 1.122],
+      [0.0232, 1.130],
+      [0.0232, 1.138],
+      [0.0196, 1.143],
+      [0.0224, 1.149],
+      [0.0224, 1.157],
+      [0.0192, 1.162],
+      [0.0216, 1.168],
+      [0.0216, 1.176],
+      [0.0188, 1.181],
+      [0.0206, 1.187],
+      [0.0206, 1.196],
+      [0.0184, 1.206],
+      [0.0178, 1.212],
+      [0.0002, 1.216],
+    ],
+    36
+  );
+  geometries.push(ring1Geo, ring2Geo, barbGeo, strainReliefGeo);
 
   const ring1 = new THREE.Mesh(ring1Geo, materials.satinBrass);
   ring1.name = 'BrassTrimRingFore';
@@ -408,19 +486,31 @@ export function buildNozzleAssembly(materials: NozzleMaterials): NozzleAssembly 
   ring2.name = 'BrassTrimRingAft';
   const barb = new THREE.Mesh(barbGeo, materials.satinBrass);
   barb.name = 'BrassHoseBarb';
-  group.add(ring1, ring2, barb);
+  barb.castShadow = true;
+  barb.receiveShadow = true;
+  const strainRelief = new THREE.Mesh(strainReliefGeo, materials.darkIron);
+  strainRelief.name = 'HoseStrainReliefCollar';
+  strainRelief.castShadow = true;
+  strainRelief.receiveShadow = true;
+  group.add(ring1, ring2, barb, strainRelief);
 
-  // 5. Graceful Braided Pneumatic Supply Hose Tail curving gently back & away (+Y/+Z) off-frame
+  // 5. Woven Braided Metallic-Mesh Pneumatic Supply Hose exiting coaxially from the crimped ferrule & strain-relief boot
+  // Extends smoothly far off-frame so the braided hose never shows a floating cut-off tail end at any working angle
   const hoseCurve = new THREE.CatmullRomCurve3([
-    new THREE.Vector3(0, 0, 1.08),
-    new THREE.Vector3(0.03, 0.025, 1.29),
-    new THREE.Vector3(0.14, 0.11, 1.54),
-    new THREE.Vector3(0.32, 0.24, 1.76),
+    new THREE.Vector3(0, 0, 1.12),
+    new THREE.Vector3(0, 0, 1.22),
+    new THREE.Vector3(0.035, 0.028, 1.38),
+    new THREE.Vector3(0.155, 0.118, 1.60),
+    new THREE.Vector3(0.34, 0.25, 1.88),
+    new THREE.Vector3(0.60, 0.42, 2.34),
+    new THREE.Vector3(0.92, 0.62, 2.95),
   ]);
-  const hoseGeo = buildCappedTubeAlongCurve(hoseCurve, 26, 0.0142, 0.0128, 16);
+  const hoseGeo = buildCappedTubeAlongCurve(hoseCurve, 96, 0.0172, 0.0158, 32);
   geometries.push(hoseGeo);
   const hoseMesh = new THREE.Mesh(hoseGeo, materials.hoseRubber);
   hoseMesh.name = 'PneumaticAirHose';
+  hoseMesh.castShadow = true;
+  hoseMesh.receiveShadow = true;
   group.add(hoseMesh);
 
   // 6. Focused High-Velocity Dolomite Abrasive Jet Plume (local z = 0 -> -1, scaled to exact standoff)
