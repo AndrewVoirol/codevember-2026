@@ -1,0 +1,46 @@
+{
+  "day": 20,
+  "slug": "20-cocoon",
+  "expectedHeader": "Day 20 - Cocoon",
+  "domAudit": {
+    "headerText": "Day 20 - Cocoon",
+    "bodyBg": "rgb(33, 37, 41)",
+    "drawerCount": 30
+  },
+  "telemetry": {
+    "frameCount": 344,
+    "avgFrameMs": 8.35,
+    "p95FrameMs": 10,
+    "sceneState": {
+      "day": 20,
+      "slug": "20-cocoon",
+      "headerLabel": "Day 20 - Cocoon",
+      "frameCount": 344,
+      "cameraPos": [
+        0.42,
+        0.5600000000000002,
+        7.25
+      ],
+      "pointerWorld": [
+        0.5631051210297997,
+        -0.44242824431081595,
+        0.0015525056526266567
+      ],
+      "pointerSpeed": 0,
+      "pointerDwellSec": 1.8305,
+      "pointerImpulse": 0.001
+    }
+  },
+  "metrics": {
+    "specimenCoverageRatio": 0.2322,
+    "interactionMad": 6.487
+  },
+  "gpuErrors": [],
+  "gateFailures": [],
+  "artifacts": {
+    "contactSheet": "screenshots/day-20-cocoon-contact-sheet.png",
+    "initial": "screenshots/day-20-cocoon-initial.png",
+    "drawer": "screenshots/day-20-cocoon-drawer.png"
+  },
+  "passed": true
+}

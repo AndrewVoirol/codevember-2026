@@ -260,12 +260,12 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
   createDay(
     20,
     'Cocoon',
-    'upcoming',
+    'complete',
     'tsl',
     'warmKaolin',
     'realgarAmber',
-    'Spun Bombyx silk lattice shell wrapped around a faintly pulsing amber chrysalis core',
-    'Pointer winds additional translucent silk threads around the shell and warms the internal bioluminescence'
+    'Suspended translucent Warm-Kaolin & Realgar-Amber heat-shrink polymer-parchment cocoon enveloping three cyclable hidden sculptural cores (brass-and-basalt astrolabe caliper reliquary, prismatic Bone-Calcite & Verdigris spire cluster, and tri-axis brass gyro-armature around a glowing amber cavity) with real XPBD rest-length contraction, analytical SDF vacuum-forming, optical contact-clarity, and propagating Mode-I seam ruptures',
+    'Hover or sweep (hold-drag to intensify) a warm infrared thermal cone across the crinkled sleeve to shrink and vacuum-form the translucent skin taut over every ridge and spoke; click any high-tension span (or Shift-click / double-click) to rupture and peel the elastic flaps open; drag empty space to orbit; double-click empty space or press Space to wrap a fresh cocoon around the next hidden sculptural core'
   ),
   createDay(
     21,

@@ -1,0 +1,404 @@
+import { describe, expect, it } from 'vitest';
+import * as THREE from 'three/webgpu';
+import {
+  CORE_COUNT,
+  buildCoreAssembly,
+  evalCoreSdf,
+  evalCoreSdfGrad,
+  type CoreMaterialSet,
+} from '../src/days/20-cocoon/coreAssemblies';
+import { ShrinkFilmSimulation } from '../src/days/20-cocoon/shrinkPhysics';
+import { DEFAULT_COCOON_CONFIG } from '../src/days/20-cocoon/types';
+
+function makeDummyCoreMaterials(): { mats: CoreMaterialSet; dispose: () => void } {
+  const mat = new THREE.MeshBasicMaterial();
+  return {
+    mats: {
+      brass: mat,
+      basalt: mat,
+      calcite: mat,
+      verdigris: mat,
+      amber: mat,
+    },
+    dispose: () => mat.dispose(),
+  };
+}
+
+function measureOutwardWinding(geo: THREE.BufferGeometry): {
+  signedVol: number;
+  outwardDot: number;
+  triCount: number;
+} {
+  const pos = geo.attributes.position as THREE.BufferAttribute;
+  const idx = geo.index;
+  const triCount = idx ? idx.count / 3 : pos.count / 3;
+  geo.computeBoundingBox();
+  const center = new THREE.Vector3();
+  geo.boundingBox!.getCenter(center);
+
+  const a = new THREE.Vector3();
+  const b = new THREE.Vector3();
+  const c = new THREE.Vector3();
+  const ab = new THREE.Vector3();
+  const ac = new THREE.Vector3();
+  const n = new THREE.Vector3();
+  const cen = new THREE.Vector3();
+  const bc = new THREE.Vector3();
+
+  let signedVol = 0;
+  let outwardDot = 0;
+
+  for (let t = 0; t < triCount; t++) {
+    const i0 = idx ? idx.getX(t * 3) : t * 3;
+    const i1 = idx ? idx.getX(t * 3 + 1) : t * 3 + 1;
+    const i2 = idx ? idx.getX(t * 3 + 2) : t * 3 + 2;
+    a.fromBufferAttribute(pos, i0);
+    b.fromBufferAttribute(pos, i1);
+    c.fromBufferAttribute(pos, i2);
+
+    bc.crossVectors(b, c);
+    signedVol += a.dot(bc) / 6;
+
+    ab.subVectors(b, a);
+    ac.subVectors(c, a);
+    n.crossVectors(ab, ac);
+    cen.copy(a).add(b).add(c).multiplyScalar(1 / 3).sub(center);
+    outwardDot += n.dot(cen);
+  }
+
+  return { signedVol, outwardDot, triCount };
+}
+
+describe('Day 20 - Cocoon: Heat-Shrink Vacuum-Form Skin & Sculptural Core SDFs', () => {
+  it('enforces outward triangle winding and exact analytical SDF enclosure across all 3 sculptural cores', () => {
+    const { mats, dispose } = makeDummyCoreMaterials();
+    const vWorld = new THREE.Vector3();
+    const grad = new Float32Array(3);
+
+    for (let coreIdx = 0; coreIdx < CORE_COUNT; coreIdx++) {
+      const built = buildCoreAssembly(coreIdx, mats);
+      built.group.updateMatrixWorld(true);
+
+      let meshCount = 0;
+      let worstSdf = -Infinity;
+
+      built.group.traverse((obj) => {
+        if (!(obj instanceof THREE.Mesh)) return;
+        meshCount++;
+        const geo = obj.geometry;
+        const { signedVol, outwardDot, triCount } = measureOutwardWinding(geo);
+        expect(triCount, `core ${coreIdx}/${obj.name} triCount`).toBeGreaterThan(0);
+        expect(signedVol, `core ${coreIdx}/${obj.name} signedVol`).toBeGreaterThan(0);
+        expect(outwardDot, `core ${coreIdx}/${obj.name} outwardDot`).toBeGreaterThan(0);
+
+        // Verify analytical SDF strictly encloses every visual mesh vertex (zero skin Z-fighting/clipping)
+        const pos = geo.attributes.position as THREE.BufferAttribute;
+        for (let i = 0; i < pos.count; i++) {
+          vWorld.fromBufferAttribute(pos, i).applyMatrix4(obj.matrixWorld);
+          const d = evalCoreSdf(built.descriptor, vWorld.x, vWorld.y, vWorld.z);
+          if (d > worstSdf) worstSdf = d;
+        }
+      });
+
+      expect(meshCount).toBeGreaterThanOrEqual(4);
+      expect(worstSdf, `core ${coreIdx} SDF visual enclosure`).toBeLessThanOrEqual(0.004);
+
+      // Verify SDF gradient is unit-length and points outward outside the core
+      const dOut = evalCoreSdfGrad(built.descriptor, 1.5, 0.2, 0.1, grad, 0);
+      expect(dOut).toBeGreaterThan(0.1);
+      expect(Math.hypot(grad[0], grad[1], grad[2])).toBeCloseTo(1.0, 4);
+      expect(grad[0]).toBeGreaterThan(0.5);
+
+      built.dispose();
+    }
+
+    dispose();
+  });
+
+  it('builds an outward-wound loose crinkled cocoon mesh with zero initial SDF penetration', () => {
+    const { mats, dispose } = makeDummyCoreMaterials();
+    const core0 = buildCoreAssembly(0, mats);
+    const sim = new ShrinkFilmSimulation(core0.descriptor, DEFAULT_COCOON_CONFIG);
+
+    const { signedVol, outwardDot, triCount } = measureOutwardWinding(sim.geometry);
+    expect(sim.baseVertexCount).toBe(2562);
+    expect(triCount).toBe(5120);
+    expect(signedVol).toBeGreaterThan(10.0);
+    expect(outwardDot).toBeGreaterThan(60.0);
+    expect(sim.meanShrink).toBe(0);
+    expect(sim.tearFraction).toBe(0);
+
+    // Every individual triangle must face outward (0 inward-wound faces)
+    let inwardTris = 0;
+    for (let t = 0; t < sim.triCount; t++) {
+      const i0 = sim.indices[t * 3] * 3;
+      const i1 = sim.indices[t * 3 + 1] * 3;
+      const i2 = sim.indices[t * 3 + 2] * 3;
+      const ax = sim.pos[i0];
+      const ay = sim.pos[i0 + 1];
+      const az = sim.pos[i0 + 2];
+      const e1x = sim.pos[i1] - ax;
+      const e1y = sim.pos[i1 + 1] - ay;
+      const e1z = sim.pos[i1 + 2] - az;
+      const e2x = sim.pos[i2] - ax;
+      const e2y = sim.pos[i2 + 1] - ay;
+      const e2z = sim.pos[i2 + 2] - az;
+      const nx = e1y * e2z - e1z * e2y;
+      const ny = e1z * e2x - e1x * e2z;
+      const nz = e1x * e2y - e1y * e2x;
+      if (nx * ax + ny * ay + nz * az <= 0) inwardTris++;
+    }
+    expect(inwardTris).toBe(0);
+
+    // Every initial loose vertex must clear the core SDF
+    for (let i = 0; i < sim.activeVertexCount; i++) {
+      const i3 = i * 3;
+      const d = evalCoreSdf(core0.descriptor, sim.pos[i3], sim.pos[i3 + 1], sim.pos[i3 + 2]);
+      expect(d).toBeGreaterThanOrEqual(DEFAULT_COCOON_CONFIG.skinClearance - 1e-4);
+    }
+
+    sim.dispose();
+    core0.dispose();
+    dispose();
+  });
+
+  it('produces monotonic rest-length shrinkage under heat input and cools glow cleanly afterward', () => {
+    const { mats, dispose } = makeDummyCoreMaterials();
+    const core0 = buildCoreAssembly(0, mats);
+    const sim = new ShrinkFilmSimulation(core0.descriptor, DEFAULT_COCOON_CONFIG);
+
+    const prevShrink = new Float32Array(sim.baseVertexCount);
+    let prevMeanShrink = 0;
+
+    // Sweep heat beam on front face (+Z) for 1.0 second
+    for (let f = 0; f < 60; f++) {
+      sim.applyHeatBeam(0.1, 0.1, 1.25, 0, 0.2, 4.9, 0.86, 2.8, 1 / 60);
+      sim.step(1 / 60);
+
+      for (let i = 0; i < sim.activeVertexCount; i++) {
+        expect(sim.shrink[i]).toBeGreaterThanOrEqual(prevShrink[i] - 1e-6);
+        prevShrink[i] = sim.shrink[i];
+      }
+      expect(sim.meanShrink).toBeGreaterThanOrEqual(prevMeanShrink - 1e-6);
+      prevMeanShrink = sim.meanShrink;
+    }
+
+    expect(sim.meanShrink).toBeGreaterThan(0.12);
+
+    // Measure peak active heat, then remove beam and confirm infrared heat cools cleanly while shrink stays monotonic
+    let peakHeat = 0;
+    for (let i = 0; i < sim.activeVertexCount; i++) {
+      if (sim.heat[i] > peakHeat) peakHeat = sim.heat[i];
+    }
+    expect(peakHeat).toBeGreaterThan(0.45);
+
+    const shrinkAfterHeat = sim.meanShrink;
+    for (let f = 0; f < 180; f++) {
+      sim.step(1 / 60);
+    }
+
+    let cooledPeakHeat = 0;
+    for (let i = 0; i < sim.activeVertexCount; i++) {
+      if (sim.heat[i] > cooledPeakHeat) cooledPeakHeat = sim.heat[i];
+    }
+    expect(cooledPeakHeat).toBeLessThan(0.05);
+    expect(sim.meanShrink).toBeGreaterThanOrEqual(shrinkAfterHeat);
+
+    sim.dispose();
+    core0.dispose();
+    dispose();
+  });
+
+  it('enforces non-penetration against exact core SDF and builds realistic radial tension under full vacuum-shrinking across all 3 cores', () => {
+    const { mats, dispose } = makeDummyCoreMaterials();
+
+    const heatDirs: ReadonlyArray<readonly [number, number, number]> = [
+      [0, 0, 1.05],
+      [0, 0, -1.05],
+      [1.05, 0, 0],
+      [-1.05, 0, 0],
+      [0, 1.15, 0],
+      [0, -1.15, 0],
+    ];
+
+    for (let coreIdx = 0; coreIdx < CORE_COUNT; coreIdx++) {
+      const built = buildCoreAssembly(coreIdx, mats);
+      const sim = new ShrinkFilmSimulation(built.descriptor, DEFAULT_COCOON_CONFIG);
+
+      // Heat all 6 sides so the skin vacuum-forms completely onto the sculptural core
+      for (let f = 0; f < 150; f++) {
+        const d = heatDirs[f % heatDirs.length];
+        sim.applyHeatBeam(d[0], d[1], d[2], d[0] * 4.2, d[1] * 4.2, d[2] * 4.2, 1.15, 3.0, 1 / 60);
+        sim.step(1 / 60);
+      }
+
+      // Settle for 30 frames
+      for (let f = 0; f < 30; f++) {
+        sim.step(1 / 60);
+      }
+
+      expect(sim.meanShrink, `core ${coreIdx} meanShrink`).toBeGreaterThan(0.55);
+      expect(sim.maxTension, `core ${coreIdx} maxTension`).toBeGreaterThan(0.20);
+
+      let minSdf = Infinity;
+      let seatedCount = 0;
+      let maxContact = 0;
+      for (let i = 0; i < sim.activeVertexCount; i++) {
+        const i3 = i * 3;
+        const px = sim.pos[i3];
+        const py = sim.pos[i3 + 1];
+        const pz = sim.pos[i3 + 2];
+        expect(Number.isFinite(px) && Number.isFinite(py) && Number.isFinite(pz)).toBe(true);
+
+        const dist = evalCoreSdf(built.descriptor, px, py, pz);
+        if (dist < minSdf) minSdf = dist;
+        if (dist <= DEFAULT_COCOON_CONFIG.skinClearance + 0.025) seatedCount++;
+        if (sim.contact[i] > maxContact) maxContact = sim.contact[i];
+      }
+
+      // Strict non-penetration invariant: zero vertices collapse inside core
+      expect(minSdf, `core ${coreIdx} minSdf`).toBeGreaterThanOrEqual(
+        DEFAULT_COCOON_CONFIG.skinClearance - 1e-4
+      );
+      // Meaningful vacuum-formed seating onto core ridges and spokes
+      expect(seatedCount, `core ${coreIdx} seatedCount`).toBeGreaterThan(120);
+      expect(maxContact, `core ${coreIdx} maxContact`).toBeGreaterThan(0.70);
+
+      sim.dispose();
+      built.dispose();
+    }
+
+    dispose();
+  });
+
+  it('propagates seam rupture along taut zones, separates elastic flaps without penetrating core, and resets cleanly', () => {
+    const { mats, dispose } = makeDummyCoreMaterials();
+    const core0 = buildCoreAssembly(0, mats);
+    const core1 = buildCoreAssembly(1, mats);
+    const sim = new ShrinkFilmSimulation(core0.descriptor, DEFAULT_COCOON_CONFIG);
+
+    // Unheated loose zone should ignore non-forced rupture click
+    expect(sim.triggerRuptureAtPoint(0, 0, 1.45, false)).toBe(false);
+    expect(sim.tearFraction).toBe(0);
+
+    // Heat front face strongly so membrane vacuum-hugs and builds high tension
+    for (let f = 0; f < 90; f++) {
+      sim.applyHeatBeam(0.05, 0.08, 1.25, 0, 0.2, 4.9, 0.85, 2.8, 1 / 60);
+      sim.step(1 / 60);
+    }
+    expect(sim.maxTension).toBeGreaterThan(0.15);
+
+    // Click the taut front membrane to initiate a propagating seam tear
+    const ruptured = sim.triggerRuptureAtPoint(0.05, 0.08, 1.0, false);
+    expect(ruptured).toBe(true);
+    const initialSplits = sim.splitCount;
+    expect(initialSplits).toBeGreaterThanOrEqual(2);
+
+    // Step 45 frames while crack tips unzip and elastic flaps peel back
+    for (let f = 0; f < 45; f++) {
+      sim.step(1 / 60);
+    }
+
+    // Verify tear propagated beyond initial puncture and opened a real geometric seam gap
+    expect(sim.splitCount).toBeGreaterThan(initialSplits);
+    expect(sim.activeVertexCount).toBe(sim.baseVertexCount + sim.splitCount);
+    expect(sim.tearFraction).toBeGreaterThan(0.10);
+
+    // Measure separation among torn-edge vertices (flaps must physically peel apart)
+    let tornVertexCount = 0;
+    let maxTearRadius = 0;
+    for (let i = 0; i < sim.activeVertexCount; i++) {
+      const i3 = i * 3;
+      const d = evalCoreSdf(core0.descriptor, sim.pos[i3], sim.pos[i3 + 1], sim.pos[i3 + 2]);
+      expect(d).toBeGreaterThanOrEqual(DEFAULT_COCOON_CONFIG.skinClearance - 1e-4);
+
+      if (sim.tearEdgeData[i] > 0.5) {
+        tornVertexCount++;
+        const r = Math.hypot(sim.pos[i3], sim.pos[i3 + 1], sim.pos[i3 + 2]);
+        if (r > maxTearRadius) maxTearRadius = r;
+      }
+    }
+    expect(tornVertexCount).toBeGreaterThanOrEqual(sim.splitCount * 2);
+    expect(maxTearRadius).toBeGreaterThan(0.6);
+
+    // Verify triangle indices stay 100% valid within [0, activeVertexCount)
+    for (let k = 0; k < sim.indices.length; k++) {
+      const idx = sim.indices[k];
+      expect(idx).toBeGreaterThanOrEqual(0);
+      expect(idx).toBeLessThan(sim.activeVertexCount);
+    }
+
+    // Verify re-bagging reset restores base vertex count, zero tearFraction, and switches core cleanly
+    sim.reset(core1.descriptor, true);
+    expect(sim.getCore().index).toBe(1);
+    expect(sim.activeVertexCount).toBe(sim.baseVertexCount);
+    expect(sim.splitCount).toBe(0);
+    expect(sim.tearFraction).toBe(0);
+    expect(sim.meanShrink).toBe(0);
+    expect(sim.maxTension).toBe(0);
+
+    // Step after reset to confirm smooth drop-settle without NaNs or penetration
+    for (let f = 0; f < 40; f++) {
+      sim.step(1 / 60);
+    }
+    for (let i = 0; i < sim.activeVertexCount; i++) {
+      const i3 = i * 3;
+      const d = evalCoreSdf(core1.descriptor, sim.pos[i3], sim.pos[i3 + 1], sim.pos[i3 + 2]);
+      expect(d).toBeGreaterThanOrEqual(DEFAULT_COCOON_CONFIG.skinClearance - 1e-4);
+    }
+
+    sim.dispose();
+    core0.dispose();
+    core1.dispose();
+    dispose();
+  });
+
+  it('handles repeated multi-seam ruptures cleanly within real-time CPU step budget', () => {
+    const { mats, dispose } = makeDummyCoreMaterials();
+    const core2 = buildCoreAssembly(2, mats);
+    const sim = new ShrinkFilmSimulation(core2.descriptor, DEFAULT_COCOON_CONFIG);
+
+    // Heat front and sides aggressively
+    for (let f = 0; f < 60; f++) {
+      sim.applyHeatBeam(0.2, 0.1, 1.1, 0, 0.2, 5.0, 1.0, 3.0, 1 / 60);
+      sim.step(1 / 60);
+    }
+
+    // Trigger 3 distinct seam tears across the taut shell (including forced slice)
+    expect(sim.triggerRuptureAtPoint(0.2, 0.2, 1.0, false)).toBe(true);
+    for (let f = 0; f < 20; f++) sim.step(1 / 60);
+
+    expect(sim.triggerRuptureAtPoint(-0.4, -0.2, 0.95, true)).toBe(true);
+    for (let f = 0; f < 20; f++) sim.step(1 / 60);
+
+    expect(sim.triggerRuptureAtPoint(0.0, 0.65, 0.85, true)).toBe(true);
+
+    // Measure average wall-clock step time over 45 active frames
+    const t0 = performance.now();
+    for (let f = 0; f < 45; f++) {
+      sim.step(1 / 60);
+    }
+    const avgMs = (performance.now() - t0) / 45;
+
+    expect(avgMs).toBeLessThan(6.5);
+    expect(sim.activeVertexCount).toBeLessThanOrEqual(sim.maxVertices);
+    expect(sim.tearFraction).toBeGreaterThan(0.25);
+
+    // Validate finite positions, valid indices, and strict SDF non-penetration across all torn flaps
+    for (let i = 0; i < sim.activeVertexCount; i++) {
+      const i3 = i * 3;
+      expect(Number.isFinite(sim.pos[i3])).toBe(true);
+      expect(Number.isFinite(sim.pos[i3 + 1])).toBe(true);
+      expect(Number.isFinite(sim.pos[i3 + 2])).toBe(true);
+      const d = evalCoreSdf(core2.descriptor, sim.pos[i3], sim.pos[i3 + 1], sim.pos[i3 + 2]);
+      expect(d).toBeGreaterThanOrEqual(DEFAULT_COCOON_CONFIG.skinClearance - 1e-4);
+    }
+    for (let k = 0; k < sim.indices.length; k++) {
+      expect(sim.indices[k]).toBeLessThan(sim.activeVertexCount);
+    }
+
+    sim.dispose();
+    core2.dispose();
+    dispose();
+  });
+});
