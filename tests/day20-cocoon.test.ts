@@ -260,6 +260,43 @@ describe('Day 20 - Cocoon: Heat-Shrink Vacuum-Form Skin & Sculptural Core SDFs',
       expect(minSdf, `core ${coreIdx} minSdf`).toBeGreaterThanOrEqual(
         DEFAULT_COCOON_CONFIG.skinClearance - 1e-4
       );
+      // Continuous-surface invariant: zero triangle edge midpoints or centroids chord-slice core
+      let minMidSdf = Infinity;
+      let minCenSdf = Infinity;
+      for (let t = 0; t < sim.triCount; t++) {
+        const i0 = sim.indices[t * 3] * 3;
+        const i1 = sim.indices[t * 3 + 1] * 3;
+        const i2 = sim.indices[t * 3 + 2] * 3;
+        const cx = (sim.pos[i0] + sim.pos[i1] + sim.pos[i2]) / 3;
+        const cy = (sim.pos[i0 + 1] + sim.pos[i1 + 1] + sim.pos[i2 + 1]) / 3;
+        const cz = (sim.pos[i0 + 2] + sim.pos[i1 + 2] + sim.pos[i2 + 2]) / 3;
+        const dc = evalCoreSdf(built.descriptor, cx, cy, cz);
+        if (dc < minCenSdf) minCenSdf = dc;
+
+        const m01 = evalCoreSdf(
+          built.descriptor,
+          0.5 * (sim.pos[i0] + sim.pos[i1]),
+          0.5 * (sim.pos[i0 + 1] + sim.pos[i1 + 1]),
+          0.5 * (sim.pos[i0 + 2] + sim.pos[i1 + 2])
+        );
+        const m12 = evalCoreSdf(
+          built.descriptor,
+          0.5 * (sim.pos[i1] + sim.pos[i2]),
+          0.5 * (sim.pos[i1 + 1] + sim.pos[i2 + 1]),
+          0.5 * (sim.pos[i1 + 2] + sim.pos[i2 + 2])
+        );
+        const m20 = evalCoreSdf(
+          built.descriptor,
+          0.5 * (sim.pos[i2] + sim.pos[i0]),
+          0.5 * (sim.pos[i2 + 1] + sim.pos[i0 + 1]),
+          0.5 * (sim.pos[i2 + 2] + sim.pos[i0 + 2])
+        );
+        const mMin = Math.min(m01, m12, m20);
+        if (mMin < minMidSdf) minMidSdf = mMin;
+      }
+      expect(minMidSdf, `core ${coreIdx} minEdgeMidpointSdf`).toBeGreaterThanOrEqual(0.0);
+      expect(minCenSdf, `core ${coreIdx} minTriCentroidSdf`).toBeGreaterThanOrEqual(0.0);
+
       // Meaningful vacuum-formed seating onto core ridges and spokes
       expect(seatedCount, `core ${coreIdx} seatedCount`).toBeGreaterThan(120);
       expect(maxContact, `core ${coreIdx} maxContact`).toBeGreaterThan(0.70);
@@ -399,6 +436,122 @@ describe('Day 20 - Cocoon: Heat-Shrink Vacuum-Form Skin & Sculptural Core SDFs',
 
     sim.dispose();
     core2.dispose();
+    dispose();
+  });
+
+  it('enforces split-hub recessed amber seating, non-overlapping concentric rings, and bounded damped flap curl equilibrium', () => {
+    const { mats, dispose } = makeDummyCoreMaterials();
+    const vWorld = new THREE.Vector3();
+
+    // 1. Verify Core 0 & Core 1 split equatorial basalt hub + recessed amber heart (strictly inside bezels)
+    for (const ci of [0, 1]) {
+      const built = buildCoreAssembly(ci, mats);
+      built.group.updateMatrixWorld(true);
+
+      let heartMaxRadial = 0;
+      let bezelMinOuterR = Infinity;
+      let upperBasaltMinY = Infinity;
+      let lowerBasaltMaxY = -Infinity;
+
+      built.group.traverse((obj) => {
+        if (!(obj instanceof THREE.Mesh)) return;
+        const pos = obj.geometry.attributes.position as THREE.BufferAttribute;
+        for (let i = 0; i < pos.count; i++) {
+          vWorld.fromBufferAttribute(pos, i).applyMatrix4(obj.matrixWorld);
+          const rXZ = Math.hypot(vWorld.x, vWorld.z);
+          if (obj.name === 'AmberCavityHeart' && rXZ > heartMaxRadial) {
+            heartMaxRadial = rXZ;
+          } else if (obj.name === 'HubBezelUpper' && rXZ < bezelMinOuterR) {
+            bezelMinOuterR = rXZ;
+          } else if (obj.name === 'BasaltCoreHubUpper' && vWorld.y < upperBasaltMinY) {
+            upperBasaltMinY = vWorld.y;
+          } else if (obj.name === 'BasaltCoreHubLower' && vWorld.y > lowerBasaltMaxY) {
+            lowerBasaltMaxY = vWorld.y;
+          }
+        }
+      });
+
+      // Upper & lower basalt caps must leave a true open equatorial aperture around the recessed amber heart
+      expect(upperBasaltMinY, `core ${ci} upperBasaltMinY`).toBeGreaterThan(0.08);
+      expect(lowerBasaltMaxY, `core ${ci} lowerBasaltMaxY`).toBeLessThan(-0.08);
+      expect(heartMaxRadial, `core ${ci} heart recessed inside brass bezel`).toBeLessThan(
+        bezelMinOuterR + 0.005
+      );
+
+      // Verify caliper spokes / spires do not clip through outer brass rings
+      const outerRings = built.descriptor.primitives.filter(
+        (p) => p.kind === 'torus' && p.majorRadius > 0.6
+      );
+      built.group.traverse((obj) => {
+        if (!(obj instanceof THREE.Mesh)) return;
+        if (!obj.name.includes('CaliperAxis') && !obj.name.includes('Spire_')) return;
+        const pos = obj.geometry.attributes.position as THREE.BufferAttribute;
+        for (let i = 0; i < pos.count; i++) {
+          vWorld.fromBufferAttribute(pos, i).applyMatrix4(obj.matrixWorld);
+          for (const r of outerRings) {
+            if (r.kind !== 'torus') continue;
+            const lu = vWorld.x * r.ux + vWorld.y * r.uy + vWorld.z * r.uz;
+            const lv = vWorld.x * r.vx + vWorld.y * r.vy + vWorld.z * r.vz;
+            const ln = vWorld.x * r.nx + vWorld.y * r.ny + vWorld.z * r.nz;
+            const qx = Math.hypot(lu, lv) - r.majorRadius;
+            const d = Math.hypot(qx, ln) - r.minorRadius;
+            expect(d, `core ${ci} ${obj.name} clears outer ring`).toBeGreaterThan(0.0);
+          }
+        }
+      });
+
+      built.dispose();
+    }
+
+    // 2. Verify Mode-I ruptured flaps curl open smoothly and settle into bounded equilibrium (no runaway spikes!)
+    const core0 = buildCoreAssembly(0, mats);
+    const sim = new ShrinkFilmSimulation(core0.descriptor, DEFAULT_COCOON_CONFIG);
+    for (let f = 0; f < 90; f++) {
+      sim.applyHeatBeam(0.05, 0.08, 1.25, 0, 0.2, 4.9, 0.85, 2.8, 1 / 60);
+      sim.step(1 / 60);
+    }
+    expect(sim.triggerRuptureAtPoint(0.05, 0.08, 1.0, false)).toBe(true);
+
+    // Run 150 frames (2.5 s) post-rupture so transient elastic recoil settles cleanly
+    for (let f = 0; f < 150; f++) {
+      sim.step(1 / 60);
+    }
+
+    let maxRadius = 0;
+    let maxFlapGap = 0;
+    let degenTris = 0;
+    for (let i = 0; i < sim.activeVertexCount; i++) {
+      const i3 = i * 3;
+      const r = Math.hypot(sim.pos[i3], sim.pos[i3 + 1], sim.pos[i3 + 2]);
+      if (r > maxRadius) maxRadius = r;
+      if (sim.tearEdgeData[i] > 0.5) {
+        const gap = evalCoreSdf(core0.descriptor, sim.pos[i3], sim.pos[i3 + 1], sim.pos[i3 + 2]);
+        if (gap > maxFlapGap) maxFlapGap = gap;
+      }
+    }
+    for (let t = 0; t < sim.triCount; t++) {
+      const a = sim.indices[t * 3] * 3;
+      const b = sim.indices[t * 3 + 1] * 3;
+      const c = sim.indices[t * 3 + 2] * 3;
+      const e1x = sim.pos[b] - sim.pos[a];
+      const e1y = sim.pos[b + 1] - sim.pos[a + 1];
+      const e1z = sim.pos[b + 2] - sim.pos[a + 2];
+      const e2x = sim.pos[c] - sim.pos[a];
+      const e2y = sim.pos[c + 1] - sim.pos[a + 1];
+      const e2z = sim.pos[c + 2] - sim.pos[a + 2];
+      const area =
+        0.5 *
+        Math.hypot(e1y * e2z - e1z * e2y, e1z * e2x - e1x * e2z, e1x * e2y - e1y * e2x);
+      if (area < 1e-5) degenTris++;
+    }
+
+    // Bounded flap lift (< 0.45 off core SDF, total radius < 1.95) + zero collapsed/degenerate triangles
+    expect(maxRadius).toBeLessThan(1.95);
+    expect(maxFlapGap).toBeLessThan(0.45);
+    expect(degenTris).toBe(0);
+
+    sim.dispose();
+    core0.dispose();
     dispose();
   });
 });

@@ -5,7 +5,6 @@ import {
   type CoreMaterialRole,
   type CoreSdfPrimitive,
   type SdfCapsulePrimitive,
-  type SdfOrientedBoxPrimitive,
   type SdfSpherePrimitive,
   type SdfTorusPrimitive,
 } from './types';
@@ -26,21 +25,30 @@ const PRIM_STRIDE = 16;
 
 function packPrimitives(primitives: readonly CoreSdfPrimitive[]): {
   packedData: Float32Array;
+  packedBounds: Float32Array;
   packedKinds: Uint8Array;
 } {
   const count = primitives.length;
   const packedData = new Float32Array(count * PRIM_STRIDE);
+  const packedBounds = new Float32Array(count * 6);
   const packedKinds = new Uint8Array(count);
 
   for (let i = 0; i < count; i++) {
     const p = primitives[i];
     const o = i * PRIM_STRIDE;
+    const b = i * 6;
     if (p.kind === 'sphere') {
       packedKinds[i] = 0;
       packedData[o] = p.cx;
       packedData[o + 1] = p.cy;
       packedData[o + 2] = p.cz;
       packedData[o + 3] = p.radius;
+      packedBounds[b] = p.cx - p.radius;
+      packedBounds[b + 1] = p.cx + p.radius;
+      packedBounds[b + 2] = p.cy - p.radius;
+      packedBounds[b + 3] = p.cy + p.radius;
+      packedBounds[b + 4] = p.cz - p.radius;
+      packedBounds[b + 5] = p.cz + p.radius;
     } else if (p.kind === 'capsule') {
       packedKinds[i] = 1;
       const bax = p.bx - p.ax;
@@ -57,6 +65,13 @@ function packPrimitives(primitives: readonly CoreSdfPrimitive[]): {
       packedData[o + 7] = p.radiusA;
       packedData[o + 8] = p.radiusB - p.radiusA;
       packedData[o + 9] = Math.sqrt(baLenSq);
+      const rMax = Math.max(p.radiusA, p.radiusB);
+      packedBounds[b] = Math.min(p.ax, p.bx) - rMax;
+      packedBounds[b + 1] = Math.max(p.ax, p.bx) + rMax;
+      packedBounds[b + 2] = Math.min(p.ay, p.by) - rMax;
+      packedBounds[b + 3] = Math.max(p.ay, p.by) + rMax;
+      packedBounds[b + 4] = Math.min(p.az, p.bz) - rMax;
+      packedBounds[b + 5] = Math.max(p.az, p.bz) + rMax;
     } else if (p.kind === 'torus') {
       packedKinds[i] = 2;
       packedData[o] = p.cx;
@@ -73,6 +88,16 @@ function packPrimitives(primitives: readonly CoreSdfPrimitive[]): {
       packedData[o + 11] = p.nz;
       packedData[o + 12] = p.majorRadius;
       packedData[o + 13] = p.minorRadius;
+      // Exact oriented torus AABB extents: majorRadius * sqrt(1 - n_axis^2) + minorRadius
+      const ex = p.majorRadius * Math.sqrt(Math.max(0, 1 - p.nx * p.nx)) + p.minorRadius;
+      const ey = p.majorRadius * Math.sqrt(Math.max(0, 1 - p.ny * p.ny)) + p.minorRadius;
+      const ez = p.majorRadius * Math.sqrt(Math.max(0, 1 - p.nz * p.nz)) + p.minorRadius;
+      packedBounds[b] = p.cx - ex;
+      packedBounds[b + 1] = p.cx + ex;
+      packedBounds[b + 2] = p.cy - ey;
+      packedBounds[b + 3] = p.cy + ey;
+      packedBounds[b + 4] = p.cz - ez;
+      packedBounds[b + 5] = p.cz + ez;
     } else {
       packedKinds[i] = 3;
       packedData[o] = p.cx;
@@ -91,10 +116,19 @@ function packPrimitives(primitives: readonly CoreSdfPrimitive[]): {
       packedData[o + 13] = p.hy;
       packedData[o + 14] = p.hz;
       packedData[o + 15] = p.bevel;
+      const ex = Math.abs(p.ux) * p.hx + Math.abs(p.vx) * p.hy + Math.abs(p.wx) * p.hz + p.bevel;
+      const ey = Math.abs(p.uy) * p.hx + Math.abs(p.vy) * p.hy + Math.abs(p.wy) * p.hz + p.bevel;
+      const ez = Math.abs(p.uz) * p.hx + Math.abs(p.vz) * p.hy + Math.abs(p.wz) * p.hz + p.bevel;
+      packedBounds[b] = p.cx - ex;
+      packedBounds[b + 1] = p.cx + ex;
+      packedBounds[b + 2] = p.cy - ey;
+      packedBounds[b + 3] = p.cy + ey;
+      packedBounds[b + 4] = p.cz - ez;
+      packedBounds[b + 5] = p.cz + ez;
     }
   }
 
-  return { packedData, packedKinds };
+  return { packedData, packedBounds, packedKinds };
 }
 
 /**
@@ -108,11 +142,26 @@ export function evalCoreSdf(
   pz: number
 ): number {
   const data = core.packedData;
+  const bounds = core.packedBounds;
   const kinds = core.packedKinds;
   const count = core.primCount;
   let minDist = 1e9;
 
   for (let i = 0; i < count; i++) {
+    // Exact AABB lower-bound skip (zero sqrt when point is farther than current minDist!)
+    if (minDist > 0) {
+      const b = i * 6;
+      if (
+        px < bounds[b] - minDist ||
+        px > bounds[b + 1] + minDist ||
+        py < bounds[b + 2] - minDist ||
+        py > bounds[b + 3] + minDist ||
+        pz < bounds[b + 4] - minDist ||
+        pz > bounds[b + 5] + minDist
+      ) {
+        continue;
+      }
+    }
     const o = i * PRIM_STRIDE;
     const kind = kinds[i];
     let d: number;
@@ -183,12 +232,26 @@ export function evalCoreSdfGrad(
   offset: number
 ): number {
   const data = core.packedData;
+  const bounds = core.packedBounds;
   const kinds = core.packedKinds;
   const count = core.primCount;
   let minDist = 1e9;
   let winIdx = -1;
 
   for (let i = 0; i < count; i++) {
+    if (minDist > 0) {
+      const b = i * 6;
+      if (
+        px < bounds[b] - minDist ||
+        px > bounds[b + 1] + minDist ||
+        py < bounds[b + 2] - minDist ||
+        py > bounds[b + 3] + minDist ||
+        pz < bounds[b + 4] - minDist ||
+        pz > bounds[b + 5] + minDist
+      ) {
+        continue;
+      }
+    }
     const o = i * PRIM_STRIDE;
     const kind = kinds[i];
     let d: number;
@@ -455,7 +518,7 @@ function buildPolygonalStackGeometry(
 }
 
 /**
- * Builds a razor-crisp octagonal-chamfered horological brass ring lying in the XY plane
+ * Builds a razor-crisp octagonal-chamfered horological brass/basalt ring lying in the XY plane
  * (axis along +Z) with strictly outward winding (dP/dphi x dP/dtheta = +N).
  */
 function buildChamferedRingGeometry(
@@ -463,7 +526,7 @@ function buildChamferedRingGeometry(
   halfWidthRadial: number,
   halfWidthAxial: number,
   chamferFrac = 0.28,
-  majorSegments = 56
+  majorSegments = 64
 ): THREE.BufferGeometry {
   const wr = halfWidthRadial;
   const wa = halfWidthAxial;
@@ -524,24 +587,49 @@ function buildChamferedRingGeometry(
 }
 
 /**
- * Builds a chamfered octahedral / double-beveled basalt polyhedral core centered at origin.
+ * Builds one hemisphere cap of the split equatorial basalt hub (`sign = +1` upper, `-1` lower),
+ * leaving a clean open gallery around `|y| < gapHalf` for the recessed Realgar-Amber cavity heart.
  */
-function buildChamferedHubGeometry(radius: number, radialSides = 8): THREE.BufferGeometry {
-  const rings: Array<readonly [number, number]> = [
-    [-radius * 0.96, radius * 0.14],
-    [-radius * 0.78, radius * 0.54],
-    [-radius * 0.34, radius * 0.94],
-    [-radius * 0.14, radius * 1.0],
-    [radius * 0.14, radius * 1.0],
-    [radius * 0.34, radius * 0.94],
-    [radius * 0.78, radius * 0.54],
-    [radius * 0.96, radius * 0.14],
+function buildSplitHubCapGeometry(
+  radius: number,
+  gapHalf: number,
+  sign: 1 | -1,
+  radialSides = 8
+): THREE.BufferGeometry {
+  const rawRings: Array<readonly [number, number]> = [
+    [gapHalf, radius * 0.90],
+    [gapHalf + radius * 0.14, radius * 0.95],
+    [radius * 0.44, radius * 0.88],
+    [radius * 0.78, radius * 0.55],
+    [radius * 0.96, radius * 0.16],
   ];
+  const rings: Array<readonly [number, number]> =
+    sign > 0
+      ? rawRings
+      : rawRings
+          .slice()
+          .reverse()
+          .map(([y, r]) => [-y, r] as const);
   return buildPolygonalStackGeometry(rings, radialSides, true);
 }
 
 /**
- * Builds an elongated 6-sided faceted mineral crystal prism with machined collar seat & sharp pyramidal apex.
+ * Builds a precision horological brass gimbal axle pin / strut from y = 0 to y = length.
+ */
+function buildGimbalPinGeometry(length: number, radius: number, sides = 10): THREE.BufferGeometry {
+  const rings: Array<readonly [number, number]> = [
+    [0.0, radius * 1.32],
+    [length * 0.14, radius * 1.32],
+    [length * 0.22, radius * 0.94],
+    [length * 0.78, radius * 0.94],
+    [length * 0.86, radius * 1.32],
+    [length, radius * 1.32],
+  ];
+  return buildPolygonalStackGeometry(rings, sides, true);
+}
+
+/**
+ * Builds an elongated 6-sided faceted mineral crystal prism with machined collar seat & chamfered apex.
  */
 function buildCrystalPrismGeometry(
   length: number,
@@ -554,7 +642,7 @@ function buildCrystalPrismGeometry(
     [length * 0.08, baseRadius],
     [length * 0.72, shoulderRadius],
     [length * 0.88, shoulderRadius * 0.56],
-    [length, Math.max(0.008, shoulderRadius * 0.09)],
+    [length, Math.max(0.014, shoulderRadius * 0.14)],
   ];
   return buildPolygonalStackGeometry(rings, sides, true);
 }
@@ -568,11 +656,11 @@ function buildCaliperSpokeGeometry(
   tipRadius: number
 ): THREE.BufferGeometry {
   const rings: Array<readonly [number, number]> = [
-    [0.0, rootRadius * 1.15],
-    [length * 0.10, rootRadius * 1.18],
-    [length * 0.16, rootRadius * 0.82],
+    [0.0, rootRadius * 1.18],
+    [length * 0.12, rootRadius * 1.22],
+    [length * 0.18, rootRadius * 0.82],
     [length * 0.76, tipRadius * 0.88],
-    [length * 0.82, tipRadius * 1.24],
+    [length * 0.82, tipRadius * 1.26],
     [length * 0.94, tipRadius * 1.20],
     [length, tipRadius * 0.95],
   ];
@@ -580,7 +668,7 @@ function buildCaliperSpokeGeometry(
 }
 
 /**
- * Builds a chamfered boss / inlaid fastener turret from y = 0 to y = height.
+ * Builds a chamfered boss / inlaid fastener turret with brass seating collar from y = 0 to y = height.
  */
 function buildInlayBossGeometry(radius: number, height: number, sides = 8): THREE.BufferGeometry {
   const rings: Array<readonly [number, number]> = [
@@ -597,11 +685,11 @@ function buildInlayBossGeometry(radius: number, height: number, sides = 8): THRE
  */
 function buildAmberHeartGeometry(radius: number, height: number): THREE.BufferGeometry {
   const rings: Array<readonly [number, number]> = [
-    [-height * 0.5, radius * 0.08],
-    [-height * 0.24, radius * 0.78],
+    [-height * 0.5, radius * 0.12],
+    [-height * 0.25, radius * 0.80],
     [0.0, radius],
-    [height * 0.24, radius * 0.78],
-    [height * 0.5, radius * 0.08],
+    [height * 0.25, radius * 0.80],
+    [height * 0.5, radius * 0.12],
   ];
   return buildPolygonalStackGeometry(rings, 8, true);
 }
@@ -618,6 +706,7 @@ const _tmpBasisY = new THREE.Vector3();
 const _tmpBasisZ = new THREE.Vector3();
 const _tmpPosA = new THREE.Vector3();
 const _tmpPosB = new THREE.Vector3();
+const _tmpPinDir = new THREE.Vector3();
 
 interface AssemblyBuilder {
   group: THREE.Group;
@@ -625,6 +714,15 @@ interface AssemblyBuilder {
   geometries: THREE.BufferGeometry[];
   amberHeartMesh: THREE.Mesh | null;
   materials: CoreMaterialSet;
+}
+
+interface BuiltRingBasis {
+  majorRadius: number;
+  halfWidthRadial: number;
+  halfWidthAxial: number;
+  u: THREE.Vector3;
+  v: THREE.Vector3;
+  n: THREE.Vector3;
 }
 
 function getMat(materials: CoreMaterialSet, role: CoreMaterialRole): THREE.Material {
@@ -640,12 +738,14 @@ function addOrientedRing(
   eulerY: number,
   eulerZ: number,
   role: CoreMaterialRole,
-  name: string
-): void {
+  name: string,
+  offsetY = 0
+): BuiltRingBasis {
   const geo = buildChamferedRingGeometry(majorRadius, halfWidthRadial, halfWidthAxial);
   b.geometries.push(geo);
   const mesh = new THREE.Mesh(geo, getMat(b.materials, role));
   mesh.name = name;
+  mesh.position.set(0, offsetY, 0);
   mesh.rotation.set(eulerX, eulerY, eulerZ);
   mesh.castShadow = true;
   mesh.receiveShadow = true;
@@ -655,16 +755,16 @@ function addOrientedRing(
   _tmpMat4.copy(mesh.matrix);
   _tmpMat4.extractBasis(_tmpBasisX, _tmpBasisY, _tmpBasisZ);
 
-  // Circumscribed cross-section radius ensures SDF strictly contains every chamfer corner
+  // Circumscribed cross-section radius strictly encloses every octagonal chamfer corner
   const minorBound =
     Math.max(
       Math.hypot(halfWidthRadial, halfWidthAxial * 0.72),
       Math.hypot(halfWidthRadial * 0.72, halfWidthAxial)
-    ) + 0.005;
+    ) + 0.008;
   const prim: SdfTorusPrimitive = {
     kind: 'torus',
     cx: 0,
-    cy: 0,
+    cy: offsetY,
     cz: 0,
     ux: _tmpBasisX.x,
     uy: _tmpBasisX.y,
@@ -679,6 +779,69 @@ function addOrientedRing(
     minorRadius: minorBound,
   };
   b.primitives.push(prim);
+
+  return {
+    majorRadius,
+    halfWidthRadial,
+    halfWidthAxial,
+    u: _tmpBasisX.clone(),
+    v: _tmpBasisY.clone(),
+    n: _tmpBasisZ.clone(),
+  };
+}
+
+/**
+ * Adds a pair of opposing radial gimbal pivot pins linking two concentric rings along
+ * their exact geometric line of intersection (`nOuter x nInner`).
+ */
+function addRingBridgePins(
+  b: AssemblyBuilder,
+  outerRing: BuiltRingBasis,
+  innerRing: BuiltRingBasis,
+  pinRadius: number,
+  namePrefix: string
+): void {
+  const axis = new THREE.Vector3().crossVectors(outerRing.n, innerRing.n);
+  if (axis.lengthSq() < 1e-6) {
+    axis.copy(outerRing.u);
+  } else {
+    axis.normalize();
+  }
+
+  const rStart = innerRing.majorRadius + innerRing.halfWidthRadial * 0.45;
+  const rEnd = outerRing.majorRadius - outerRing.halfWidthRadial * 0.45;
+  const pinLen = rEnd - rStart;
+  if (pinLen <= 0.01) return;
+
+  for (let side = 0; side < 2; side++) {
+    const sign = side === 0 ? 1 : -1;
+    _tmpPinDir.copy(axis).multiplyScalar(sign);
+    _tmpQuat.setFromUnitVectors(_upAxis, _tmpPinDir);
+
+    const pinGeo = buildGimbalPinGeometry(pinLen, pinRadius, 10);
+    b.geometries.push(pinGeo);
+    const pinMesh = new THREE.Mesh(pinGeo, b.materials.brass);
+    pinMesh.name = `${namePrefix}_${side}`;
+    pinMesh.position.copy(_tmpPinDir).multiplyScalar(rStart);
+    pinMesh.quaternion.copy(_tmpQuat);
+    pinMesh.castShadow = true;
+    pinMesh.receiveShadow = true;
+    b.group.add(pinMesh);
+
+    _tmpPosA.copy(_tmpPinDir).multiplyScalar(rStart + pinRadius * 0.4);
+    _tmpPosB.copy(_tmpPinDir).multiplyScalar(rEnd - pinRadius * 0.4);
+    b.primitives.push({
+      kind: 'capsule',
+      ax: _tmpPosA.x,
+      ay: _tmpPosA.y,
+      az: _tmpPosA.z,
+      bx: _tmpPosB.x,
+      by: _tmpPosB.y,
+      bz: _tmpPosB.z,
+      radiusA: pinRadius * 1.35 + 0.006,
+      radiusB: pinRadius * 1.35 + 0.006,
+    });
+  }
 }
 
 function addDirectionalSpokeWithCrystal(
@@ -710,10 +873,10 @@ function addDirectionalSpokeWithCrystal(
     spokeMesh.receiveShadow = true;
     b.group.add(spokeMesh);
 
-    const rA = spokeRootR * 1.2 + 0.005;
-    const rB = spokeTipR * 1.26 + 0.005;
-    _tmpPosA.copy(dir).multiplyScalar(startDist + rA * 0.25);
-    _tmpPosB.copy(dir).multiplyScalar(startDist + spokeLen - rB * 0.15);
+    const rA = spokeRootR * 1.24 + 0.007;
+    const rB = spokeTipR * 1.28 + 0.007;
+    _tmpPosA.copy(dir).multiplyScalar(startDist + rA * 0.15);
+    _tmpPosB.copy(dir).multiplyScalar(startDist + spokeLen - rB * 0.1);
     const prim: SdfCapsulePrimitive = {
       kind: 'capsule',
       ax: _tmpPosA.x,
@@ -746,10 +909,17 @@ function addDirectionalSpokeWithCrystal(
     crystalMesh.receiveShadow = true;
     b.group.add(crystalMesh);
 
-    // Two tightly fitted tapered capsules (shaft + pyramidal tip) strictly bound the crystal silhouette
-    const rBodyA = crystalBaseR + 0.005;
-    const rBodyB = crystalShoulderR + 0.005;
+    // Three tightly fitted tapered capsules (shaft, bevel crown, apex) strictly enclose
+    // every single vertex including the 0.88*L chamfer shoulder and sharp apex!
+    const rBodyA = crystalBaseR + 0.008;
+    const rBodyB = crystalShoulderR + 0.008;
+    const rMid = crystalShoulderR * 0.56 + 0.009;
+    const rTip = Math.max(0.032, crystalShoulderR * 0.30);
+
     const shoulderDist = crystalStart + crystalLen * 0.72;
+    const bevelDist = crystalStart + crystalLen * 0.88;
+    const apexCenterDist = crystalStart + crystalLen - rTip * 0.65;
+
     _tmpPosA.copy(dir).multiplyScalar(crystalStart);
     _tmpPosB.copy(dir).multiplyScalar(shoulderDist);
     b.primitives.push({
@@ -764,9 +934,8 @@ function addDirectionalSpokeWithCrystal(
       radiusB: rBodyB,
     });
 
-    const rTip = Math.max(0.024, crystalShoulderR * 0.26);
     _tmpPosA.copy(dir).multiplyScalar(shoulderDist);
-    _tmpPosB.copy(dir).multiplyScalar(crystalStart + crystalLen - rTip * 0.85);
+    _tmpPosB.copy(dir).multiplyScalar(bevelDist);
     b.primitives.push({
       kind: 'capsule',
       ax: _tmpPosA.x,
@@ -776,6 +945,20 @@ function addDirectionalSpokeWithCrystal(
       by: _tmpPosB.y,
       bz: _tmpPosB.z,
       radiusA: rBodyB,
+      radiusB: rMid,
+    });
+
+    _tmpPosA.copy(dir).multiplyScalar(bevelDist);
+    _tmpPosB.copy(dir).multiplyScalar(Math.max(bevelDist + 0.005, apexCenterDist));
+    b.primitives.push({
+      kind: 'capsule',
+      ax: _tmpPosA.x,
+      ay: _tmpPosA.y,
+      az: _tmpPosA.z,
+      bx: _tmpPosB.x,
+      by: _tmpPosB.y,
+      bz: _tmpPosB.z,
+      radiusA: rMid,
       radiusB: rTip,
     });
   }
@@ -793,6 +976,18 @@ function addDirectionalBoss(
   const dir = new THREE.Vector3(dirIn[0], dirIn[1], dirIn[2]).normalize();
   _tmpQuat.setFromUnitVectors(_upAxis, dir);
 
+  // Machined brass mounting bezel seat anchoring the boss cleanly into the basalt hub
+  const seatH = height * 0.24;
+  const seatGeo = buildInlayBossGeometry(radius * 1.14, seatH, 8);
+  b.geometries.push(seatGeo);
+  const seatMesh = new THREE.Mesh(seatGeo, b.materials.brass);
+  seatMesh.name = `${name}_Collar`;
+  seatMesh.position.copy(dir).multiplyScalar(startDist - 0.02);
+  seatMesh.quaternion.copy(_tmpQuat);
+  seatMesh.castShadow = true;
+  seatMesh.receiveShadow = true;
+  b.group.add(seatMesh);
+
   const geo = buildInlayBossGeometry(radius, height, 8);
   b.geometries.push(geo);
   const mesh = new THREE.Mesh(geo, getMat(b.materials, role));
@@ -803,7 +998,7 @@ function addDirectionalBoss(
   mesh.receiveShadow = true;
   b.group.add(mesh);
 
-  _tmpPosA.copy(dir).multiplyScalar(startDist + height * 0.12);
+  _tmpPosA.copy(dir).multiplyScalar(startDist + height * 0.08);
   _tmpPosB.copy(dir).multiplyScalar(startDist + height * 0.68);
   b.primitives.push({
     kind: 'capsule',
@@ -813,13 +1008,13 @@ function addDirectionalBoss(
     bx: _tmpPosB.x,
     by: _tmpPosB.y,
     bz: _tmpPosB.z,
-    radiusA: radius + 0.005,
-    radiusB: radius * 0.96 + 0.005,
+    radiusA: radius * 1.14 + 0.008,
+    radiusB: radius * 0.98 + 0.008,
   });
 
   // Top bevel cap of boss
   _tmpPosA.copy(dir).multiplyScalar(startDist + height * 0.68);
-  _tmpPosB.copy(dir).multiplyScalar(startDist + height - Math.min(height * 0.28, radius * 0.45));
+  _tmpPosB.copy(dir).multiplyScalar(startDist + height - Math.min(height * 0.24, radius * 0.42));
   b.primitives.push({
     kind: 'capsule',
     ax: _tmpPosA.x,
@@ -828,31 +1023,65 @@ function addDirectionalBoss(
     bx: _tmpPosB.x,
     by: _tmpPosB.y,
     bz: _tmpPosB.z,
-    radiusA: radius * 0.96 + 0.005,
-    radiusB: radius * 0.56 + 0.005,
+    radiusA: radius * 0.98 + 0.008,
+    radiusB: radius * 0.58 + 0.008,
   });
 }
 
+/**
+ * Builds a true split equatorial caliper basalt hub with twin upper/lower machined brass bezel
+ * collars, 4 vertical retaining pillars, and a strictly recessed glowing Realgar-Amber crystal
+ * heart gleaming through the open gallery (zero hub/collar/heart clipping!).
+ */
 function addChamferedHubAndHeart(
   b: AssemblyBuilder,
   hubRadius: number,
-  heartRadius: number,
-  heartHeight: number,
+  gapHalf: number,
   hubSides = 8
 ): void {
-  // Chamfered basalt outer shell split into upper & lower caliper hemispheres so the glowing amber cavity gleams through the waist!
-  const hubGeo = buildChamferedHubGeometry(hubRadius, hubSides);
-  b.geometries.push(hubGeo);
-  const hubMesh = new THREE.Mesh(hubGeo, b.materials.basalt);
-  hubMesh.name = 'BasaltCoreHub';
-  hubMesh.castShadow = true;
-  hubMesh.receiveShadow = true;
-  b.group.add(hubMesh);
+  // Upper & lower split basalt hemispheres
+  const upperGeo = buildSplitHubCapGeometry(hubRadius, gapHalf, 1, hubSides);
+  b.geometries.push(upperGeo);
+  const upperMesh = new THREE.Mesh(upperGeo, b.materials.basalt);
+  upperMesh.name = 'BasaltCoreHubUpper';
+  upperMesh.castShadow = true;
+  upperMesh.receiveShadow = true;
+  b.group.add(upperMesh);
 
-  // Brass equatorial waist collar framing the hub
-  addOrientedRing(b, hubRadius * 0.99, 0.036, 0.042, Math.PI * 0.5, 0, 0, 'brass', 'HubCollarRing');
+  const lowerGeo = buildSplitHubCapGeometry(hubRadius, gapHalf, -1, hubSides);
+  b.geometries.push(lowerGeo);
+  const lowerMesh = new THREE.Mesh(lowerGeo, b.materials.basalt);
+  lowerMesh.name = 'BasaltCoreHubLower';
+  lowerMesh.castShadow = true;
+  lowerMesh.receiveShadow = true;
+  b.group.add(lowerMesh);
 
-  // Glowing Realgar-Amber crystal heart gleaming inside the equatorial aperture
+  // Twin machined brass bezel collars framing the upper & lower lips of the equatorial gallery
+  const bezelR = hubRadius * 0.95;
+  addOrientedRing(b, bezelR, 0.032, 0.022, Math.PI * 0.5, 0, 0, 'brass', 'HubBezelUpper', gapHalf);
+  addOrientedRing(b, bezelR, 0.032, 0.022, Math.PI * 0.5, 0, 0, 'brass', 'HubBezelLower', -gapHalf);
+
+  // Four vertical brass retaining mullions bridging the equatorial amber gallery
+  const mullionR = hubRadius * 0.87;
+  const mullionLen = gapHalf * 2.02;
+  for (let i = 0; i < 4; i++) {
+    const phi = (i * Math.PI) / 2 + Math.PI * 0.25;
+    const mx = Math.cos(phi) * mullionR;
+    const mz = Math.sin(phi) * mullionR;
+    const pGeo = buildGimbalPinGeometry(mullionLen, 0.020, 8);
+    b.geometries.push(pGeo);
+    const pMesh = new THREE.Mesh(pGeo, b.materials.brass);
+    pMesh.name = `HubGalleryPillar_${i}`;
+    pMesh.position.set(mx, -mullionLen * 0.5, mz);
+    pMesh.castShadow = true;
+    pMesh.receiveShadow = true;
+    b.group.add(pMesh);
+  }
+
+  // Strictly recessed glowing Realgar-Amber crystal heart nested inside the open gallery
+  // heartRadius < bezelR - 0.035 guarantees zero poking through brass collars or basalt caps!
+  const heartRadius = hubRadius * 0.80;
+  const heartHeight = gapHalf * 2.15;
   const heartGeo = buildAmberHeartGeometry(heartRadius, heartHeight);
   b.geometries.push(heartGeo);
   const heartMesh = new THREE.Mesh(heartGeo, b.materials.amber);
@@ -865,7 +1094,7 @@ function addChamferedHubAndHeart(
     cx: 0,
     cy: 0,
     cz: 0,
-    radius: Math.max(hubRadius, heartRadius) + 0.006,
+    radius: hubRadius + 0.010,
   };
   b.primitives.push(spherePrim);
 }
@@ -890,22 +1119,27 @@ export function buildCoreAssembly(
   };
 
   let name = '';
-  let boundingRadius = 1.2;
+  let boundingRadius = 1.24;
 
   if (idx === 0) {
     // -------------------------------------------------------------------------
     // Core 0: Astrolabe Caliper & Bone-Calcite Prism Reliquary
     // -------------------------------------------------------------------------
     name = 'Astrolabe Caliper & Calcite Reliquary';
-    boundingRadius = 1.18;
+    boundingRadius = 1.20;
 
-    addChamferedHubAndHeart(b, 0.42, 0.47, 0.24, 8);
+    addChamferedHubAndHeart(b, 0.43, 0.095, 8);
 
-    // Two dramatic intersecting cantilevered satin-brass meridian rings
-    addOrientedRing(b, 0.85, 0.048, 0.036, 0.56, 0.24, 0.18, 'brass', 'AstrolabeRingA');
-    addOrientedRing(b, 0.83, 0.045, 0.034, -0.62, 1.38, -0.22, 'brass', 'AstrolabeRingB');
+    // Two cleanly nested concentric cantilevered satin-brass meridian rings (zero overlap!)
+    // Ring A: [0.858, 0.942], Ring B: [0.732, 0.808] -> crisp 50 mm radial clearance!
+    const ringA = addOrientedRing(b, 0.90, 0.042, 0.034, 0.56, 0.24, 0.18, 'brass', 'AstrolabeRingA');
+    const ringB = addOrientedRing(b, 0.77, 0.038, 0.030, -0.62, 1.38, -0.22, 'brass', 'AstrolabeRingB');
+
+    // Machined brass gimbal pivot pins joining Ring A to Ring B along their true intersection axis
+    addRingBridgePins(b, ringA, ringB, 0.022, 'AstrolabeBridgePin');
 
     // Six projecting chamfered brass caliper spokes crowned with faceted Bone-Calcite prisms
+    // Carefully aligned to thread cleanly through the open octants of Ring A & Ring B without clipping!
     const spokes: ReadonlyArray<{
       dir: readonly [number, number, number];
       spokeLen: number;
@@ -913,12 +1147,12 @@ export function buildCoreAssembly(
       baseR: number;
       role: CoreMaterialRole;
     }> = [
-      { dir: [0.16, 0.98, 0.10], spokeLen: 0.34, crystalLen: 0.44, baseR: 0.115, role: 'calcite' },
-      { dir: [-0.14, -0.98, -0.10], spokeLen: 0.32, crystalLen: 0.40, baseR: 0.108, role: 'calcite' },
-      { dir: [0.96, 0.18, 0.22], spokeLen: 0.34, crystalLen: 0.38, baseR: 0.105, role: 'calcite' },
-      { dir: [-0.96, -0.15, -0.22], spokeLen: 0.34, crystalLen: 0.38, baseR: 0.105, role: 'calcite' },
-      { dir: [-0.18, 0.16, 0.97], spokeLen: 0.32, crystalLen: 0.41, baseR: 0.112, role: 'calcite' },
-      { dir: [0.18, -0.18, -0.97], spokeLen: 0.30, crystalLen: 0.37, baseR: 0.105, role: 'calcite' },
+      { dir: [0.22, 0.95, 0.22], spokeLen: 0.34, crystalLen: 0.42, baseR: 0.112, role: 'calcite' },
+      { dir: [-0.22, -0.95, -0.22], spokeLen: 0.32, crystalLen: 0.39, baseR: 0.106, role: 'calcite' },
+      { dir: [0.95, -0.18, 0.25], spokeLen: 0.34, crystalLen: 0.38, baseR: 0.104, role: 'calcite' },
+      { dir: [-0.95, 0.18, -0.25], spokeLen: 0.34, crystalLen: 0.38, baseR: 0.104, role: 'calcite' },
+      { dir: [-0.42, 0.28, 0.86], spokeLen: 0.32, crystalLen: 0.40, baseR: 0.110, role: 'calcite' },
+      { dir: [0.42, -0.28, -0.86], spokeLen: 0.30, crystalLen: 0.37, baseR: 0.104, role: 'calcite' },
     ];
 
     for (let i = 0; i < spokes.length; i++) {
@@ -926,11 +1160,11 @@ export function buildCoreAssembly(
       addDirectionalSpokeWithCrystal(
         b,
         s.dir,
-        0.38,
+        0.39,
         s.spokeLen,
         s.crystalLen,
-        0.056,
-        0.068,
+        0.052,
+        0.064,
         s.baseR,
         s.baseR * 0.78,
         s.role,
@@ -947,21 +1181,53 @@ export function buildCoreAssembly(
       [0.60, -0.56, -0.57],
     ];
     for (let i = 0; i < bosses.length; i++) {
-      addDirectionalBoss(b, bosses[i], 0.39, 0.11, 0.27, 'verdigris', `VerdigrisBoss_${i}`);
+      addDirectionalBoss(b, bosses[i], 0.38, 0.102, 0.25, 'verdigris', `VerdigrisBoss_${i}`);
     }
   } else if (idx === 1) {
     // -------------------------------------------------------------------------
     // Core 1: Triaxial Mineral Geode Caliper & Prismatic Spire Cluster
     // -------------------------------------------------------------------------
     name = 'Prismatic Calcite & Verdigris Spire Cluster';
-    boundingRadius = 1.20;
+    boundingRadius = 1.22;
 
-    addChamferedHubAndHeart(b, 0.46, 0.51, 0.28, 10);
+    addChamferedHubAndHeart(b, 0.46, 0.105, 10);
 
-    // Equatorial brass vernier caliper girdle
-    addOrientedRing(b, 0.78, 0.052, 0.038, 0.22, 0.0, -0.18, 'brass', 'GeodeVernierBand');
+    // Tilted equatorial brass vernier caliper girdle (tilted off horizontal so equatorial gallery gleams!)
+    const girdle = addOrientedRing(b, 0.80, 0.048, 0.036, 0.28, 0.12, -0.24, 'brass', 'GeodeVernierBand');
 
-    // Eight asymmetric faceted Bone-Calcite & Verdigris crystal spires radiating from hub
+    // Two opposing brass support spokes anchoring the girdle to the basalt hub along its plane
+    for (let side = 0; side < 2; side++) {
+      const sign = side === 0 ? 1 : -1;
+      const strutDir = girdle.u.clone().multiplyScalar(sign);
+      _tmpQuat.setFromUnitVectors(_upAxis, strutDir);
+      const strutLen = 0.80 - 0.43;
+      const strutGeo = buildGimbalPinGeometry(strutLen, 0.030, 10);
+      b.geometries.push(strutGeo);
+      const strutMesh = new THREE.Mesh(strutGeo, b.materials.brass);
+      strutMesh.name = `GirdleStrut_${side}`;
+      strutMesh.position.copy(strutDir).multiplyScalar(0.41);
+      strutMesh.quaternion.copy(_tmpQuat);
+      strutMesh.castShadow = true;
+      strutMesh.receiveShadow = true;
+      b.group.add(strutMesh);
+
+      _tmpPosA.copy(strutDir).multiplyScalar(0.42);
+      _tmpPosB.copy(strutDir).multiplyScalar(0.79);
+      b.primitives.push({
+        kind: 'capsule',
+        ax: _tmpPosA.x,
+        ay: _tmpPosA.y,
+        az: _tmpPosA.z,
+        bx: _tmpPosB.x,
+        by: _tmpPosB.y,
+        bz: _tmpPosB.z,
+        radiusA: 0.046,
+        radiusB: 0.046,
+      });
+    }
+
+    // Eight asymmetric faceted Bone-Calcite & Verdigris crystal spires radiating cleanly
+    // above and below the vernier girdle plane (zero awkward clipping through the brass ring!)
     const spires: ReadonlyArray<{
       dir: readonly [number, number, number];
       spokeLen: number;
@@ -969,14 +1235,16 @@ export function buildCoreAssembly(
       baseR: number;
       role: CoreMaterialRole;
     }> = [
-      { dir: [0.08, 0.99, 0.12], spokeLen: 0.14, crystalLen: 0.64, baseR: 0.145, role: 'calcite' },
-      { dir: [-0.28, 0.76, 0.58], spokeLen: 0.12, crystalLen: 0.58, baseR: 0.125, role: 'calcite' },
-      { dir: [0.68, 0.52, -0.51], spokeLen: 0.12, crystalLen: 0.56, baseR: 0.125, role: 'verdigris' },
-      { dir: [-0.82, 0.24, -0.52], spokeLen: 0.12, crystalLen: 0.55, baseR: 0.120, role: 'calcite' },
-      { dir: [0.85, -0.22, 0.47], spokeLen: 0.12, crystalLen: 0.58, baseR: 0.130, role: 'calcite' },
-      { dir: [-0.56, -0.62, 0.55], spokeLen: 0.12, crystalLen: 0.52, baseR: 0.122, role: 'verdigris' },
-      { dir: [0.24, -0.92, -0.31], spokeLen: 0.14, crystalLen: 0.60, baseR: 0.135, role: 'calcite' },
-      { dir: [-0.14, -0.32, -0.94], spokeLen: 0.12, crystalLen: 0.54, baseR: 0.118, role: 'verdigris' },
+      // Front-upper crown (aligned cleanly toward +girdle.n hemisphere)
+      { dir: [0.10, 0.82, 0.56], spokeLen: 0.14, crystalLen: 0.62, baseR: 0.138, role: 'calcite' },
+      { dir: [-0.52, 0.54, 0.66], spokeLen: 0.12, crystalLen: 0.56, baseR: 0.122, role: 'calcite' },
+      { dir: [0.64, 0.34, 0.69], spokeLen: 0.12, crystalLen: 0.54, baseR: 0.120, role: 'verdigris' },
+      { dir: [-0.20, -0.58, 0.79], spokeLen: 0.12, crystalLen: 0.54, baseR: 0.124, role: 'verdigris' },
+      // Rear-lower crown (aligned cleanly toward -girdle.n hemisphere)
+      { dir: [-0.14, -0.86, -0.49], spokeLen: 0.14, crystalLen: 0.60, baseR: 0.134, role: 'calcite' },
+      { dir: [0.62, 0.46, -0.63], spokeLen: 0.12, crystalLen: 0.56, baseR: 0.122, role: 'verdigris' },
+      { dir: [-0.68, 0.28, -0.68], spokeLen: 0.12, crystalLen: 0.55, baseR: 0.120, role: 'calcite' },
+      { dir: [0.46, -0.52, -0.72], spokeLen: 0.12, crystalLen: 0.55, baseR: 0.126, role: 'calcite' },
     ];
 
     for (let i = 0; i < spires.length; i++) {
@@ -987,8 +1255,8 @@ export function buildCoreAssembly(
         0.42,
         sp.spokeLen,
         sp.crystalLen,
-        0.072,
-        0.088,
+        0.068,
+        0.084,
         sp.baseR,
         sp.baseR * 0.74,
         sp.role,
@@ -1001,61 +1269,74 @@ export function buildCoreAssembly(
     // Core 2: Helical Brass Orrery Gyro-Armature & Amber Heart
     // -------------------------------------------------------------------------
     name = 'Tri-Axis Brass Gyro-Armature';
-    boundingRadius = 1.18;
+    boundingRadius = 1.32;
 
-    // Open suspended glowing amber core heart framed inside three nested chamfered brass rings
-    const heartGeo = buildAmberHeartGeometry(0.36, 0.58);
+    // Open suspended glowing faceted amber crystal heart cradled by an equatorial brass bezel ring
+    const heartR = 0.35;
+    const heartH = 0.56;
+    const heartGeo = buildAmberHeartGeometry(heartR, heartH);
     b.geometries.push(heartGeo);
     const heartMesh = new THREE.Mesh(heartGeo, b.materials.amber);
     heartMesh.name = 'AmberCavityHeart';
     b.group.add(heartMesh);
     b.amberHeartMesh = heartMesh;
 
-    // Oriented rounded box for the faceted amber bipyramid core
-    const obox: SdfOrientedBoxPrimitive = {
-      kind: 'obox',
-      cx: 0,
-      cy: 0,
-      cz: 0,
-      ux: 1,
-      uy: 0,
-      uz: 0,
-      vx: 0,
-      vy: 1,
-      vz: 0,
-      wx: 0,
-      wy: 0,
-      wz: 1,
-      hx: 0.28,
-      hy: 0.25,
-      hz: 0.28,
-      bevel: 0.085,
-    };
-    b.primitives.push(obox);
+    // Tight exact SDF for the bipyramidal amber crystal (2 tapered vertical capsules — zero corner bloat!)
+    b.primitives.push({
+      kind: 'capsule',
+      ax: 0,
+      ay: 0,
+      az: 0,
+      bx: 0,
+      by: heartH * 0.43,
+      bz: 0,
+      radiusA: heartR + 0.008,
+      radiusB: heartR * 0.20 + 0.008,
+    });
+    b.primitives.push({
+      kind: 'capsule',
+      ax: 0,
+      ay: 0,
+      az: 0,
+      bx: 0,
+      by: -heartH * 0.43,
+      bz: 0,
+      radiusA: heartR + 0.008,
+      radiusB: heartR * 0.20 + 0.008,
+    });
 
-    // Three nested tilted chamfered brass & basalt gyro rings
-    addOrientedRing(b, 0.96, 0.052, 0.042, 0.34, 0.18, 0.0, 'brass', 'OuterGyroRing');
-    addOrientedRing(b, 0.81, 0.046, 0.036, -0.78, 1.18, 0.26, 'basalt', 'MidGyroRing');
-    addOrientedRing(b, 0.64, 0.042, 0.034, 1.12, -0.62, 0.44, 'brass', 'InnerGyroRing');
+    // Three nested tilted chamfered brass & honed-basalt gyro rings with clean radial clearance
+    const outerRing = addOrientedRing(b, 0.94, 0.048, 0.038, 0.34, 0.18, 0.0, 'brass', 'OuterGyroRing');
+    const midRing = addOrientedRing(b, 0.80, 0.042, 0.034, -0.78, 1.18, 0.26, 'basalt', 'MidGyroRing');
+    const innerRing = addOrientedRing(b, 0.65, 0.038, 0.030, 1.12, -0.62, 0.44, 'brass', 'InnerGyroRing');
+    // Delicate machined equatorial cradle collar gripping the amber heart
+    const heartCollar = addOrientedRing(b, heartR + 0.014, 0.022, 0.020, Math.PI * 0.5, 0, 0, 'brass', 'HeartCradleCollar');
 
-    // Four projecting machined trunnion finials & Bone-Calcite tips jutting outside the outer ring
-    const trunnions: ReadonlyArray<readonly [number, number, number]> = [
-      [0.0, 0.94, 0.34],
-      [0.0, -0.94, -0.34],
-      [0.98, 0.06, -0.18],
-      [-0.98, -0.06, 0.18],
+    // Real mechanical gimbal axle pins linking Outer -> Mid -> Inner -> HeartCradle!
+    addRingBridgePins(b, outerRing, midRing, 0.022, 'GyroOuterMidPin');
+    addRingBridgePins(b, midRing, innerRing, 0.020, 'GyroMidInnerPin');
+    addRingBridgePins(b, innerRing, heartCollar, 0.018, 'GyroInnerHeartPin');
+
+    // Four machined finial trunnions mounted cleanly ON THE OUTER RIM of OuterGyroRing
+    // along exact in-plane cardinal directions (zero cutting through inner gyro rings!)
+    const trunnionDirs: readonly THREE.Vector3[] = [
+      outerRing.v.clone(),
+      outerRing.v.clone().negate(),
+      outerRing.u.clone(),
+      outerRing.u.clone().negate(),
     ];
-    for (let i = 0; i < trunnions.length; i++) {
+    for (let i = 0; i < trunnionDirs.length; i++) {
+      const td = trunnionDirs[i];
       addDirectionalSpokeWithCrystal(
         b,
-        trunnions[i],
-        0.62,
-        0.34,
-        0.24,
-        0.048,
-        0.062,
-        0.088,
-        0.062,
+        [td.x, td.y, td.z],
+        outerRing.majorRadius + outerRing.halfWidthRadial * 0.35,
+        0.13,
+        0.20,
+        0.042,
+        0.052,
+        0.076,
+        0.056,
         i % 2 === 0 ? 'calcite' : 'verdigris',
         `Trunnion_${i}`,
         8
@@ -1065,12 +1346,13 @@ export function buildCoreAssembly(
 
   b.group.name = `CocoonInnerCore_${idx}`;
 
-  const { packedData, packedKinds } = packPrimitives(b.primitives);
+  const { packedData, packedBounds, packedKinds } = packPrimitives(b.primitives);
   const descriptor: CoreAssemblyDescriptor = {
     index: idx,
     name,
     primitives: b.primitives,
     packedData,
+    packedBounds,
     packedKinds,
     primCount: b.primitives.length,
     boundingRadius,

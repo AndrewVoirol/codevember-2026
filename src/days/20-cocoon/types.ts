@@ -74,6 +74,8 @@ export interface CoreAssemblyDescriptor {
   primitives: readonly CoreSdfPrimitive[];
   /** Contiguous flat packed SDF buffer (16 floats/primitive) for zero-alloc SIMD-friendly evaluation */
   packedData: Float32Array;
+  /** Flat AABB per primitive (6 floats: minX,maxX,minY,maxY,minZ,maxZ) for exact early-out culling */
+  packedBounds: Float32Array;
   /** Primitive kind codes: 0=sphere, 1=capsule, 2=torus, 3=obox */
   packedKinds: Uint8Array;
   primCount: number;
@@ -109,9 +111,9 @@ export const DEFAULT_COCOON_CONFIG: CocoonPhysicsConfig = {
   looseRadius: 1.44,
   looseElongationY: 1.11,
   maxShrinkRatio: 0.58,
-  skinClearance: 0.016,
+  skinClearance: 0.018,
   substeps: 3,
-  constraintIterations: 2,
+  constraintIterations: 3,
 };
 
 export interface Day20TelemetryState {
