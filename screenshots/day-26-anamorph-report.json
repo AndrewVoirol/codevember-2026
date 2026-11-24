@@ -1,0 +1,55 @@
+{
+  "day": 26,
+  "slug": "26-anamorph",
+  "expectedHeader": "Day 26 - Anamorph",
+  "domAudit": {
+    "headerText": "Day 26 - Anamorph",
+    "bodyBg": "rgb(33, 37, 41)",
+    "drawerCount": 30
+  },
+  "telemetry": {
+    "frameCount": 345,
+    "avgFrameMs": 8.69,
+    "p95FrameMs": 12.9,
+    "sceneState": {
+      "day": 26,
+      "slug": "26-anamorph",
+      "headerLabel": "Day 26 - Anamorph",
+      "frameCount": 345,
+      "cameraPos": [
+        -0.6488203829850886,
+        5.351022806327955,
+        -0.0050663992639480605
+      ],
+      "pointerWorld": [
+        -0.3230775315351946,
+        -0.03857761302898499,
+        0.401127529830697
+      ],
+      "pointerSpeed": 0,
+      "pointerDwellSec": 1.8588,
+      "pointerImpulse": 0.0008,
+      "alignmentErrorDeg": 76.244,
+      "isLockedIn": false,
+      "activeStencilIndex": 0,
+      "projectionCount": 1,
+      "vantagePos": [
+        2.4504,
+        1.551,
+        4.4854
+      ]
+    }
+  },
+  "metrics": {
+    "specimenCoverageRatio": 0.295,
+    "interactionMad": 24.826
+  },
+  "gpuErrors": [],
+  "gateFailures": [],
+  "artifacts": {
+    "contactSheet": "screenshots/day-26-anamorph-contact-sheet.png",
+    "initial": "screenshots/day-26-anamorph-initial.png",
+    "drawer": "screenshots/day-26-anamorph-drawer.png"
+  },
+  "passed": true
+}

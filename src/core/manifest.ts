@@ -320,12 +320,12 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
   createDay(
     26,
     'Anamorph',
-    'upcoming',
+    'complete',
     'tsl',
+    'cinnabarVermilion',
     'yellowOchre',
-    'azuritePrussian',
-    'Fragmented cloud of mineral shards and catoptric cylinder that resolves into a coherent form from one vantage',
-    'Orbiting with the pointer moves between chaotic shard suspension and the exact optical lock-in angle'
+    'Suspended 30-slab brutalist board-formed concrete and honed Roman travertine courtyard maquette—with freestanding portal archway, six cantilevered stair treads, offset baffle wall, recessed colonnade bays, overhead concrete sky-beams, and a hovering machined satin-brass surveyor sight-ring—carrying a real-time Felice Varini projective Kubelka-Munk mineral-pigment stencil with exact 30-slab analytical line-of-sight occlusion',
+    'Drag to orbit 360° around the brutalist courtyard maquette and align with the hovering brass surveyor sight-ring to cushion into razor-sharp optical lock-in where fractured pigment bands snap into a floating geometric figure; click the building (or press Space) from any angle to project and bake a fresh mineral-pigment stencil (Concentric Rings & Diamond, Impossible Penrose Tribar, Nested Isometric Cube, Architectural Squares) from your current camera viewpoint; click the brass sight-ring, double-click, or press R to glide smoothly into optical lock-in'
   ),
   createDay(
     27,
