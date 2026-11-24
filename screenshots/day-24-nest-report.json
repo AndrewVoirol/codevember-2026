@@ -1,0 +1,46 @@
+{
+  "day": 24,
+  "slug": "24-nest",
+  "expectedHeader": "Day 24 - Nest",
+  "domAudit": {
+    "headerText": "Day 24 - Nest",
+    "bodyBg": "rgb(33, 37, 41)",
+    "drawerCount": 30
+  },
+  "telemetry": {
+    "frameCount": 349,
+    "avgFrameMs": 8.32,
+    "p95FrameMs": 10,
+    "sceneState": {
+      "day": 24,
+      "slug": "24-nest",
+      "headerLabel": "Day 24 - Nest",
+      "frameCount": 349,
+      "cameraPos": [
+        0,
+        1.9500000000000002,
+        3.6499999999999995
+      ],
+      "pointerWorld": [
+        0.3092983534313254,
+        0.00948645874182974,
+        -0.004340379753110746
+      ],
+      "pointerSpeed": 0,
+      "pointerDwellSec": 1.8736,
+      "pointerImpulse": 0.0009
+    }
+  },
+  "metrics": {
+    "specimenCoverageRatio": 0.2353,
+    "interactionMad": 2.403
+  },
+  "gpuErrors": [],
+  "gateFailures": [],
+  "artifacts": {
+    "contactSheet": "screenshots/day-24-nest-contact-sheet.png",
+    "initial": "screenshots/day-24-nest-initial.png",
+    "drawer": "screenshots/day-24-nest-drawer.png"
+  },
+  "passed": true
+}

@@ -300,12 +300,12 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
   createDay(
     24,
     'Nest',
-    'upcoming',
-    'tsl',
+    'complete',
+    'rapier',
     'rawUmber',
     'celadonGlauconite',
-    'Interwoven birch-twig, mud-dauber, and lichen cup nest cradling speckled celadon mineral eggs',
-    'Pointer gently parts the outer twig weave and rotates the specimen under soft studio rim light'
+    'Suspended honed-limestone and dark-brass hollow ring plinth supporting a 56-dowel self-supporting Leonardo/Zollinger reciprocal timber dome of counter-woven walnut, smoked-ash, ochre-cedar, and birch dowels cradling three smooth speckled Celadon and Bone-Calcite river-pebble eggs under live Rapier 0.21 rigid-body equilibrium',
+    'Hover any timber dowel for warm ochre rim lift, click quickly to tap-test whether it is loose or load-bearing, grab and pull dowels outward via 3D spring-tether like structural Jenga to topple the weave and drop the Celadon stones through the hollow plinth, drag empty space to orbit 360°, or double-click empty space / press Space to re-weave'
   ),
   createDay(
     25,
