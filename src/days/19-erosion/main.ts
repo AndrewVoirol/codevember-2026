@@ -68,7 +68,7 @@ async function mountDay19Erosion(): Promise<void> {
   // Studio Softbox PMREM Environment so pyritized ammonite ribs & satin brass gleam against #212529
   const studioEnv = createStudioEnvironment(stage.renderer);
   stage.scene.environment = studioEnv.texture;
-  stage.scene.environmentIntensity = 1.18;
+  stage.scene.environmentIntensity = 1.24;
 
   // Harmonize 3-point studio lighting & upgrade shadow map to 2048x2048 tightly fitted to the nodule
   let dirIdx = 0;
@@ -263,12 +263,19 @@ async function mountDay19Erosion(): Promise<void> {
     }
   };
 
-  canvas.addEventListener('pointerdown', onPointerDown);
+  // Capture-phase pointerdown fires BEFORE OrbitControls' bubble listener so clicking rock
+  // disables orbit cleanly before OrbitControls ever captures a pointer or enters STATE.ROTATE.
+  canvas.addEventListener('pointerdown', onPointerDown, true);
   canvas.addEventListener('pointermove', onPointerMove);
   canvas.addEventListener('pointerup', finishPointer);
   canvas.addEventListener('pointercancel', finishPointer);
   canvas.addEventListener('pointerleave', onPointerLeave);
   window.addEventListener('keydown', onKeyDown);
+
+  // Pre-bound zero-GC surface radius callback for full-shaft nozzle clearance checks
+  const sampleRockRadius = (dx: number, dy: number, dz: number): number =>
+    erosionField.sampleCombinedRadius(dx, dy, dz);
+  _poseInput.sampleSurfaceRadius = sampleRockRadius;
 
   // Read-only verification & telemetry hook
   window.__DAY19__ = {
@@ -286,7 +293,7 @@ async function mountDay19Erosion(): Promise<void> {
   };
 
   stage.shell.registerDispose(() => {
-    canvas.removeEventListener('pointerdown', onPointerDown);
+    canvas.removeEventListener('pointerdown', onPointerDown, true);
     canvas.removeEventListener('pointermove', onPointerMove);
     canvas.removeEventListener('pointerup', finishPointer);
     canvas.removeEventListener('pointercancel', finishPointer);
@@ -322,32 +329,10 @@ async function mountDay19Erosion(): Promise<void> {
       clickBurstTimer = Math.max(0, clickBurstTimer - dtSec);
     }
 
-    // 1. Update articulated brass pneumatic micro-nozzle pose & focused grit jet cone
-    _poseInput.isHoveringRock = hitRockNow;
-    _poseInput.isBlasting = activeBlastNow;
-    _poseInput.isOrbiting = isOrbiting;
-    _poseInput.hitPos.copy(_lastHitPos);
-    _poseInput.hitNormal.copy(_lastHitNormal);
-    _poseInput.cameraPos.copy(camera.position);
-    _poseInput.cameraUp.copy(camera.up);
-    _poseInput.elapsedSec = elapsedSec;
-
-    nozzleCtrl.update(_poseInput, dtSec);
-    nozzleAssembly.group.position.copy(nozzleCtrl.tipPos);
-    nozzleAssembly.group.quaternion.copy(nozzleCtrl.orientation);
-
-    materials.uJetAlpha.value = nozzleCtrl.jetActiveAlpha;
-    if (nozzleCtrl.jetActiveAlpha > 0.015) {
-      nozzleAssembly.jetMesh.visible = true;
-      nozzleAssembly.jetMesh.scale.set(1, 1, Math.max(0.06, nozzleCtrl.jetLength));
-    } else {
-      nozzleAssembly.jetMesh.visible = false;
-    }
-
-    // 2. Active Air-Abrasion Carving with Smooth Stroke Sub-Stepping (zero dotted caterpillar pits!)
+    // 1. Active Air-Abrasion Carving FIRST so nozzle jet, spot highlight & particle plumes
+    //    bind to the EXACT post-carve live crater floor (zero stale pre-carve lag!)
+    let avgFossilRatio = _rayHit.isFossil ? 1.0 : 0.0;
     if (activeBlastNow) {
-      let avgFossilRatio = _rayHit.isFossil ? 1.0 : 0.0;
-
       if (hasPrevBlastDir) {
         const angStep = Math.acos(Math.max(-1, Math.min(1, _lastBlastDir.dot(_rayHit.direction))));
         const subSteps = Math.max(1, Math.min(6, Math.ceil(angStep / 0.032)));
@@ -378,31 +363,74 @@ async function mountDay19Erosion(): Promise<void> {
       _lastBlastDir.copy(_rayHit.direction);
       hasPrevBlastDir = true;
 
+      // Immediately re-sample the exact post-carve impact position & normal on the live carved floor
+      if (raycastFromClient(pointerClientX, pointerClientY)) {
+        _lastHitPos.copy(_rayHit.position);
+        _lastHitNormal.copy(_rayHit.normal);
+      } else {
+        const rPost = erosionField.sampleCombinedRadius(
+          _rayHit.direction.x,
+          _rayHit.direction.y,
+          _rayHit.direction.z
+        );
+        _lastHitPos.copy(_rayHit.direction).multiplyScalar(rPost);
+        erosionField.sampleCombinedNormal(
+          _rayHit.direction.x,
+          _rayHit.direction.y,
+          _rayHit.direction.z,
+          _lastHitNormal
+        );
+      }
+    } else {
+      hasPrevBlastDir = false;
+    }
+
+    // 2. Update articulated brass pneumatic micro-nozzle pose with full-shaft clearance & exact jet lock
+    _poseInput.isHoveringRock = hitRockNow;
+    _poseInput.isBlasting = activeBlastNow;
+    _poseInput.isOrbiting = isOrbiting;
+    _poseInput.hitPos.copy(_lastHitPos);
+    _poseInput.hitNormal.copy(_lastHitNormal);
+    _poseInput.cameraPos.copy(camera.position);
+    _poseInput.cameraUp.copy(camera.up);
+    _poseInput.elapsedSec = elapsedSec;
+
+    nozzleCtrl.update(_poseInput, dtSec);
+    nozzleAssembly.group.position.copy(nozzleCtrl.tipPos);
+    nozzleAssembly.group.quaternion.copy(nozzleCtrl.orientation);
+
+    materials.uJetAlpha.value = nozzleCtrl.jetActiveAlpha;
+    if (nozzleCtrl.jetActiveAlpha > 0.015) {
+      nozzleAssembly.jetMesh.visible = true;
+      nozzleAssembly.jetMesh.scale.set(1, 1, Math.max(0.05, nozzleCtrl.jetLength));
+    } else {
+      nozzleAssembly.jetMesh.visible = false;
+    }
+
+    // 3. Emit rebounding dolomite grit & billowing calcite plumes from exact post-carve floor
+    if (activeBlastNow) {
       materials.uBlastSpotWorld.value.set(
-        _rayHit.position.x,
-        _rayHit.position.y,
-        _rayHit.position.z,
+        _lastHitPos.x,
+        _lastHitPos.y,
+        _lastHitPos.z,
         nozzleCtrl.jetActiveAlpha
       );
-
-      // Re-sample exact newly carved impact point so rebounding grit & chalk plumes erupt from live floor
       particles.emitBlast(
-        _rayHit.position,
-        _rayHit.normal,
+        _lastHitPos,
+        _lastHitNormal,
         nozzleCtrl.aimDir,
         avgFossilRatio,
         dtSec,
         1.0
       );
     } else {
-      hasPrevBlastDir = false;
       materials.uBlastSpotWorld.value.w *= Math.exp(-dtSec * 16.0);
     }
 
-    // 3. Flush dirty heightfield & chalk decay to GPU RGBA16F DataTexture (0 bytes uploaded when idle)
+    // 4. Flush dirty heightfield & chalk decay to GPU RGBA16F DataTexture (0 bytes uploaded when idle)
     erosionField.stepAndUpload(dtSec);
 
-    // 4. Advance bouncing dolomite grit chips & swirling pale calcite dust plumes
+    // 5. Advance bouncing dolomite grit chips & swirling pale calcite dust plumes
     particles.step(dtSec, camera.quaternion, erosionField);
   });
 }

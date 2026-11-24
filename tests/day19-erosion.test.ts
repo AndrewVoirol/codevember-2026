@@ -33,6 +33,7 @@ import {
   NOZZLE_BLAST_STANDOFF,
   NOZZLE_HOVER_STANDOFF,
   NozzleController,
+  measureNozzleMinRockClearance,
   type NozzlePoseInput,
 } from '../src/days/19-erosion/nozzleKinematics';
 import {
@@ -727,6 +728,116 @@ describe('Day 19 - Erosion: Pneumatic Air-Abrasion Fossil Prep Nodule', () => {
       }
     }
     expect(field.exposedFraction).toBeGreaterThan(0.12);
+
+    field.dispose();
+    ammoniteGeo.dispose();
+  });
+
+  it('enforces zero degenerate ammonite triangles, full-shaft nozzle clearance across carved craters & limbs, exact jet-to-impact lock, and rear -Z pole carving continuity', () => {
+    // 1. Zero degenerate zero-area triangles anywhere on ammonite (including protoconch boss poles)
+    const { geometry: ammoniteGeo } = buildAmmoniteGeometry(220, 30);
+    const pos = ammoniteGeo.attributes.position as THREE.BufferAttribute;
+    const idx = ammoniteGeo.index!;
+    const a = new THREE.Vector3();
+    const b = new THREE.Vector3();
+    const c = new THREE.Vector3();
+    const ab = new THREE.Vector3();
+    const ac = new THREE.Vector3();
+    const crossV = new THREE.Vector3();
+    let degenerateTris = 0;
+    for (let t = 0; t < idx.count / 3; t++) {
+      a.fromBufferAttribute(pos, idx.getX(t * 3));
+      b.fromBufferAttribute(pos, idx.getX(t * 3 + 1));
+      c.fromBufferAttribute(pos, idx.getX(t * 3 + 2));
+      ab.subVectors(b, a);
+      ac.subVectors(c, a);
+      crossV.crossVectors(ab, ac);
+      if (crossV.lengthSq() < 1e-12) degenerateTris++;
+    }
+    expect(degenerateTris).toBe(0);
+
+    // 2. Full-shaft & braided-hose rock clearance across 360-deg viewpoints, left-flank limbs & deep carved craters
+    const field = new ErosionField(ammoniteGeo, 1);
+    const sampleRadius = (dx: number, dy: number, dz: number) =>
+      field.sampleCombinedRadius(dx, dy, dz);
+
+    // Carve deep craters on front-left flank, rim limb, and rear -Z pole
+    for (let step = 0; step < 30; step++) {
+      field.carveAt(-0.62, 0.25, 0.74, 0.05, 1.2);
+      field.carveAt(0.0, 0.0, -1.0, 0.05, 1.2);
+      field.carveAt(0.88, -0.15, 0.45, 0.05, 1.2);
+    }
+    // Verify exact volume conservation still holds after rear -Z pole + spall-bevel carving!
+    expect(Math.abs(field.totalCarvedVolume - field.computeExactCarvedVolume())).toBeLessThan(1e-5);
+
+    // Verify bounded smooth crater cliff slopes across ALL visible limestone texels (zero radial needles)
+    // (Behind-fossil recessed floor texels follow the 3D ammonite whorl step and are occluded by the fossil mesh)
+    const freshField = new ErosionField(ammoniteGeo, 1);
+    let maxVisibleLimestoneStep = 0;
+    for (let iy = 2; iy <= freshField.inner - 1; iy++) {
+      for (let ix = 2; ix <= freshField.inner - 1; ix++) {
+        const i = iy * freshField.size + ix;
+        const rC = freshField.startRadius[i];
+        const fC = freshField.fossilRadius[i];
+        if (fC > 0 && rC < fC) continue;
+        for (const nIdx of [i + 1, i + freshField.size]) {
+          const rN = freshField.startRadius[nIdx];
+          const fN = freshField.fossilRadius[nIdx];
+          if (fN > 0 && rN < fN) continue;
+          const d = Math.abs(rC - rN);
+          if (d > maxVisibleLimestoneStep) maxVisibleLimestoneStep = d;
+        }
+      }
+    }
+    expect(maxVisibleLimestoneStep).toBeLessThan(0.055);
+    freshField.dispose();
+
+    const ctrl = new NozzleController();
+    const outTip = new THREE.Vector3();
+    const outQuat = new THREE.Quaternion();
+    const outAim = new THREE.Vector3();
+    const normalScratch = new THREE.Vector3();
+
+    const testProbes: Array<{
+      cam: [number, number, number];
+      dir: [number, number, number];
+    }> = [
+      { cam: [0, 0.14, 4.35], dir: [-0.62, 0.25, 0.74] }, // deep front-left crater
+      { cam: [0, 0.14, 4.35], dir: [-0.88, -0.15, 0.45] }, // grazing left flank
+      { cam: [3.8, 0.4, 2.0], dir: [0.88, -0.15, 0.45] }, // side orbit rim
+      { cam: [-3.9, 0.3, 1.8], dir: [-0.84, 0.32, 0.44] }, // left side orbit
+      { cam: [0, 0.1, -4.35], dir: [0.0, 0.0, -1.0] }, // rear -Z pole crater
+      { cam: [0.2, 4.1, 1.2], dir: [0.08, 0.94, 0.32] }, // top pole
+    ];
+
+    for (const p of testProbes) {
+      const dir = new THREE.Vector3(...p.dir).normalize();
+      const rSurf = field.sampleCombinedRadius(dir.x, dir.y, dir.z);
+      const hitPos = dir.clone().multiplyScalar(rSurf);
+      const hitNorm = field.sampleCombinedNormal(dir.x, dir.y, dir.z, normalScratch).clone();
+      const camPos = new THREE.Vector3(...p.cam);
+
+      const input: NozzlePoseInput = {
+        isHoveringRock: true,
+        isBlasting: true,
+        isOrbiting: false,
+        hitPos,
+        hitNormal: hitNorm,
+        cameraPos: camPos,
+        cameraUp: new THREE.Vector3(0, 1, 0),
+        elapsedSec: 0.75,
+        sampleSurfaceRadius: sampleRadius,
+      };
+
+      ctrl.computeTargetPose(input, outTip, outQuat, outAim);
+      const minClr = measureNozzleMinRockClearance(outTip, outQuat, sampleRadius);
+      expect(minClr, `nozzle full-shaft clearance at dir=${p.dir.join(',')}`).toBeGreaterThan(0.01);
+
+      // Verify live damped sweep locks jet endpoint dead-on onto hitPos (zero sweep drift!)
+      ctrl.update(input, 1 / 60);
+      const jetEnd = ctrl.tipPos.clone().addScaledVector(ctrl.aimDir, ctrl.jetLength);
+      expect(jetEnd.distanceTo(hitPos)).toBeLessThan(1e-4);
+    }
 
     field.dispose();
     ammoniteGeo.dispose();

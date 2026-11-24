@@ -154,13 +154,16 @@ export function buildAmmoniteGeometry(
   const startCapCenterIdx = tubeVertCount;
   const endCapCenterIdx = tubeVertCount + 1;
 
-  // Closed embryonic protoconch umbilical boss at (0,0,0) covering rXY <= 0.058, |z| <= 0.188
-  // Eliminates any center pinhole along +/-Z while keeping 100% outward winding
+  // Closed embryonic protoconch umbilical boss at (0,0,0) covering rXY <= 0.058, |z| <= 0.214
+  // Uses true single-vertex north/south pole caps so ZERO degenerate zero-area pole triangles exist!
   const bossSegU = 18;
-  const bossSegV = 12;
-  const bossBaseVert = tubeVertCount + 2;
-  const bossVertCount = (bossSegV + 1) * bossSegU;
-  const totalVerts = bossBaseVert + bossVertCount;
+  const bossSegV = 12; // interior latitude rings: iv = 1 .. bossSegV - 1
+  const bossInnerRings = bossSegV - 1;
+  const bossNorthPoleIdx = tubeVertCount + 2;
+  const bossSouthPoleIdx = tubeVertCount + 3;
+  const bossRingBaseVert = tubeVertCount + 4;
+  const bossVertCount = 2 + bossInnerRings * bossSegU;
+  const totalVerts = bossNorthPoleIdx + bossVertCount;
 
   const positions = new Float32Array(totalVerts * 3);
   const metas = new Float32Array(totalVerts * 4);
@@ -235,20 +238,43 @@ export function buildAmmoniteGeometry(
     uvs[endCapCenterIdx * 2 + 1] = 0.5;
   }
 
-  // Embryonic protoconch umbilical pearl vertices (standard outward-wound prolate ellipsoid along Z)
+  // Embryonic protoconch umbilical pearl vertices (pole-capped outward-wound prolate ellipsoid along Z)
   const bossRxy = 0.056;
   const bossRz = 0.214;
-  for (let iv = 0; iv <= bossSegV; iv++) {
-    const phi = (iv / bossSegV) * Math.PI; // 0 (+Z pole) -> PI (-Z pole)
+
+  // North pole (+Z)
+  positions[bossNorthPoleIdx * 3] = 0;
+  positions[bossNorthPoleIdx * 3 + 1] = 0;
+  positions[bossNorthPoleIdx * 3 + 2] = bossRz;
+  metas[bossNorthPoleIdx * 4] = 0.56;
+  metas[bossNorthPoleIdx * 4 + 1] = 0.0;
+  metas[bossNorthPoleIdx * 4 + 2] = 0.0;
+  metas[bossNorthPoleIdx * 4 + 3] = 0.0;
+  uvs[bossNorthPoleIdx * 2] = 0.0;
+  uvs[bossNorthPoleIdx * 2 + 1] = 0.25;
+
+  // South pole (-Z)
+  positions[bossSouthPoleIdx * 3] = 0;
+  positions[bossSouthPoleIdx * 3 + 1] = 0;
+  positions[bossSouthPoleIdx * 3 + 2] = -bossRz;
+  metas[bossSouthPoleIdx * 4] = 0.56;
+  metas[bossSouthPoleIdx * 4 + 1] = 0.0;
+  metas[bossSouthPoleIdx * 4 + 2] = 0.0;
+  metas[bossSouthPoleIdx * 4 + 3] = 0.0;
+  uvs[bossSouthPoleIdx * 2] = 0.0;
+  uvs[bossSouthPoleIdx * 2 + 1] = 0.75;
+
+  for (let iv = 1; iv <= bossInnerRings; iv++) {
+    const phi = (iv / bossSegV) * Math.PI; // strictly inside (0, PI)
     const sinP = Math.sin(phi);
     const cosP = Math.cos(phi);
     for (let iu = 0; iu < bossSegU; iu++) {
       const az = (iu / bossSegU) * Math.PI * 2;
-      const vIdx = bossBaseVert + iv * bossSegU + iu;
+      const vIdx = bossRingBaseVert + (iv - 1) * bossSegU + iu;
       positions[vIdx * 3] = Math.cos(az) * sinP * bossRxy;
       positions[vIdx * 3 + 1] = Math.sin(az) * sinP * bossRxy;
       positions[vIdx * 3 + 2] = cosP * bossRz;
-      metas[vIdx * 4] = 0.52;
+      metas[vIdx * 4] = 0.48 + 0.08 * Math.abs(cosP);
       metas[vIdx * 4 + 1] = 0.0;
       metas[vIdx * 4 + 2] = 0.0;
       metas[vIdx * 4 + 3] = 0.0;
@@ -257,7 +283,7 @@ export function buildAmmoniteGeometry(
     }
   }
 
-  const bossTriCount = bossSegV * bossSegU * 2;
+  const bossTriCount = bossSegU * 2 + (bossInnerRings - 1) * bossSegU * 2;
   const triCount = spiralSteps * profileSteps * 2 + profileSteps * 2 + bossTriCount;
   const indices = new Uint32Array(triCount * 3);
   let ptr = 0;
@@ -300,11 +326,19 @@ export function buildAmmoniteGeometry(
     indices[ptr++] = lastRow + j;
   }
 
-  // Embryonic protoconch boss quads: (d/dPhi) x (d/dAz) points OUTWARD
-  // Check at phi=PI/2, az=0: d/dPhi=(0,0,-1), d/dAz=(0,1,0) -> (0,0,-1)x(0,1,0) = (+1,0,0) OUTWARD!
-  for (let iv = 0; iv < bossSegV; iv++) {
-    const row0 = bossBaseVert + iv * bossSegU;
-    const row1 = bossBaseVert + (iv + 1) * bossSegU;
+  // Embryonic protoconch boss north-pole fan (+Z outward):
+  // (ring(0, iu) - north) x (ring(0, iuNext) - north) has +Z component!
+  for (let iu = 0; iu < bossSegU; iu++) {
+    const iuNext = (iu + 1) % bossSegU;
+    indices[ptr++] = bossNorthPoleIdx;
+    indices[ptr++] = bossRingBaseVert + iu;
+    indices[ptr++] = bossRingBaseVert + iuNext;
+  }
+
+  // Embryonic protoconch boss interior quads: (d/dPhi) x (d/dAz) points OUTWARD
+  for (let r = 0; r < bossInnerRings - 1; r++) {
+    const row0 = bossRingBaseVert + r * bossSegU;
+    const row1 = bossRingBaseVert + (r + 1) * bossSegU;
     for (let iu = 0; iu < bossSegU; iu++) {
       const iuNext = (iu + 1) % bossSegU;
       const a = row0 + iu;
@@ -320,6 +354,16 @@ export function buildAmmoniteGeometry(
       indices[ptr++] = c;
       indices[ptr++] = d;
     }
+  }
+
+  // Embryonic protoconch boss south-pole fan (-Z outward):
+  // (ring(last, iuNext) - south) x (ring(last, iu) - south) has -Z component!
+  const bossLastRow = bossRingBaseVert + (bossInnerRings - 1) * bossSegU;
+  for (let iu = 0; iu < bossSegU; iu++) {
+    const iuNext = (iu + 1) % bossSegU;
+    indices[ptr++] = bossSouthPoleIdx;
+    indices[ptr++] = bossLastRow + iuNext;
+    indices[ptr++] = bossLastRow + iu;
   }
 
   const geometry = new THREE.BufferGeometry();

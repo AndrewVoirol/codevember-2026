@@ -280,18 +280,21 @@ export function buildNozzleAssembly(materials: NozzleMaterials): NozzleAssembly 
 
   const geometries: THREE.BufferGeometry[] = [];
 
-  // 1. Sintered Tungsten-Carbide Micro-Tip (z = 0.000 -> 0.135)
+  // 1. Sintered Tungsten-Carbide Micro-Tip with crisp chamfered orifice lip (z = 0.000 -> 0.142)
   const tipGeo = buildClosedLatheAlongZ(
     [
       [0.0002, 0.0],
-      [0.0075, 0.002],
-      [0.0095, 0.012],
-      [0.0135, 0.068],
-      [0.019, 0.118],
-      [0.019, 0.138],
-      [0.0002, 0.14],
+      [0.0048, 0.0004],
+      [0.0072, 0.003],
+      [0.0088, 0.012],
+      [0.0114, 0.048],
+      [0.0138, 0.068],
+      [0.0156, 0.072],
+      [0.0188, 0.114],
+      [0.0195, 0.138],
+      [0.0002, 0.142],
     ],
-    28
+    32
   );
   geometries.push(tipGeo);
   const tipMesh = new THREE.Mesh(tipGeo, materials.carbideTip);
@@ -300,24 +303,28 @@ export function buildNozzleAssembly(materials: NozzleMaterials): NozzleAssembly 
   tipMesh.receiveShadow = true;
   group.add(tipMesh);
 
-  // 2. Turned Satin-Brass Compression Collet & Ergonomic Knurled Grip Barrel (z = 0.115 -> 0.565)
+  // 2. Turned Satin-Brass Compression Collet & Ergonomic Diamond-Knurled Grip Barrel (z = 0.110 -> 0.568)
   const brassBodyGeo = buildClosedLatheAlongZ(
     [
-      [0.0002, 0.112],
-      [0.024, 0.115],
-      [0.029, 0.125],
-      [0.031, 0.175],
-      [0.025, 0.188],
-      [0.025, 0.21],
-      [0.036, 0.232],
-      [0.041, 0.285],
-      [0.039, 0.365],
-      [0.042, 0.46],
-      [0.038, 0.545],
-      [0.033, 0.562],
-      [0.0002, 0.566],
+      [0.0002, 0.11],
+      [0.0225, 0.112],
+      [0.0278, 0.118],
+      [0.0308, 0.128],
+      [0.0315, 0.164],
+      [0.0295, 0.174],
+      [0.0245, 0.184],
+      [0.0245, 0.214],
+      [0.0278, 0.222],
+      [0.0365, 0.236],
+      [0.0412, 0.252],
+      [0.0418, 0.264],
+      [0.0418, 0.514],
+      [0.0408, 0.526],
+      [0.0365, 0.544],
+      [0.0335, 0.562],
+      [0.0002, 0.568],
     ],
-    36
+    44
   );
   geometries.push(brassBodyGeo);
   const brassBodyMesh = new THREE.Mesh(brassBodyGeo, materials.satinBrass);
@@ -326,18 +333,26 @@ export function buildNozzleAssembly(materials: NozzleMaterials): NozzleAssembly 
   brassBodyMesh.receiveShadow = true;
   group.add(brassBodyMesh);
 
-  // 3. Oil-Blackened Forged-Iron Pneumatic Handpiece Sleeve (z = 0.548 -> 0.965)
+  // 3. Oil-Blackened Forged-Iron Pneumatic Handpiece Sleeve (z = 0.545 -> 0.966)
   const ironSleeveGeo = buildClosedLatheAlongZ(
     [
       [0.0002, 0.545],
-      [0.035, 0.55],
-      [0.037, 0.57],
-      [0.036, 0.89],
-      [0.033, 0.945],
-      [0.027, 0.962],
+      [0.0345, 0.549],
+      [0.0372, 0.564],
+      [0.0372, 0.614],
+      [0.0355, 0.619],
+      [0.0355, 0.646],
+      [0.0372, 0.651],
+      [0.037, 0.854],
+      [0.0355, 0.859],
+      [0.0355, 0.886],
+      [0.037, 0.891],
+      [0.0358, 0.928],
+      [0.0325, 0.948],
+      [0.0272, 0.962],
       [0.0002, 0.966],
     ],
-    32
+    36
   );
   geometries.push(ironSleeveGeo);
   const ironSleeveMesh = new THREE.Mesh(ironSleeveGeo, materials.darkIron);
@@ -346,40 +361,44 @@ export function buildNozzleAssembly(materials: NozzleMaterials): NozzleAssembly 
   ironSleeveMesh.receiveShadow = true;
   group.add(ironSleeveMesh);
 
-  // 4. Twin Precision Satin-Brass Accent Trim Rings & Rear Hose Barb Fitting
+  // 4. Twin Precision Chamfered Satin-Brass Accent Trim Rings & Stepped Rear Hose Barb Fitting
   const ring1Geo = buildClosedLatheAlongZ(
     [
-      [0.0002, 0.618],
-      [0.0395, 0.62],
-      [0.041, 0.632],
-      [0.0395, 0.644],
-      [0.0002, 0.646],
+      [0.0002, 0.617],
+      [0.0375, 0.619],
+      [0.0412, 0.625],
+      [0.0412, 0.639],
+      [0.0375, 0.645],
+      [0.0002, 0.647],
     ],
-    32
+    36
   );
   const ring2Geo = buildClosedLatheAlongZ(
     [
-      [0.0002, 0.858],
-      [0.0395, 0.86],
-      [0.041, 0.872],
-      [0.0395, 0.884],
-      [0.0002, 0.886],
+      [0.0002, 0.857],
+      [0.0375, 0.859],
+      [0.0412, 0.865],
+      [0.0412, 0.879],
+      [0.0375, 0.885],
+      [0.0002, 0.887],
     ],
-    32
+    36
   );
   const barbGeo = buildClosedLatheAlongZ(
     [
       [0.0002, 0.95],
-      [0.028, 0.954],
-      [0.029, 0.988],
-      [0.022, 1.005],
-      [0.024, 1.032],
-      [0.017, 1.055],
-      [0.02, 1.078],
-      [0.014, 1.11],
+      [0.0285, 0.954],
+      [0.0315, 0.962],
+      [0.0315, 0.99],
+      [0.0285, 0.996],
+      [0.0215, 1.006],
+      [0.0245, 1.03],
+      [0.0175, 1.05],
+      [0.0205, 1.074],
+      [0.0148, 1.106],
       [0.0002, 1.114],
     ],
-    28
+    32
   );
   geometries.push(ring1Geo, ring2Geo, barbGeo);
 
@@ -391,26 +410,26 @@ export function buildNozzleAssembly(materials: NozzleMaterials): NozzleAssembly 
   barb.name = 'BrassHoseBarb';
   group.add(ring1, ring2, barb);
 
-  // 5. Short Graceful Braided Pneumatic Supply Hose Tail curving smoothly off-frame
+  // 5. Graceful Braided Pneumatic Supply Hose Tail curving gently back & away (+Y/+Z) off-frame
   const hoseCurve = new THREE.CatmullRomCurve3([
     new THREE.Vector3(0, 0, 1.08),
-    new THREE.Vector3(0.03, -0.02, 1.28),
-    new THREE.Vector3(0.14, -0.14, 1.52),
-    new THREE.Vector3(0.32, -0.34, 1.72),
+    new THREE.Vector3(0.03, 0.025, 1.29),
+    new THREE.Vector3(0.14, 0.11, 1.54),
+    new THREE.Vector3(0.32, 0.24, 1.76),
   ]);
-  const hoseGeo = buildCappedTubeAlongCurve(hoseCurve, 24, 0.0145, 0.013, 14);
+  const hoseGeo = buildCappedTubeAlongCurve(hoseCurve, 26, 0.0142, 0.0128, 16);
   geometries.push(hoseGeo);
   const hoseMesh = new THREE.Mesh(hoseGeo, materials.hoseRubber);
   hoseMesh.name = 'PneumaticAirHose';
   group.add(hoseMesh);
 
   // 6. Focused High-Velocity Dolomite Abrasive Jet Plume (local z = 0 -> -1, scaled to exact standoff)
-  // Ordered bottom-to-top from z = -1.0 (impact spread radius 0.044) to z = -0.002 (orifice radius 0.0065)
+  // Ordered bottom-to-top from z = -1.0 (impact flare radius 0.038) to z = -0.002 (orifice radius 0.0048)
   const jetProfile = [
-    new THREE.Vector2(0.044, -1.0),
-    new THREE.Vector2(0.025, -0.52),
-    new THREE.Vector2(0.011, -0.14),
-    new THREE.Vector2(0.0065, -0.002),
+    new THREE.Vector2(0.038, -1.0),
+    new THREE.Vector2(0.021, -0.55),
+    new THREE.Vector2(0.0095, -0.15),
+    new THREE.Vector2(0.0048, -0.002),
   ];
   const jetGeo = new THREE.LatheGeometry(jetProfile, 24);
   jetGeo.rotateX(Math.PI * 0.5);

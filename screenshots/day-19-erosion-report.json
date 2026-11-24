@@ -8,14 +8,14 @@
     "drawerCount": 30
   },
   "telemetry": {
-    "frameCount": 362,
-    "avgFrameMs": 8.33,
-    "p95FrameMs": 9.4,
+    "frameCount": 372,
+    "avgFrameMs": 9.11,
+    "p95FrameMs": 14.5,
     "sceneState": {
       "day": 19,
       "slug": "19-erosion",
       "headerLabel": "Day 19 - Erosion",
-      "frameCount": 362,
+      "frameCount": 372,
       "cameraPos": [
         0,
         0.1399999999999997,
@@ -27,13 +27,13 @@
         0.008276593208074168
       ],
       "pointerSpeed": 0,
-      "pointerDwellSec": 1.9357,
-      "pointerImpulse": 0.0007
+      "pointerDwellSec": 2.036,
+      "pointerImpulse": 0.0005
     }
   },
   "metrics": {
-    "specimenCoverageRatio": 0.3261,
-    "interactionMad": 2.724
+    "specimenCoverageRatio": 0.3254,
+    "interactionMad": 2.338
   },
   "gpuErrors": [],
   "gateFailures": [],

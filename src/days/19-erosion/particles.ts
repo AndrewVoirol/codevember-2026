@@ -54,6 +54,7 @@ const _quat = new THREE.Quaternion();
 const _euler = new THREE.Euler();
 const _scale = new THREE.Vector3();
 const _reflectDir = new THREE.Vector3();
+const _bounceNormal = new THREE.Vector3();
 const _t1 = new THREE.Vector3();
 const _t2 = new THREE.Vector3();
 
@@ -238,8 +239,8 @@ export class AbrasionParticleSystem {
       const slot = this.gritPool[this.gritCursor];
       this.gritCursor = (this.gritCursor + 1) % MAX_GRIT_CHIPS;
 
-      const isSparkRicochet = this.rng.next() < 0.22 + 0.62 * fossilRatio;
-      const spreadR = 0.014 + this.rng.next() * 0.032;
+      const isSparkRicochet = this.rng.next() < 0.03 + 0.72 * fossilRatio;
+      const spreadR = 0.012 + this.rng.next() * 0.028;
       const spreadAng = this.rng.next() * Math.PI * 2;
       const ca = Math.cos(spreadAng);
       const sa = Math.sin(spreadAng);
@@ -250,10 +251,10 @@ export class AbrasionParticleSystem {
       slot.pz = hitPos.z + hitNormal.z * 0.008 + (_t1.z * ca + _t2.z * sa) * spreadR;
 
       const speed = isSparkRicochet
-        ? 1.75 + this.rng.next() * 1.65
-        : 0.95 + this.rng.next() * 1.15;
-      const specBias = isSparkRicochet ? 0.65 : 0.35;
-      const coneSpread = isSparkRicochet ? 0.55 : 0.88;
+        ? 1.85 + this.rng.next() * 1.65
+        : 0.90 + this.rng.next() * 1.15;
+      const specBias = isSparkRicochet ? 0.68 : 0.36;
+      const coneSpread = isSparkRicochet ? 0.50 : 0.86;
 
       const dirX =
         _reflectDir.x * specBias +
@@ -281,51 +282,58 @@ export class AbrasionParticleSystem {
       slot.vrz = this.rng.signed() * 18.0;
 
       slot.size = isSparkRicochet
-        ? 0.0055 + this.rng.next() * 0.0055
-        : 0.0085 + this.rng.next() * 0.0115;
+        ? 0.0042 + this.rng.next() * 0.0042
+        : 0.0075 + this.rng.next() * 0.0105;
       slot.age = 0;
       slot.life = isSparkRicochet
-        ? 0.28 + this.rng.next() * 0.28
+        ? 0.26 + this.rng.next() * 0.26
         : 0.42 + this.rng.next() * 0.46;
       slot.bounces = 0;
 
       if (isSparkRicochet) {
         const pick = this.rng.next();
         if (pick < 0.55) {
-          slot.r = PAL_AMBER[0] * 1.12;
-          slot.g = PAL_AMBER[1] * 1.08;
-          slot.b = PAL_AMBER[2] * 0.96;
+          // Burnished golden pyrite FeS2 micro-spark
+          slot.r = PAL_OCHRE[0] * 1.18;
+          slot.g = PAL_OCHRE[1] * 1.12;
+          slot.b = PAL_OCHRE[2] * 0.96;
+        } else if (pick < 0.85) {
+          // Pale hot calcite-pyrite flash
+          slot.r = PAL_CALCITE[0] * 1.08;
+          slot.g = PAL_CALCITE[1] * 1.02;
+          slot.b = PAL_OCHRE[2] * 1.15;
         } else {
-          slot.r = PAL_OCHRE[0] * 1.15;
-          slot.g = PAL_OCHRE[1] * 1.10;
-          slot.b = PAL_OCHRE[2] * 0.92;
+          // Warm realgar-amber mineral spark
+          slot.r = PAL_AMBER[0] * 1.08;
+          slot.g = PAL_AMBER[1] * 1.04;
+          slot.b = PAL_AMBER[2] * 0.94;
         }
-        slot.metallic = 0.88;
+        slot.metallic = 0.92;
       } else {
         const pick = this.rng.next();
-        if (pick < 0.48) {
+        if (pick < 0.52) {
           slot.r = PAL_CALCITE[0];
           slot.g = PAL_CALCITE[1];
           slot.b = PAL_CALCITE[2];
-        } else if (pick < 0.78) {
+        } else if (pick < 0.84) {
           slot.r = PAL_KAOLIN[0];
           slot.g = PAL_KAOLIN[1];
           slot.b = PAL_KAOLIN[2];
-        } else if (pick < 0.92) {
-          slot.r = PAL_OCHRE[0] * 0.92;
-          slot.g = PAL_OCHRE[1] * 0.92;
-          slot.b = PAL_OCHRE[2] * 0.92;
+        } else if (pick < 0.96) {
+          slot.r = PAL_OCHRE[0] * 0.88;
+          slot.g = PAL_OCHRE[1] * 0.88;
+          slot.b = PAL_OCHRE[2] * 0.88;
         } else {
-          slot.r = PAL_SIENNA[0] * 0.88;
-          slot.g = PAL_SIENNA[1] * 0.88;
-          slot.b = PAL_SIENNA[2] * 0.88;
+          slot.r = PAL_SIENNA[0] * 0.82;
+          slot.g = PAL_SIENNA[1] * 0.82;
+          slot.b = PAL_SIENNA[2] * 0.82;
         }
         slot.metallic = 0.05;
       }
     }
 
     // Billowing pale Bone-Calcite chalk dust puffs (denser on soft limestone, lighter mist on clean pyrite)
-    const dustRate = (68 * (1.0 - 0.52 * fossilRatio) + 18) * burstScale;
+    const dustRate = (82 * (1.0 - 0.45 * fossilRatio) + 22) * burstScale;
     this.emitDustCarry += dustRate * Math.max(0.004, dtSec);
     const dustCount = Math.min(8, Math.floor(this.emitDustCarry));
     this.emitDustCarry -= dustCount;
@@ -334,7 +342,7 @@ export class AbrasionParticleSystem {
       const puff = this.dustPool[this.dustCursor];
       this.dustCursor = (this.dustCursor + 1) % MAX_DUST_PUFFS;
 
-      const spreadR = 0.012 + this.rng.next() * 0.042;
+      const spreadR = 0.012 + this.rng.next() * 0.038;
       const ang = this.rng.next() * Math.PI * 2;
       const ca = Math.cos(ang);
       const sa = Math.sin(ang);
@@ -344,7 +352,7 @@ export class AbrasionParticleSystem {
       puff.py = hitPos.y + hitNormal.y * 0.018 + (_t1.y * ca + _t2.y * sa) * spreadR;
       puff.pz = hitPos.z + hitNormal.z * 0.018 + (_t1.z * ca + _t2.z * sa) * spreadR;
 
-      const puffSpeed = 0.48 + this.rng.next() * 0.65;
+      const puffSpeed = 0.46 + this.rng.next() * 0.62;
       const vx =
         hitNormal.x * 0.72 +
         _reflectDir.x * 0.28 +
@@ -364,12 +372,12 @@ export class AbrasionParticleSystem {
       puff.vz = vz * inv * puffSpeed;
 
       puff.startSize = 0.036 + this.rng.next() * 0.025;
-      puff.endSize = 0.17 + this.rng.next() * 0.14;
+      puff.endSize = 0.19 + this.rng.next() * 0.14;
       puff.age = 0;
-      puff.life = 0.62 + this.rng.next() * 0.56;
+      puff.life = 0.65 + this.rng.next() * 0.56;
       puff.seed = this.rng.next();
-      puff.density = (0.34 + this.rng.next() * 0.22) * (1.0 - 0.35 * fossilRatio);
-      puff.warmth = 0.12 + this.rng.next() * 0.32 + fossilRatio * 0.28;
+      puff.density = (0.38 + this.rng.next() * 0.24) * (1.0 - 0.30 * fossilRatio);
+      puff.warmth = 0.10 + this.rng.next() * 0.26 + fossilRatio * 0.24;
     }
   }
 
@@ -440,26 +448,30 @@ export class AbrasionParticleSystem {
       p.py += p.vy * dt;
       p.pz += p.vz * dt;
 
-      // Secondary physical rebound if chip falls onto the live carved limestone/fossil surface
+      // Secondary physical rebound using exact oblate/carved heightfield surface normal
       if (erosionField && p.bounces < 2) {
         const dist = Math.hypot(p.px, p.py, p.pz);
-        if (dist > 0.12 && dist < 1.30) {
+        if (dist > 0.12 && dist < 1.32) {
           const inv = 1.0 / dist;
-          const surfR = erosionField.sampleCombinedRadius(p.px * inv, p.py * inv, p.pz * inv);
+          const dx = p.px * inv;
+          const dy = p.py * inv;
+          const dz = p.pz * inv;
+          const surfR = erosionField.sampleCombinedRadius(dx, dy, dz);
           if (dist < surfR + p.size * 0.8) {
-            const nx = p.px * inv;
-            const ny = p.py * inv;
-            const nz = p.pz * inv;
+            erosionField.sampleCombinedNormal(dx, dy, dz, _bounceNormal);
+            const nx = _bounceNormal.x;
+            const ny = _bounceNormal.y;
+            const nz = _bounceNormal.z;
             const vDotN = p.vx * nx + p.vy * ny + p.vz * nz;
             if (vDotN < 0) {
               const restitution = p.metallic > 0.5 ? 0.58 : 0.36;
               p.vx -= (1 + restitution) * vDotN * nx;
               p.vy -= (1 + restitution) * vDotN * ny;
               p.vz -= (1 + restitution) * vDotN * nz;
-              const pushR = surfR + p.size * 0.9;
-              p.px = nx * pushR;
-              p.py = ny * pushR;
-              p.pz = nz * pushR;
+              const pushR = surfR + p.size * 0.95;
+              p.px = dx * pushR;
+              p.py = dy * pushR;
+              p.pz = dz * pushR;
               p.bounces++;
             }
           }

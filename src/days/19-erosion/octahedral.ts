@@ -22,6 +22,29 @@ export const NODULE_BASE_AZ = 0.398;
 export const NODULE_BASE_PILLOW = 0.62;
 
 /**
+ * Unified geological sedimentary bedding spatial frequency shared between physical
+ * limestone bedding ledges (`erosionField.ts`) and fragment-shader strata petrography
+ * (`materials.ts`) so carved ledges and visual marl seams align 1:1 with zero drift.
+ */
+export const STRATA_BASE_FREQ = 10.5;
+export const STRATA_WARP_AMP = 1.65;
+
+/**
+ * Aperiodic Jurassic calcareous limestone bedding elevation profile in [-1, 1].
+ * Breaks uniform sinusoidal candy stripes via incommensurate geological bed thicknesses
+ * (broad calcareous benches separated by narrow irregular marl partings).
+ */
+export function evalAperiodicStrataProfileCpu(strataCoord: number): number {
+  const b0 = Math.sin(strataCoord) * 0.52;
+  const b1 = Math.sin(strataCoord * 0.43 - 0.85) * 0.34;
+  const b2 = Math.sin(strataCoord * 2.17 + 1.35) * 0.18;
+  const raw = b0 + b1 + b2;
+  // Asymmetric bedding bench step: crisp thin recess on parting seams, broad gentle bench tops
+  const parting = Math.pow(Math.max(0, -raw), 3.0) * 0.35;
+  return raw * 0.72 - parting;
+}
+
+/**
  * Exact C-infinity analytical base concretion radius along unit direction `(dx, dy, dz)` on CPU.
  */
 export function evalBaseBoulderRadiusCpu(dx: number, dy: number, dz: number): number {
