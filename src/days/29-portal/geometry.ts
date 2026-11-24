@@ -837,7 +837,20 @@ export function buildPortalCubeAssembly(
       0.012
     );
 
-    // Proud chamfered basalt windowsill ledge beneath each arched opening
+    // Sculpted proud outer stone archivolt hood-molding crowning the basalt arch reveal
+    // Gives each portal doorway a classical architectural frame line with zero radial notches
+    appendContinuousBrassArchMolding(
+      basaltMain,
+      faceId,
+      archAngles,
+      basaltArchInnerR + 0.014,
+      basaltArchInnerR + 0.052,
+      CUBE_HALF - 0.008,
+      CUBE_HALF + 0.009,
+      0.0055
+    );
+
+    // Proud chamfered basalt windowsill ledge beneath each arched opening + lower corbel apron
     appendFaceExtrudedQuad(
       basaltMain,
       faceId,
@@ -851,18 +864,52 @@ export function buildPortalCubeAssembly(
       CUBE_HALF + 0.012,
       0.008
     );
+
+    // Matching architectural stone springline impost blocks left & right where arch meets piers
+    for (const side of [-1, 1]) {
+      const impIn = side * (basaltArchInnerR + 0.014);
+      const impOut = side * (basaltArchInnerR + 0.072);
+      const u0 = Math.min(impIn, impOut);
+      const u1 = Math.max(impIn, impOut);
+      appendFaceExtrudedQuad(
+        basaltMain,
+        faceId,
+        [
+          [u0, ARCH_SPRING_Y - 0.024],
+          [u1, ARCH_SPRING_Y - 0.024],
+          [u1, ARCH_SPRING_Y + 0.008],
+          [u0, ARCH_SPRING_Y + 0.008],
+        ],
+        CUBE_HALF - 0.01,
+        CUBE_HALF + 0.012,
+        0.005
+      );
+    }
   }
 
   registerSolidMesh('BasaltArchitecturalCube', basaltMain, materials.matteBasalt, true, true);
 
   // ---------------------------------------------------------------------------
-  // 2. Honed Dark Basalt Accent Reveals (Cornice Undercut + Recessed Window Jamb Liners)
+  // 2. Honed Dark Basalt Accent Reveals (Cornice Undercut, Mortar Grooves & Window Jamb Liners)
   // ---------------------------------------------------------------------------
   const basaltAccent = createBuilder();
 
   // Crisp cornice & plinth horizontal shadow-reveal collars
   appendChamferedBlock(basaltAccent, 0, 0.642, 0, 0.735, 0.014, 0.735, 0.005);
   appendChamferedBlock(basaltAccent, 0, -0.642, 0, 0.735, 0.014, 0.735, 0.005);
+
+  // Recessed honed dark-basalt circular compass-bed plates on top & bottom caps (frames inlaid brass rose cleanly)
+  for (const signY of [1, -1] as const) {
+    appendChamferedCylinder(
+      basaltAccent,
+      new THREE.Vector3(0, signY * (CUBE_HALF - 0.0015), 0),
+      new THREE.Vector3(0, signY, 0),
+      0.648,
+      0.006,
+      48,
+      0.002
+    );
+  }
 
   // Recessed chamfered stone jamb cheek sleeves strictly outside the brass jambs (|u| >= 0.439)
   // plus dark stone rabbet backing rings strictly behind the aperture plane (d in [0.630, 0.640])
@@ -910,7 +957,7 @@ export function buildPortalCubeAssembly(
   const brassInnerR = ARCH_RADIUS - 0.02; // 0.415
   const brassOuterR = ARCH_RADIUS + 0.003; // 0.438 (strictly inside basaltArchInnerR = 0.439!)
   const brassD0 = APERTURE_PLANE_OFFSET - 0.003; // 0.642
-  const brassD1 = APERTURE_PLANE_OFFSET + 0.056; // 0.701
+  const brassD1 = APERTURE_PLANE_OFFSET + 0.058; // 0.703
   const brassRimBevel = 0.0055;
 
   for (const faceId of PORTAL_FACE_ORDER) {
@@ -935,6 +982,18 @@ export function buildPortalCubeAssembly(
       brassD0,
       brassD1,
       brassRimBevel
+    );
+
+    // Subtle stepped inner fine brass glazing bead right at the threshold aperture plane
+    appendContinuousBrassArchMolding(
+      brassFrames,
+      faceId,
+      archAngles,
+      brassInnerR - 0.008,
+      brassInnerR + 0.004,
+      brassD0,
+      brassD0 + 0.022,
+      0.0028
     );
 
     // Left & right vertical recessed satin-brass jamb casings meeting the arch springline seamlessly
@@ -975,6 +1034,23 @@ export function buildPortalCubeAssembly(
       pushConvexFace(brassFrames, [sR0, bR0, bR1, sR1], rightN);
       pushConvexFace(brassFrames, [bL1, sL1, cL1, cR1, sR1, bR1], upN);
       pushConvexFace(brassFrames, [bL0, bR0, sR0, cR0, cL0, sL0], downN);
+
+      // Subtle brass springline astragal collar marking transition from vertical jamb to semicircular arch
+      const astIn = side > 0 ? brassInnerR - 0.005 : -brassOuterR - 0.001;
+      const astOut = side > 0 ? brassOuterR + 0.001 : -(brassInnerR - 0.005);
+      appendFaceExtrudedQuad(
+        brassFrames,
+        faceId,
+        [
+          [astIn, ARCH_SPRING_Y - 0.011],
+          [astOut, ARCH_SPRING_Y - 0.011],
+          [astOut, ARCH_SPRING_Y + 0.009],
+          [astIn, ARCH_SPRING_Y + 0.009],
+        ],
+        brassD0 + 0.004,
+        brassD1 + 0.006,
+        0.003
+      );
     }
 
     // Horizontal satin-brass threshold trim bar along the bottom sill (1 mm clear above plinth collar)
@@ -988,23 +1064,37 @@ export function buildPortalCubeAssembly(
         [-brassOuterR, ARCH_SILL_Y + 0.019],
       ],
       brassD0,
-      brassD1 + 0.005,
+      brassD1 + 0.006,
       0.005
     );
 
-    // Proud satin-brass outer keystone clasp crowning each basalt arch (clears recessed brass arch cleanly)
+    // Sculpted two-tier satin-brass crown keystone agrafe seated cleanly into the basalt archivolt
     appendFaceExtrudedQuad(
       brassFrames,
       faceId,
       [
-        [-0.036, ARCH_SPRING_Y + basaltArchInnerR + 0.004],
-        [0.036, ARCH_SPRING_Y + basaltArchInnerR + 0.004],
-        [0.052, ARCH_SPRING_Y + basaltArchInnerR + 0.072],
-        [-0.052, ARCH_SPRING_Y + basaltArchInnerR + 0.072],
+        [-0.038, ARCH_SPRING_Y + basaltArchInnerR + 0.002],
+        [0.038, ARCH_SPRING_Y + basaltArchInnerR + 0.002],
+        [0.056, ARCH_SPRING_Y + basaltArchInnerR + 0.074],
+        [-0.056, ARCH_SPRING_Y + basaltArchInnerR + 0.074],
       ],
-      brassD1 + 0.008,
-      CUBE_HALF + 0.014,
-      0.006
+      brassD1 + 0.006,
+      CUBE_HALF + 0.013,
+      0.0055
+    );
+    // Crisp stepped inner keystone cap boss catching overhead gallery key light
+    appendFaceExtrudedQuad(
+      brassFrames,
+      faceId,
+      [
+        [-0.022, ARCH_SPRING_Y + basaltArchInnerR + 0.014],
+        [0.022, ARCH_SPRING_Y + basaltArchInnerR + 0.014],
+        [0.034, ARCH_SPRING_Y + basaltArchInnerR + 0.064],
+        [-0.034, ARCH_SPRING_Y + basaltArchInnerR + 0.064],
+      ],
+      CUBE_HALF + 0.011,
+      CUBE_HALF + 0.020,
+      0.0035
     );
   }
 
@@ -1119,7 +1209,8 @@ export function buildPortalCubeAssembly(
     const bevel = 0.0024;
     const bevelOnTop = signY > 0;
 
-    // Continuous 48-segment satin-brass azimuth rings (zero radial segment notches!)
+    // Continuous 48-segment satin-brass azimuth rings + precision outer bezel ring framing dark basalt bed
+    appendContinuousHorizontalRing(brassCompass, 0.636, 0.664, yBase, yTop, bevel, bevelOnTop, 48);
     appendContinuousHorizontalRing(brassCompass, 0.455, 0.482, yBase, yTop, bevel, bevelOnTop, 48);
     appendContinuousHorizontalRing(brassCompass, 0.185, 0.205, yBase, yTop, bevel, bevelOnTop, 48);
 

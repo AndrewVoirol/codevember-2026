@@ -188,6 +188,28 @@ describe('Day 29 - Portal (Four-World Non-Euclidean Architectural Cube)', () => 
     expect(westArch.hit).toBe(true);
     expect(westArch.hitPos[2]).toBeGreaterThan(5.0);
     expect(westArch.hitPos[2]).toBeLessThan(7.6);
+
+    // 3. Dense West Canyon raymarch convergence guard: across a 21x21 zoomed aperture grid,
+    //    zero rays may stall near solid geometry (d < 0.12) by exhausting the step budget early.
+    const westGoal = computeFaceZoomGoal('west').position;
+    let westExhaustedNearSurface = 0;
+    let westSampled = 0;
+    for (let iu = -10; iu <= 10; iu++) {
+      for (let iv = -10; iv <= 10; iv++) {
+        const u = (iu / 10) * (ARCH_HALF_WIDTH - 0.02);
+        const v = ARCH_SILL_Y + 0.02 + ((iv + 10) / 20) * (ARCH_SPRING_Y + ARCH_HALF_WIDTH - ARCH_SILL_Y - 0.04);
+        if (!isPointInsideArchAperture(u, v, -0.015)) continue;
+        westSampled++;
+        const frag = apertureUvToCubeLocal('west', u, v);
+        const ray = transformCameraRayToPortalLocal('west', frag, westGoal);
+        const res = raymarchPortalWorldCpu('west', ray.ro, ray.rd, 0, 96, 28);
+        if (!res.hit && res.distance < 27.5 && res.minSdf < 0.08) {
+          westExhaustedNearSurface++;
+        }
+      }
+    }
+    expect(westSampled).toBeGreaterThan(250);
+    expect(westExhaustedNearSurface, 'West canyon step-exhaustion silhouette holes').toBe(0);
   });
 
   it('reports exactly 2 simultaneously visible distinct worlds from every 45° corner and 1 from each cardinal face', () => {

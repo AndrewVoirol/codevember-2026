@@ -402,7 +402,9 @@ function smoothstepCpu(edge0: number, edge1: number, x: number): number {
 }
 
 /**
- * World 0 — North (`+Z`): Sunlit Travertine Colonnade (`> 20 m` deep).
+ * World 0 — North (`+Z`): Sunlit Travertine Colonnade (`> 26 m` deep).
+ * Classical fluted columns with Attic bases & molded capitals, side arcade arches,
+ * coffered overhead beams, low right courtyard parapet, triumphal arch, and distant sunlit terrace.
  * Returns signed distance in portal-local meters.
  */
 export function evalNorthColonnadeSdfCpu(
@@ -410,49 +412,96 @@ export function evalNorthColonnadeSdfCpu(
   py: number,
   pz: number
 ): number {
-  // Seamless checkered travertine floor seated just below portal sill (-1.734)
+  // Seamless travertine gallery floor seated just below portal sill (-1.734)
   const dFloor = py + 1.76;
+
+  // Low stepped stone threshold lip just inside the portal doorway (strictly behind z=0 & below sill)
+  const dThresholdStep = sdBox3(px, py + 1.77, pz - 0.26, 1.52, 0.024, 0.17) - 0.006;
 
   // Repeating fluted classical columns along x = ±1.76, every 2.70 m along +z
   const colSpacing = 2.7;
-  const colZ = Math.max(
-    1.85,
-    Math.min(20.75, Math.round((pz - 1.85) / colSpacing) * colSpacing + 1.85)
-  );
+  const colIdx = Math.round((pz - 1.85) / colSpacing);
+  const colZ = Math.max(1.85, Math.min(20.75, colIdx * colSpacing + 1.85));
   const lx = Math.abs(px) - 1.76;
   const lz = pz - colZ;
   const phi = Math.atan2(lz, lx === 0 && lz === 0 ? 1e-5 : lx);
-  const flute = 0.015 * Math.abs(Math.sin(6.0 * phi));
+  const flute = 0.017 * Math.abs(Math.sin(6.0 * phi));
   const rad = Math.hypot(lx, lz);
-  const shaftR = 0.285 - flute;
-  const dShaftCyl = Math.max(rad - shaftR, Math.abs(py - 0.04) - 1.54);
-  const dPlinth = sdBox3(lx, py + 1.56, lz, 0.37, 0.2, 0.37) - 0.015;
-  const dCapital = sdBox3(lx, py - 1.72, lz, 0.4, 0.14, 0.4) - 0.015;
-  const dColumn = Math.min(dShaftCyl, Math.min(dPlinth, dCapital));
+  // Subtle classical entasis taper along the fluted shaft
+  const shaftT = Math.max(-1, Math.min(1, (py - 0.04) / 1.54));
+  const shaftR = 0.275 - 0.024 * (shaftT * 0.5 + 0.5) - flute;
+  const dShaftCyl = Math.max(rad - shaftR, Math.abs(py - 0.04) - 1.52);
 
-  // Longitudinal stone entablature beams overhead on both sides
-  const dBeamSide = sdBox3(Math.abs(px) - 1.76, py - 2.16, pz - 11.4, 0.36, 0.3, 11.6);
+  // Molded Attic column base (square plinth + lower & upper rounded torus rings)
+  const dPlinth = sdBox3(lx, py + 1.62, lz, 0.37, 0.14, 0.37) - 0.012;
+  const dBaseTorus = Math.hypot(rad - 0.315, py + 1.43) - 0.055;
 
-  // Transverse stone ceiling rafters leaving open sunlit skylight bays between columns
-  const dCrossBeam = sdBox3(px, py - 2.22, lz, 1.86, 0.24, 0.26);
+  // Classical Doric/Tuscan capital (necking astragal + flared echinus + square abacus)
+  const dNeckRing = Math.hypot(rad - 0.275, py - 1.51) - 0.032;
+  const dEchinus = Math.hypot(rad - 0.325, py - 1.60) - 0.068;
+  const dAbacus = sdBox3(lx, py - 1.72, lz, 0.40, 0.085, 0.40) - 0.012;
+  const dColumn = Math.min(
+    dShaftCyl,
+    Math.min(dPlinth, Math.min(dBaseTorus, Math.min(dNeckRing, Math.min(dEchinus, dAbacus))))
+  );
 
-  // Outer left warm limestone courtyard wall (right flank opens to warm sunlit sky)
-  const dLeftWall = px + 4.5;
+  // Side colonnade arcade spandrels (carved semicircular arches spanning between every column pair!)
+  const bayCenterZ = Math.max(
+    3.2,
+    Math.min(19.4, Math.round((pz - 3.2) / colSpacing) * colSpacing + 3.2)
+  );
+  const bLz = pz - bayCenterZ;
+  const dArcadeWall = sdBox3(Math.abs(px) - 1.76, py - 2.12, pz - 11.4, 0.30, 0.44, 11.4);
+  const dArcadeCut = Math.hypot(bLz, Math.max(0, py - 1.48)) - 0.96;
+  const dSideArcade = Math.max(dArcadeWall, -dArcadeCut);
 
-  // Distant monumental triumphal arch terminus at z = 22.8
-  const dBackSlab = sdBox3(px, py - 0.42, pz - 22.8, 4.0, 2.9, 0.48);
-  const dArchHole = Math.hypot(px, Math.max(0, py - 0.12)) - 1.28;
+  // Molded cornice ledge & transverse coffered overhead stone beams leaving sunlit skylight bays
+  const dCornice = sdBox3(Math.abs(px) - 1.76, py - 2.58, pz - 11.4, 0.42, 0.08, 11.55) - 0.01;
+  const dCrossBeam = sdBox3(px, py - 2.34, lz, 1.88, 0.22, 0.24) - 0.01;
+
+  // Left classical gallery wall with recessed vertical wall niches aligned with bays
+  const dLeftWallRaw = px + 4.35;
+  const dNicheCut = sdBox3(px + 4.35, py - 0.05, bLz, 0.38, 1.25, 0.72);
+  const dLeftWall = Math.max(dLeftWallRaw, -dNicheCut);
+
+  // Low sunlit right stone balustrade parapet opening outward to bright Mediterranean sky!
+  const dRightParapet = sdBox3(px - 2.95, py + 1.28, pz - 11.4, 0.16, 0.48, 11.2) - 0.012;
+
+  // Distant monumental triumphal arch terminus at z = 22.8 with stepped cornice
+  const dBackSlab = sdBox3(px, py - 0.48, pz - 22.8, 4.3, 3.05, 0.50);
+  const dArchHole = Math.hypot(px, Math.max(0, py - 0.26)) - 1.38;
   const dBackArch = Math.max(dBackSlab, -dArchHole);
+
+  // Inviting sunlit terrace steps & freestanding classical rotunda pavilion visible THROUGH the triumphal arch!
+  const dTerraceStep1 = sdBox3(px, py + 1.56, pz - 26.2, 5.5, 0.20, 2.2);
+  const dTerraceStep2 = sdBox3(px, py + 1.32, pz - 28.4, 5.5, 0.20, 2.0);
+  const dRotundaDome = Math.hypot(px, py - 0.68, pz - 30.2) - 1.05;
+  const dRotundaDrum = Math.max(Math.hypot(px, pz - 30.2) - 0.96, Math.abs(py + 0.16) - 0.88);
+  const dVista = Math.min(dTerraceStep1, Math.min(dTerraceStep2, Math.min(dRotundaDome, dRotundaDrum)));
 
   return Math.min(
     dFloor,
-    Math.min(dColumn, Math.min(dBeamSide, Math.min(dCrossBeam, Math.min(dLeftWall, dBackArch))))
+    Math.min(
+      dThresholdStep,
+      Math.min(
+        dColumn,
+        Math.min(
+          dSideArcade,
+          Math.min(
+            dCornice,
+            Math.min(dCrossBeam, Math.min(dLeftWall, Math.min(dRightParapet, Math.min(dBackArch, dVista))))
+          )
+        )
+      )
+    )
   );
 }
 
 /**
  * World 1 — East (`+X`): Plunging Lapis Spiral Stairwell.
- * Deep vertical cylindrical tiled shaft with cantilevered helical stone stairs & brass handrail.
+ * Deep vertical cylindrical cobalt-glazed observatory shaft with 8 vertical pilasters,
+ * cantilevered sculpted marble treads, vertical satin-brass balusters, helical handrail,
+ * and threshold balcony landing.
  */
 export function evalEastStairwellSdfCpu(
   px: number,
@@ -460,31 +509,41 @@ export function evalEastStairwellSdfCpu(
   pz: number
 ): number {
   const shaftCz = 2.4;
-  const shaftR = 2.3;
+  const shaftR = 2.34;
   const qx = px;
   const qz = pz - shaftCz;
   const r = Math.hypot(qx, qz);
+  const theta = Math.atan2(qz, qx === 0 && qz === 0 ? 1e-5 : qx);
 
-  // Outer cylindrical glazed lapis masonry shaft wall breached cleanly by arched entry alcove
-  const dCylWall = shaftR - r;
-  const dAlcoveCut = sdBox3(px, py - 0.02, pz - 0.28, 1.56, 1.84, 0.72);
+  // Outer cylindrical glazed lapis shaft wall with 8 subtle vertical architectural pilasters
+  const pilasterSector = (Math.PI * 2) / 8;
+  const pilAng = theta - Math.round(theta / pilasterSector) * pilasterSector;
+  const pilArc = Math.abs(pilAng) * r;
+  const dPilaster = Math.max(r - (shaftR + 0.06), Math.max((shaftR - 0.095) - r, pilArc - 0.12));
+
+  // Horizontal carved Bone-Calcite cornice ring ledges every full 4.8 m spiral revolution
+  const hTurn = 4.8;
+  const ringY = ((py + 0.72) % hTurn + hTurn * 1.5) % hTurn - hTurn * 0.5;
+  const dCorniceRing = Math.max((shaftR - 0.085) - r, Math.abs(ringY) - 0.075);
+
+  const dCylWall = Math.min(shaftR - r, Math.min(dPilaster, dCorniceRing));
+  const dAlcoveCut = sdBox3(px, py - 0.02, pz - 0.28, 1.58, 1.88, 0.76);
   const dWall = Math.max(dCylWall, -dAlcoveCut);
 
-  // Narrow stone balcony threshold sill right at the portal entry (clears immediately into plunging abyss)
-  const dLanding = sdBox3(px, py + 1.98, pz - 0.08, 1.62, 0.22, 0.36);
+  // Inviting cantilevered stone balcony landing at the portal threshold (clears z=0 & sill cleanly)
+  const dLanding = sdBox3(px, py + 1.97, pz - 0.34, 1.56, 0.21, 0.27) - 0.012;
 
-  // Cantilevered spiral stone stairs (16 discrete treads per 4.8 m full revolution, wide 2.21 m open oculus)
-  // Descends smoothly rightward & downward from the portal threshold into subterranean depths
-  const hTurn = 4.8;
+  // Cantilevered spiral stone stairs (16 discrete treads per 4.8 m full revolution, wide open central oculus)
   const nSteps = 16;
   const dTheta = (Math.PI * 2) / nSteps;
-  const theta = Math.atan2(qz, qx === 0 && qz === 0 ? 1e-5 : qx);
   const thetaPhase = theta + Math.PI * 0.5;
   const yPhase = py + 1.72 + (thetaPhase / (Math.PI * 2)) * hTurn;
   const kWrap = Math.round(yPhase / hTurn);
   const baseIdx = Math.floor(thetaPhase / dTheta);
+  const rClamped = Math.max(1.12, r);
 
   let dStairs = 1e4;
+  let dBalusters = 1e4;
   for (let offset = -1; offset <= 1; offset++) {
     const idx = baseIdx + offset;
     const stepThetaPhase = (idx + 0.5) * dTheta;
@@ -494,15 +553,21 @@ export function evalEastStairwellSdfCpu(
     const yDiff = py - stepY;
     const yDiffWrapped = yDiff - Math.round(yDiff / hTurn) * hTurn;
 
-    const rClamped = Math.max(1.1, r);
-    const dRad = Math.abs(r - 1.7) - 0.58; // spans r in [1.12, 2.28], clear of z=0 aperture
-    const dVert = Math.abs(yDiffWrapped) - 0.11;
-    const dArc = Math.abs(dAng * rClamped) - (0.54 * dTheta * rClamped + 0.03);
+    const dRad = Math.abs(r - 1.73) - 0.59; // spans r in [1.14, 2.32]
+    const dVert = Math.abs(yDiffWrapped) - 0.088;
+    const dArc = Math.abs(dAng * rClamped) - (0.45 * dTheta * rClamped + 0.015);
     const dStep =
       Math.hypot(Math.max(dRad, 0), Math.max(dVert, 0), Math.max(dArc, 0)) +
       Math.min(Math.max(dRad, Math.max(dVert, dArc)), 0) -
-      0.015;
+      0.012;
     if (dStep < dStairs) dStairs = dStep;
+
+    // Slender vertical satin-brass baluster post rising from each tread nose up to the helical handrail
+    const balArc = dAng * 1.16;
+    const balRad = r - 1.16;
+    const balH = Math.abs(yDiffWrapped - 0.44) - 0.36;
+    const dBal = Math.max(Math.hypot(balRad, balArc) - 0.018, balH);
+    if (dBal < dBalusters) dBalusters = dBal;
   }
 
   // Sleek helical satin-brass inner handrail spiraling along r = 1.16
@@ -510,15 +575,19 @@ export function evalEastStairwellSdfCpu(
   const yRailWrapped = yRailRel - Math.round(yRailRel / hTurn) * hTurn;
   const dRail = Math.hypot(r - 1.16, yRailWrapped) - 0.034;
 
-  // Deep subterranean stone basin far below the cube's floor (-21 m)
-  const dAbyssFloor = py + 21.0;
+  // Deep subterranean illuminated mineral basin far below the cube's floor (-22 m)
+  const dAbyssFloor = py + 22.0;
 
-  return Math.min(dWall, Math.min(dLanding, Math.min(dStairs, Math.min(dRail, dAbyssFloor))));
+  return Math.min(
+    dWall,
+    Math.min(dLanding, Math.min(dStairs, Math.min(dBalusters, Math.min(dRail, dAbyssFloor))))
+  );
 }
 
 /**
- * World 2 — South (`-Z`): Amber Lantern Over Dark Still Water.
- * Vaulted verdigris & raw-umber stone cistern, submerged arcade piers, dark water plane, and swaying lantern.
+ * World 2 — South (`-Z`): Vaulted Verdigris Basilica Cistern & Receding Amber Lanterns.
+ * Flooded vaulted Romanesque cistern with sculpted piers & capitals, transverse vault ribs,
+ * foreground wet limestone threshold quay, mirror water plane, and three receding brass lanterns.
  */
 export function evalSouthCisternSdfCpu(
   px: number,
@@ -529,48 +598,93 @@ export function evalSouthCisternSdfCpu(
   // Calm dark mirror cistern water plane seated just below portal sill (-1.734)
   const dWater = py + 1.76;
 
-  // Barrel-vaulted cistern ceiling + side walls (springline y = 0.45, vault radius 2.60)
-  const wallHalfW = 2.6;
+  // Two-step wet carved limestone threshold quay descending cleanly into the dark mirror water
+  const dQuayTop = sdBox3(px, py + 1.855, pz - 0.44, 1.42, 0.105, 0.32) - 0.012;
+  const dQuayLow = sdBox3(px, py + 1.915, pz - 0.78, 1.24, 0.145, 0.24) - 0.012;
+  const dQuay = Math.min(dQuayTop, dQuayLow);
+
+  // Barrel-vaulted cistern ceiling + side walls (springline y = 0.45, vault radius 2.62)
+  const wallHalfW = 2.62;
   const dSideWalls = wallHalfW - Math.abs(px);
-  const dVaultCeiling = 2.6 - Math.hypot(px, Math.max(0, py - 0.45));
+  const dVaultCeiling = 2.62 - Math.hypot(px, Math.max(0, py - 0.45));
   const dChamber = Math.min(dSideWalls, dVaultCeiling);
 
-  // Repeating transverse stone vault ribs & submerged arcade piers every 3.2 m along +z
+  // Repeating Romanesque arcade piers (plinth + shaft + flared capital) & transverse vault ribs every 3.2 m
   const baySpacing = 3.2;
   const bayZ = Math.max(
     1.85,
     Math.min(21.05, Math.round((pz - 1.85) / baySpacing) * baySpacing + 1.85)
   );
   const lz = pz - bayZ;
-  const dPier = sdBox3(Math.abs(px) - 1.94, py + 0.55, lz, 0.28, 1.65, 0.28) - 0.02;
-  const archR = Math.hypot(px, py - 0.45);
-  const dRib = Math.max(Math.abs(archR - 2.4) - 0.16, Math.abs(lz) - 0.22);
-  const dRibUpper = Math.max(dRib, 0.4 - py);
+  const pierX = Math.abs(px) - 1.88;
+  const dPierShaft = sdBox3(pierX, py + 0.62, lz, 0.25, 1.56, 0.25) - 0.018;
+  const dPierBase = sdBox3(pierX, py + 1.72, lz, 0.34, 0.22, 0.34) - 0.015;
+  const dPierCap = sdBox3(pierX, py - 0.88, lz, 0.35, 0.12, 0.35) - 0.015;
+  const dPier = Math.min(dPierShaft, Math.min(dPierBase, dPierCap));
 
-  // Back cistern vaulted wall at z = 23.0
+  // Transverse stone vault ribs springing cleanly from pier capitals across the vaulted nave
+  const archR = Math.hypot(px, py - 0.45);
+  const dRib = Math.max(Math.abs(archR - 2.38) - 0.15, Math.abs(lz) - 0.20);
+  const dRibUpper = Math.max(dRib, 0.36 - py);
+
+  // Longitudinal side-aisle arches connecting consecutive piers along x = ±1.88
+  const midBayZ = Math.max(
+    3.45,
+    Math.min(19.45, Math.round((pz - 3.45) / baySpacing) * baySpacing + 3.45)
+  );
+  const dSideBeam = sdBox3(pierX, py - 1.24, pz - 11.4, 0.24, 0.42, 10.6);
+  const dSideArchVoid = Math.hypot(pz - midBayZ, Math.max(0, py - 0.78)) - 1.12;
+  const dSideArcade = Math.max(dSideBeam, -dSideArchVoid);
+
+  // Back vaulted sanctuary apse wall at z = 23.0 with recessed arched niche
   const dBackWall = 23.0 - pz;
 
-  // Gently swaying suspended Realgar-Amber brass lantern at z = 3.45
-  const swayX = Math.sin(timeSec * 1.15) * 0.11;
-  const swayZ = Math.cos(timeSec * 0.85) * 0.05;
-  const lx = px - swayX;
-  const ly = py - 0.22;
-  const lzLantern = pz - (3.45 + swayZ);
-  const dLanternBody = Math.max(Math.hypot(lx, lzLantern) - 0.24, Math.abs(ly) - 0.34) - 0.02;
-  const dChain = Math.max(Math.hypot(lx, lzLantern) - 0.018, 0.32 - ly);
+  // Three receding suspended Realgar-Amber filigree brass lanterns along the vaulted nave
+  const evalLantern = (cx: number, cy: number, cz: number) => {
+    const lx = px - cx;
+    const ly = py - cy;
+    const lzL = pz - cz;
+    const rL = Math.hypot(lx, lzL);
+    const dGlass = Math.max(rL - 0.195, Math.abs(ly) - 0.27) - 0.015;
+    const dCap = Math.max(rL - 0.285, Math.abs(ly - 0.31) - 0.055) - 0.014;
+    const dDome = Math.hypot(lx, (ly - 0.39) * 1.35, lzL) - 0.17;
+    const dBase = Math.max(rL - 0.255, Math.abs(ly + 0.30) - 0.042) - 0.012;
+    const dFinial = Math.hypot(lx, (ly + 0.40) * 0.9, lzL) - 0.062;
+    const dChain = Math.max(rL - 0.016, 0.44 - ly);
+    return Math.min(dGlass, Math.min(dCap, Math.min(dDome, Math.min(dBase, Math.min(dFinial, dChain)))));
+  };
+
+  const swayX1 = Math.sin(timeSec * 1.15) * 0.10;
+  const swayZ1 = Math.cos(timeSec * 0.85) * 0.045;
+  const dLantern1 = evalLantern(swayX1, 0.15, 3.45 + swayZ1);
+  const dLantern2 = evalLantern(-0.24 + Math.sin(timeSec * 0.82 + 1.7) * 0.06, 0.46, 9.65);
+  const dLantern3 = evalLantern(0.22 + Math.sin(timeSec * 0.65 + 3.1) * 0.045, 0.72, 15.85);
 
   return Math.min(
     dWater,
     Math.min(
-      dChamber,
-      Math.min(dPier, Math.min(dRibUpper, Math.min(dBackWall, Math.min(dLanternBody, dChain))))
+      dQuay,
+      Math.min(
+        dChamber,
+        Math.min(
+          dPier,
+          Math.min(
+            dRibUpper,
+            Math.min(
+              dSideArcade,
+              Math.min(dBackWall, Math.min(dLantern1, Math.min(dLantern2, dLantern3)))
+            )
+          )
+        )
+      )
     )
   );
 }
 
 /**
- * World 3 — West (`-X`): Warm Ochre Desert Slot-Canyon Arch.
- * Sculpted layered sandstone canyon walls framing a sunlit natural rock arch.
+ * World 3 — West (`-X`): Crimson Sandstone Slot Canyon & Golden-Hour Natural Arch.
+ * Lipschitz-safe sculpted Navajo/Antelope slot-canyon sandstone waves, clean parabolic
+ * natural rock bridge (strictly clearing floor & zero raymarch tears), and terraced desert buttes.
  */
 export function evalWestCanyonSdfCpu(
   px: number,
@@ -579,45 +693,46 @@ export function evalWestCanyonSdfCpu(
 ): number {
   const depthRamp = smoothstepCpu(0.0, 2.2, pz);
 
-  // Undulating wind-rippled ochre sandstone floor (strictly below portal sill at z = 0)
+  // Winding wind-rippled desert sand floor (strictly below portal sill at z = 0)
   const floorH =
     -1.78 +
-    depthRamp * (0.14 * Math.sin(pz * 0.42) + 0.07 * Math.cos(px * 0.95));
-  const dFloor = py - floorH;
+    depthRamp * (0.11 * Math.sin(pz * 0.36) + 0.055 * Math.cos(px * 0.82 - pz * 0.2));
+  const dFloor = (py - floorH) * 0.94;
 
-  // Sinuous sculpted slot-canyon left & right sandstone walls (open mouth at z = 0, open sky slot above)
-  const centerLineX = depthRamp * 0.52 * Math.sin(pz * 0.23 - 0.25);
+  // Sweeping water-carved Antelope/Navajo slot-canyon walls flaring smoothly open toward the sky
+  const centerLineX = depthRamp * (0.54 * Math.sin(pz * 0.21 - 0.35));
   const relX = px - centerLineX;
-  const strata = 0.075 * Math.sin(py * 5.0 + 0.55 * Math.sin(pz * 0.48));
-  const billow =
+  const strataLedge = 0.042 * Math.sin(py * 4.0 + 0.42 * Math.sin(pz * 0.40));
+  const sweepWave =
     depthRamp *
-    (0.42 * Math.cos(pz * 0.29) +
-      0.42 * Math.sin(py * 0.68 + pz * 0.19) +
-      0.18 * Math.cos(py * 1.32 - pz * 0.26));
-  const mouthOpen = 0.72 * Math.exp(-Math.max(0, pz) * 0.55);
-  const skyOpen = Math.max(0, py - 1.65) * 0.55;
-  const canyonHalfW = 1.72 + mouthOpen + billow + strata + skyOpen;
-  // Softly terminate canyon walls at rim height so pale Warm Kaolin sky crowns the arch
-  const dWalls = Math.max(canyonHalfW - Math.abs(relX), py - 4.4);
+    (0.32 * Math.cos(pz * 0.26) +
+      0.30 * Math.sin(py * 0.68 + pz * 0.20) +
+      0.13 * Math.cos(py * 1.12 - pz * 0.22));
+  const mouthOpen = 0.66 * Math.exp(-Math.max(0, pz) * 0.56);
+  const rimT = Math.max(0, py - 1.35);
+  const skyFlare = rimT * 0.48 + rimT * rimT * 0.28;
+  const basinOpen = smoothstepCpu(8.2, 15.0, pz) * 2.65;
+  const canyonHalfW = 1.66 + mouthOpen + sweepWave + strataLedge + skyFlare + basinOpen;
+  const dWalls = (canyonHalfW - Math.abs(relX)) * 0.66;
 
-  // Monumental natural sandstone rock arch spanning the slot canyon at z = 6.3
-  const az = pz - 6.3;
-  const archSpanX = px - 0.06;
-  const archSpanY = py - 1.35;
-  const bridgeCurveY = archSpanY + 0.27 * archSpanX * archSpanX - 0.07 * Math.sin(archSpanX * 2.1);
-  const dBridge =
-    sdBox3(archSpanX, bridgeCurveY, az, 2.95, 0.44 + 0.06 * Math.cos(archSpanX * 1.7), 0.64) -
-    0.16;
-  // Wide elliptical arch opening underneath framing sunlit distant canyon mesa & pale Kaolin sky
-  const archVoid = Math.hypot((px - 0.06) / 1.5, (py + 0.35) / 1.58) - 1.0;
-  const dArch = Math.max(dBridge, -archVoid * 1.2);
+  // Monumental natural sandstone rock arch spanning cleanly over the canyon at z = 6.45
+  const ax = px - 0.06;
+  const az = pz - 6.45;
+  const archCrownY = 1.44 - 0.27 * ax * ax + 0.05 * Math.sin(ax * 1.8);
+  const archHalfThickY = 0.36 + 0.065 * Math.cos(ax * 1.4) + 0.025 * Math.sin(az * 2.0);
+  const archHalfThickZ = 0.58 + 0.07 * Math.cos(ax * 1.1);
+  const dArchCore = sdBox3(ax, py - archCrownY, az, 3.35, archHalfThickY, archHalfThickZ) - 0.14;
+  const dArch = dArchCore * 0.66;
 
-  // Distant sunlit sandstone mesa cliff beyond the natural arch (z = 21.8)
-  const mesaRidge = 21.8 + 1.8 * Math.sin(px * 0.32) - Math.max(0, py - 1.2) * 0.45;
-  const dMesa = Math.max(mesaRidge - pz, py - 4.8);
+  // Terraced golden-hour sandstone monument buttes & distant mesa ridge framing the vista beyond the arch
+  const butteLeft = sdBox3(px + 2.55, py + 0.25, pz - 14.8, 1.35, 2.35, 1.65) - 0.32;
+  const butteRight = sdBox3(px - 2.95, py - 0.05, pz - 16.4, 1.45, 2.75, 1.85) - 0.35;
+  const mesaRidgeY = 2.65 + 0.65 * Math.sin(px * 0.36 + 0.4) + 0.28 * Math.cos(px * 0.92);
+  const dMesaBack = sdBox3(px, py - (mesaRidgeY * 0.5 - 0.9), pz - 21.8, 12.0, mesaRidgeY * 0.5 + 1.1, 1.8) - 0.35;
+  const dMesas = Math.min(dMesaBack, Math.min(butteLeft, butteRight));
 
-  const dRock = smin(dWalls, dArch, 0.45);
-  return Math.min(dFloor, Math.min(dRock, dMesa));
+  const dRock = smin(dWalls, dArch, 0.38);
+  return Math.min(dFloor, Math.min(dRock, dMesas));
 }
 
 /**
@@ -663,6 +778,7 @@ export function raymarchPortalWorldCpu(
 ): CpuRaymarchHit {
   let t = 0.02;
   let minSdf = Infinity;
+  const stepScale = faceId === 'west' ? 0.92 : 0.84;
 
   for (let i = 0; i < maxSteps; i++) {
     const px = ro[0] + rd[0] * t;
@@ -672,7 +788,8 @@ export function raymarchPortalWorldCpu(
     const d = evalPortalWorldSdfCpu(faceId, px, py, pz, timeSec);
     if (d < minSdf) minSdf = d;
 
-    if (d < 0.004) {
+    const hitEps = faceId === 'west' ? Math.max(0.004, t * 0.0016) : 0.004;
+    if (d < hitEps) {
       return {
         hit: true,
         distance: t,
@@ -682,7 +799,7 @@ export function raymarchPortalWorldCpu(
       };
     }
 
-    t += Math.max(0.004, d * 0.78);
+    t += Math.max(hitEps, d * stepScale);
     if (t > maxDist) {
       return {
         hit: false,
