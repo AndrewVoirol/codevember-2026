@@ -983,4 +983,52 @@ describe('Day 19 - Erosion: Pneumatic Air-Abrasion Fossil Prep Nodule', () => {
     field.dispose();
     ammoniteGeo.dispose();
   });
+
+  it('carved center crater wall stays SO(3)-smooth with zero octahedral y=0 ridge, radial fingering, or rib-imprint streaks', () => {
+    const { geometry: ammoniteGeo } = buildAmmoniteGeometry();
+    const field = new ErosionField(ammoniteGeo, 1);
+
+    // Sustained 3-second static blast dead-center (+Z)
+    for (let i = 0; i < 180; i++) {
+      field.carveAt(0, 0, 1, 1 / 60, 1.0, undefined, 0, 0, -1);
+    }
+
+    // Center umbilicus blasts completely to zero while visible crater wall (theta = 26 deg)
+    // stays azimuthally continuous across all 360 deg — catching octahedral 12/3/6/9 roof ridges,
+    // Saffman-Taylor radial canyon fingering, and 30-rib/turn chalk/AO starburst streaks!
+    expect(field.sampleMatrixRadius(0, 0, 1)).toBe(0);
+
+    const th = (26 * Math.PI) / 180;
+    let max2degScaleJump = 0;
+    let max2degChalkJump = 0;
+    let prevScale = -1;
+    let prevChalk = -1;
+    let scaleAt178 = 0;
+    let scaleAt182 = 0;
+    for (let az = 0; az <= 360; az += 2) {
+      const phi = (az * Math.PI) / 180;
+      const dx = Math.sin(th) * Math.cos(phi);
+      const dy = Math.sin(th) * Math.sin(phi);
+      const dz = Math.cos(th);
+      const scale = field.sampleGridBilinear(field.deltaRadius, dx, dy, dz);
+      const chalk = field.sampleGridBilinear(field.freshChalk, dx, dy, dz);
+      if (az === 178) scaleAt178 = scale;
+      if (az === 182) scaleAt182 = scale;
+      if (prevScale >= 0) {
+        max2degScaleJump = Math.max(max2degScaleJump, Math.abs(scale - prevScale));
+        max2degChalkJump = Math.max(max2degChalkJump, Math.abs(chalk - prevChalk));
+      }
+      prevScale = scale;
+      prevChalk = chalk;
+    }
+
+    // Smooth bowl wall (previous fingering had max2degScaleJump = 0.638; octahedral ridge had y=0 jump > 0.14)
+    expect(max2degScaleJump).toBeLessThan(0.08);
+    expect(Math.abs(scaleAt178 - scaleAt182)).toBeLessThan(0.05);
+    // Rib-free chalk rim (previous binary fR flip had max2degChalkJump = 0.783)
+    expect(max2degChalkJump).toBeLessThan(0.45);
+
+    field.dispose();
+    ammoniteGeo.dispose();
+  });
 });

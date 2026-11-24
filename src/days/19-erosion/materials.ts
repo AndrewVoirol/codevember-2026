@@ -12,6 +12,7 @@ import {
   cross,
   dot,
   exp,
+  faceDirection,
   float,
   floor,
   fract,
@@ -221,16 +222,19 @@ export function createErosionMaterials(erosionTex: THREE.DataTexture): ErosionMa
     roughness: 0.88,
     envMapIntensity: 0.56,
     alphaTest: 0.5,
+    side: THREE.DoubleSide,
   });
   {
     const unitDirVert = normalize(positionGeometry);
     const vUnitDir = unitDirVert.toVarying('vNoduleUnitDir');
 
     // Vertex displacement: exact C-infinity analytical boulder hull * multiplicative scaleFactor
-    // Eliminates 100% of octahedral x=0 / y=0 creases at EVERY carve depth from intact (1.0) down to zero (0.0)
+    // Clamped >= 0.14 on vertices (strictly below fragment cutout min ~0.165) so border triangles
+    // NEVER collapse into 80 cm stretched blades plunging to (0,0,0), while every surviving opaque
+    // fragment sits strictly above the vertex clamp shelf and zeroed texels discard cleanly!
     const octUvVert = octDirToUvTsl(unitDirVert);
     const hSampleVert = texture(erosionTex, octUvVert).level(float(0.0));
-    const rVert = evalBaseBoulderRadiusTsl(unitDirVert).mul(max(float(0.0), hSampleVert.r));
+    const rVert = evalBaseBoulderRadiusTsl(unitDirVert).mul(max(float(0.14), hSampleVert.r));
     const displacedVert = unitDirVert.mul(rVert);
     // Pass TRUE interpolated 3D displaced position to fragment shader so steep carved crater walls
     // slice cleanly across horizontal 3D strata beds with ZERO radial waterfall streak smearing!
@@ -240,20 +244,21 @@ export function createErosionMaterials(erosionTex: THREE.DataTexture): ErosionMa
     // Fragment evaluation (strictly uniform control flow for every texture tap)
     const d = normalize(vec3(vUnitDir));
     const pObj = vec3(vDisplacedPos);
-    const rFragObj = length(pObj);
     const octUvFrag = octDirToUvTsl(d);
     const hSample = texture(erosionTex, octUvFrag).level(float(0.0));
-    const rCenter = evalBaseBoulderRadiusTsl(d).mul(max(float(0.0), hSample.r));
+    const rawScale = max(float(0.0), hSample.r);
+    const clampedScale = max(float(0.14), rawScale);
+    const rCenter = evalBaseBoulderRadiusTsl(d).mul(clampedScale);
     const cutDepth = max(float(0.0), hSample.g);
     const freshChalk = clamp(hSample.b, 0.0, 1.0);
     const fossilClearance = hSample.a;
 
-    // Exact basis-invariant spherical heightfield normal with slope stabilization
-    // so carved crater cliffs stay crisp and chiseled without noisy radial spikes
+    // Exact basis-invariant spherical heightfield normal with smooth multi-texel finite difference
+    // (eps = 0.020 spans ~2.2 texels to suppress single-texel stair-step radial streaks on steep walls)
     const upHint = select(abs(d.y).lessThan(0.9), vec3(0.0, 1.0, 0.0), vec3(1.0, 0.0, 0.0));
     const T = normalize(cross(upHint, d));
     const B = normalize(cross(d, T));
-    const eps = float(0.0125);
+    const eps = float(0.020);
 
     const dTp = normalize(d.add(T.mul(eps)));
     const dTm = normalize(d.sub(T.mul(eps)));
@@ -261,21 +266,21 @@ export function createErosionMaterials(erosionTex: THREE.DataTexture): ErosionMa
     const dBm = normalize(d.sub(B.mul(eps)));
 
     const rTp = evalBaseBoulderRadiusTsl(dTp).mul(
-      max(float(0.0), texture(erosionTex, octDirToUvTsl(dTp)).level(float(0.0)).r)
+      max(float(0.14), texture(erosionTex, octDirToUvTsl(dTp)).level(float(0.0)).r)
     );
     const rTm = evalBaseBoulderRadiusTsl(dTm).mul(
-      max(float(0.0), texture(erosionTex, octDirToUvTsl(dTm)).level(float(0.0)).r)
+      max(float(0.14), texture(erosionTex, octDirToUvTsl(dTm)).level(float(0.0)).r)
     );
     const rBp = evalBaseBoulderRadiusTsl(dBp).mul(
-      max(float(0.0), texture(erosionTex, octDirToUvTsl(dBp)).level(float(0.0)).r)
+      max(float(0.14), texture(erosionTex, octDirToUvTsl(dBp)).level(float(0.0)).r)
     );
     const rBm = evalBaseBoulderRadiusTsl(dBm).mul(
-      max(float(0.0), texture(erosionTex, octDirToUvTsl(dBm)).level(float(0.0)).r)
+      max(float(0.14), texture(erosionTex, octDirToUvTsl(dBm)).level(float(0.0)).r)
     );
 
-    const drdt = clamp(rTp.sub(rTm).div(eps.mul(2.0)), -1.85, 1.85);
-    const drdb = clamp(rBp.sub(rBm).div(eps.mul(2.0)), -1.85, 1.85);
-    const nMacro = normalize(d.mul(max(rCenter, float(0.02))).sub(T.mul(drdt)).sub(B.mul(drdb)));
+    const drdt = clamp(rTp.sub(rTm).div(eps.mul(2.0)), -1.55, 1.55);
+    const drdb = clamp(rBp.sub(rBm).div(eps.mul(2.0)), -1.55, 1.55);
+    const nMacro = normalize(d.mul(max(rCenter, float(0.14))).sub(T.mul(drdt)).sub(B.mul(drdb)));
 
     // 3D Object-Space Jurassic Calcareous Limestone Petrography evaluated on TRUE 3D `pObj`
     const seedShift = vec3(
@@ -353,7 +358,9 @@ export function createErosionMaterials(erosionTex: THREE.DataTexture): ErosionMa
     );
 
     // Warm weathered mineral patina on outer crust -> bright freshly cleaved calcareous strata inside craters
-    const freshCutMask = smoothstep(float(0.005), float(0.036), cutDepth);
+    // Back-facing inner walls revealed through blasted-open windows also read as freshly cleaved interior limestone
+    const isBackFace = select(faceDirection.lessThan(0.0), float(1.0), float(0.0));
+    const freshCutMask = max(smoothstep(float(0.005), float(0.036), cutDepth), isBackFace);
     const weatheredRind = mix(
       withPoresAndClasts.mul(0.76),
       mix(pUmber.rInf.mul(0.44), pOchre.rInf.mul(0.58), macroWarp),
@@ -417,11 +424,16 @@ export function createErosionMaterials(erosionTex: THREE.DataTexture): ErosionMa
     const strataTan = uStrataAxis.sub(nFine.mul(dot(uStrataAxis, nFine)));
     const nStratified = normalize(nFine.sub(strataTan.mul(bedSlope)));
 
-    limestone.normalNode = transformNormalToView(nStratified);
+    // Multiply custom DoubleSide normalNode by faceDirection so exposed rear inner rock walls light cleanly
+    limestone.normalNode = transformNormalToView(nStratified).mul(faceDirection);
     limestone.colorNode = finalColor;
-    // Clean opaque alpha-cutout retirement once limestone is blasted away to zero thickness
-    // (discards strictly inside the ammonite core / collapsed origin in both color & shadow passes)
-    limestone.opacityNode = step(float(0.018), rFragObj);
+    // Per-fragment conchoidal rock-fracture alpha-cutout directly from live `erosionTex` `rawScale`:
+    // Zero stretched cone curtains or starfish blades — zeroed texels discard right at the crisp
+    // fractured calcareous edge in both color & shadow passes!
+    const rockCutThreshold = float(0.19)
+      .add(chiseledFacet.sub(0.5).mul(0.036))
+      .add(poreField.sub(0.5).mul(0.014));
+    limestone.opacityNode = step(rockCutThreshold, rawScale);
     limestone.roughnessNode = clamp(
       float(0.86)
         .add(fineOolite.sub(0.5).mul(0.14))
@@ -449,10 +461,13 @@ export function createErosionMaterials(erosionTex: THREE.DataTexture): ErosionMa
     const whorlNorm = clamp(aMeta.y, 0.0, 1.0);
     const venterMask = clamp(aMeta.w, 0.0, 1.0);
 
-    // Sample live erosion heightfield to dust newly-exposed inter-rib valleys with receding calcite chalk
+    // Exact per-fragment clearance on the ammonite surface directly from length(positionLocal) vs live limestone radius
+    // (gives millimeter-accurate inter-rib calcite dust recession while keeping limestone channel A 100% rib-streak-free!)
     const dirAm = normalize(positionLocal);
+    const rFragAm = length(positionLocal);
     const hAm = texture(erosionTex, octDirToUvTsl(dirAm)).level(float(0.0));
-    const clearance = hAm.a; // <0 buried, 0..1 clearing from freshly exposed to brushed clean
+    const rRockAm = evalBaseBoulderRadiusTsl(dirAm).mul(max(float(0.0), hAm.r));
+    const clearance = clamp(rFragAm.sub(rRockAm).div(float(0.042)), -1.0, 1.0);
     const residualChalkMask = smoothstep(float(0.76), float(0.04), clearance)
       .mul(float(1.0).sub(ribCrest.mul(0.86)))
       .mul(float(1.0).sub(venterMask.mul(0.58)));
