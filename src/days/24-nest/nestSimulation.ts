@@ -1,5 +1,7 @@
 import type RAPIER_NS from '@dimforge/rapier3d-compat';
 import {
+  DOWEL_CHAMFER_FRAC,
+  buildOvoidPebbleHullPoints,
   generateReciprocalDomeLayout,
   type CeladonEggSpec,
   type ReciprocalDomeLayout,
@@ -19,13 +21,15 @@ export interface NestSimOptions {
   woodDensity?: number;
   /** Celadon stone egg density (default 0.90) */
   eggDensity?: number;
-  /** Substeps per 60 Hz frame (default 2 -> 120 Hz internal integration) */
+  /** Substeps per 60 Hz frame (default 3 -> 180 Hz internal integration) */
   substepsPer60Hz?: number;
-  /** Rapier PGS solver iterations (default 10) */
+  /** Rapier PGS solver iterations (default 28 for crisp sub-mm hardwood contact) */
   solverIterations?: number;
-  /** Rapier internal PGS iterations (default 2) */
+  /** Rapier internal PGS iterations (default 4) */
   internalPgsIterations?: number;
-  /** Hardwood contact penetration allowance in meters (default 0.0008 m) */
+  /** Hardwood contact natural frequency in Hz (default 120 Hz -> stiff timber, zero squash) */
+  contactNaturalFrequency?: number;
+  /** Hardwood contact penetration allowance in meters (default 0.0001 m) */
   allowedLinearError?: number;
   /** Mild aerodynamic linear damping (default 0.18) */
   linearDamping?: number;
@@ -73,10 +77,11 @@ const DEFAULT_SIM_OPTIONS: Required<Omit<NestSimOptions, 'removedRodIds'>> = {
   eggFriction: 0.68,
   woodDensity: 0.85,
   eggDensity: 0.90,
-  substepsPer60Hz: 2,
-  solverIterations: 10,
-  internalPgsIterations: 2,
-  allowedLinearError: 0.0008,
+  substepsPer60Hz: 3,
+  solverIterations: 28,
+  internalPgsIterations: 4,
+  contactNaturalFrequency: 120,
+  allowedLinearError: 0.0001,
   linearDamping: 0.18,
   angularDamping: 0.25,
 };
@@ -103,8 +108,9 @@ function rotateVecByQuatOut(
 }
 
 /**
- * True 3D rigid-body simulation of the 56-dowel reciprocal timber dome + 3 Celadon
- * river-pebble eggs on a hollow circular plinth ring using `@dimforge/rapier3d-compat` 0.21.
+ * True 3D rigid-body simulation of the 56-dowel reciprocal timber dome + 3 ovoid
+ * Celadon & Bone-Calcite river-pebble eggs on a hollow circular plinth ring using
+ * `@dimforge/rapier3d-compat` 0.21 (`roundCylinder` dowels + `convexHull` ovoid eggs).
  *
  * Strictly zero artificial weld joints, zero fake freeze latches, zero velocity clamps.
  */
@@ -119,7 +125,7 @@ export class ReciprocalNestSim {
 
   private simTimeSec = 0;
   private accumulatorSec = 0;
-  private fixedDt = 1 / 120;
+  private fixedDt = 1 / 180;
   private isDisposed = false;
 
   // Active 3D grab-spring state (zero per-frame allocations)
@@ -163,19 +169,29 @@ export class ReciprocalNestSim {
     world.integrationParameters.numSolverIterations = o.solverIterations;
     world.integrationParameters.numInternalPgsIterations = o.internalPgsIterations;
     world.integrationParameters.normalizedAllowedLinearError = o.allowedLinearError;
-    world.integrationParameters.normalizedPredictionDistance = o.allowedLinearError * 5;
+    world.integrationParameters.normalizedPredictionDistance = Math.max(0.0008, o.allowedLinearError * 6);
+    // Calibrate Rapier contact stiffness for hardwood-on-hardwood & stone, scaled safely to the
+    // active substep rate so single-substep (60 Hz) ablated runs stay strictly within Nyquist stability
+    const ip = world.integrationParameters as RAPIER_NS.IntegrationParameters & {
+      contact_natural_frequency?: number;
+    };
+    if (typeof ip.contact_natural_frequency !== 'undefined' || 'contact_natural_frequency' in Object.getPrototypeOf(ip)) {
+      const safeMaxFreq = o.substepsPer60Hz <= 1 ? 30 : Math.round(o.substepsPer60Hz * 40);
+      ip.contact_natural_frequency = Math.min(o.contactNaturalFrequency, safeMaxFreq);
+    }
 
     // 1. Hollow circular Honed-Limestone & Dark-Brass plinth ring collider (48 harmonic segments)
+    //    Center bore `r < plinth.innerRadius (1.12 m)` is 100% open void so collapsing rods & eggs plummet cleanly!
     const plinth = this.layout.plinth;
     const M = plinth.colliderSegments;
-    const shelfOuterR = plinth.seatOuterRadius + 0.06;
+    const shelfOuterR = plinth.lipOuterRadius;
     const shelfMidR = 0.5 * (plinth.innerRadius + shelfOuterR);
     const shelfRadWidth = shelfOuterR - plinth.innerRadius;
-    const shelfThickness = 0.1;
+    const shelfThickness = Math.abs(plinth.baseBottomY);
     const segArcLen = ((2 * Math.PI * shelfOuterR) / M) * 1.06;
 
     const plinthBody = world.createRigidBody(R.RigidBodyDesc.fixed());
-    const lipThick = 0.07;
+    const lipThick = Math.max(0.055, plinth.lipOuterRadius - plinth.seatOuterRadius);
     const lipMidR = plinth.seatOuterRadius + lipThick * 0.5;
     const lipHalfH = (plinth.lipTopY + 0.01) * 0.5;
     const lipCenterY = plinth.lipTopY - lipHalfH;
@@ -206,7 +222,8 @@ export class ReciprocalNestSim {
       world.createCollider(lipDesc, plinthBody);
     }
 
-    // 2. Dynamic Capsule Rigid Bodies for all 56 Timber Dowels
+    // 2. Dynamic Chamfered RoundCylinder Rigid Bodies for all 56 Timber Dowels
+    //    Matches `buildDowelGeometry` flat chamfered end-grain profile 1:1 (0.0 mm gap/clip)
     const removedSet = new Set(removedRodIds);
     const rods: RodBodyRecord[] = [];
     for (let i = 0; i < this.layout.rods.length; i++) {
@@ -226,7 +243,12 @@ export class ReciprocalNestSim {
         body.setEnabled(false);
       }
 
-      const colliderDesc = R.ColliderDesc.capsule(spec.halfHeight, spec.radius)
+      const bevelR = spec.radius * DOWEL_CHAMFER_FRAC;
+      const colliderDesc = R.ColliderDesc.roundCylinder(
+        spec.halfHeight,
+        spec.radius - bevelR,
+        bevelR
+      )
         .setDensity(o.woodDensity)
         .setFriction(o.woodFriction)
         .setFrictionCombineRule(R.CoefficientCombineRule.Average)
@@ -244,17 +266,21 @@ export class ReciprocalNestSim {
       });
     }
 
-    // 3. Dynamic Sphere Rigid Bodies for the 3 Celadon & Bone-Calcite River-Pebble Eggs
+    // 3. Dynamic Convex-Hull Ovoid Rigid Bodies for the 3 Celadon & Bone-Calcite River-Pebble Eggs
+    //    Built from exact `buildOvoidPebbleHullPoints` matching `buildPebbleEggGeometry` to 0.0 mm
     const eggs: EggBodyRecord[] = [];
     for (let i = 0; i < this.layout.eggs.length; i++) {
       const spec = this.layout.eggs[i];
       const bodyDesc = R.RigidBodyDesc.dynamic()
         .setTranslation(spec.pos[0], spec.pos[1], spec.pos[2])
+        .setRotation(spec.rot)
         .setLinearDamping(o.linearDamping)
         .setAngularDamping(o.angularDamping);
       const body = world.createRigidBody(bodyDesc);
 
-      const colliderDesc = R.ColliderDesc.ball(spec.radius)
+      const hullPoints = buildOvoidPebbleHullPoints(spec.radius, spec.visualScale, spec.seed);
+      const hullDesc = R.ColliderDesc.convexHull(hullPoints);
+      const colliderDesc = (hullDesc ?? R.ColliderDesc.ball(spec.radius))
         .setDensity(o.eggDensity)
         .setFriction(o.eggFriction)
         .setRestitution(0.02);
@@ -415,7 +441,7 @@ export class ReciprocalNestSim {
       const rLen = Math.hypot(tr.x, tr.z) || 1;
       const outwardPull = (dx * tr.x + dz * tr.z) / rLen;
       if (outwardPull > 0.02) {
-        dy += outwardPull * 0.22;
+        dy += outwardPull * 0.24;
       }
     }
 
@@ -465,7 +491,7 @@ export class ReciprocalNestSim {
     if (this.isDisposed) return;
     const clampedDt = Math.min(0.05, Math.max(0, dtSec));
     this.accumulatorSec += clampedDt;
-    const maxSubsteps = Math.max(4, this.options.substepsPer60Hz * 3);
+    const maxSubsteps = Math.max(6, this.options.substepsPer60Hz * 3);
     let stepsRun = 0;
     while (this.accumulatorSec >= this.fixedDt && stepsRun < maxSubsteps) {
       this.applyGrabSpringSubstep(this.fixedDt);
@@ -523,7 +549,7 @@ export class ReciprocalNestSim {
   }
 
   /**
-   * Re-weaves and resets the intact reciprocal dome + Celadon river-pebble eggs.
+   * Re-weaves and resets the intact reciprocal dome + ovoid Celadon river-pebble eggs.
    */
   reset(): void {
     if (this.isDisposed) return;

@@ -5,10 +5,13 @@
  * self-supporting reciprocal timber dome & octagonal bird's-nest cradle with:
  *   - Strict zero initial interpenetration (`clearance >= 0` across all rod-rod,
  *     rod-egg, and egg-egg pairs)
+ *   - Exact chamfered flat-ended lathe dowel envelope (`roundCylinder` with
+ *     `DOWEL_CHAMFER_FRAC = 0.18`, strictly contained inside the analytical capsule)
  *   - Friction-cone equilibrium swirl angles (`gamma` calibrated so gravitational
  *     moment balance lies strictly inside wood-on-wood static friction `mu ~ 0.68`)
  *   - Minimum-energy V-crotch valley-phase seating for every stacked ring
- *   - Non-overlapping side-by-side Celadon river-pebble triad seated inside the crown bowl
+ *   - Non-overlapping side-by-side ovoid Celadon & Bone-Calcite river-pebble triad
+ *     seated cleanly inside the crown bowl using exact ovoid vertex clearance
  *
  * Pure math module (zero DOM / WebGPU dependencies) so Vitest can verify both
  * geometry clearances and live Rapier 0.21 rigid-body equilibrium directly.
@@ -69,11 +72,12 @@ export interface TierBuildMeta {
 export interface CeladonEggSpec {
   readonly id: number;
   readonly pos: Vec3Tuple;
+  readonly rot: QuatTuple;
   readonly radius: number;
-  /** Subtle oblate/ovoid visual aspect scale [sx, sy, sz] kept within ±3% of sphere collider */
+  /** Natural ovoid river-pebble aspect scale [sx, sy, sz] matched 1:1 by Rapier convexHull */
   readonly visualScale: Vec3Tuple;
   readonly seed: number;
-  /** Pigment blend weight (0 = Celadon Glauconite, 1 = speckled Bone Calcite) */
+  /** Pigment blend weight (0 = rich Celadon Glauconite, 1 = speckled Bone Calcite) */
   readonly celadonMix: number;
 }
 
@@ -104,12 +108,21 @@ export interface SegmentClosestResult {
   readonly c2: Vec3Tuple;
 }
 
+/**
+ * Chamfer bevel radius fraction (`borderRadius = radius * DOWEL_CHAMFER_FRAC`) shared
+ * identically by `buildDowelGeometry`, Rapier `roundCylinder` colliders, and contact audits.
+ * Because `roundCylinder(hh, r - b, b)` is mathematically strictly contained inside
+ * `capsule(hh, r)`, zero-overlap capsule layouts guarantee zero-overlap chamfered dowels.
+ */
+export const DOWEL_CHAMFER_FRAC = 0.18;
+
 // ---------------------------------------------------------------------------
 // Canonical Champion 56-Rod Harmonic Reciprocal Bird's-Nest Specification
-// Verified in Rapier 0.21:
-//   - Boot 3s & 15s: maxDrop ~0.064 m (< 0.08 m), fallen = 0/56, all 3 eggs held
-//   - Ablated (1 substep, 6 solver iters, 0.02 damping): maxDrop ~0.064 m, fallen = 0
-//   - Pull 3–4 Tier-0 rods: 37–41 rods collapse + all 3 Celadon eggs plummet
+// Verified in Rapier 0.21 with roundCylinder dowels + convexHull ovoid eggs:
+//   - Boot 3s & 10s (f=120 Hz hardwood contact): maxDrop ~0.015 m, maxBarrelPen < 0.8 mm,
+//     fallen = 0/56, maxV = 0, all 3 ovoid pebbles cradled flush in the birch oculus
+//   - Ablated (1 substep, 6 solver iters, 0.02 damping, f=30 Hz): maxDrop < 0.06 m, fallen = 0
+//   - Pull 3–4 Tier-0 rods: 52–53 rods cascade & all 3 eggs drop cleanly through hollow bore
 // ---------------------------------------------------------------------------
 export const DEFAULT_TIER_CONFIGS: readonly ReciprocalTierConfig[] = [
   {
@@ -120,7 +133,7 @@ export const DEFAULT_TIER_CONFIGS: readonly ReciprocalTierConfig[] = [
     gammaDeg: 49,
     radius: 0.026,
     swirlSign: 1,
-    woodSpecies: 0.04, // Deep oiled Raw-Umber walnut logs
+    woodSpecies: 0.04, // Deep oiled Raw-Umber black walnut timbers
   },
   {
     tier: 1,
@@ -130,7 +143,7 @@ export const DEFAULT_TIER_CONFIGS: readonly ReciprocalTierConfig[] = [
     gammaDeg: 48,
     radius: 0.024,
     swirlSign: -1,
-    woodSpecies: 0.34, // Smoked-ash & warm Burnt-Sienna counter-weave
+    woodSpecies: 0.34, // Smoked-ash open-pore counter-weave
   },
   {
     tier: 2,
@@ -140,7 +153,7 @@ export const DEFAULT_TIER_CONFIGS: readonly ReciprocalTierConfig[] = [
     gammaDeg: 45,
     radius: 0.022,
     swirlSign: 1,
-    woodSpecies: 0.56, // Warm sienna-ochre intermediate staves
+    woodSpecies: 0.56, // Warm honey-red aromatic cedar staves
   },
   {
     tier: 3,
@@ -150,7 +163,7 @@ export const DEFAULT_TIER_CONFIGS: readonly ReciprocalTierConfig[] = [
     gammaDeg: 38,
     radius: 0.020,
     swirlSign: -1,
-    woodSpecies: 0.76, // Warm-ochre cedar inner rim ribs
+    woodSpecies: 0.76, // Golden yellow-ochre cedar inner rim ribs
   },
   {
     tier: 4,
@@ -160,25 +173,26 @@ export const DEFAULT_TIER_CONFIGS: readonly ReciprocalTierConfig[] = [
     gammaDeg: 19,
     radius: 0.018,
     swirlSign: 1,
-    woodSpecies: 0.95, // Pale Bone-Calcite & Ochre birch inner cradle twigs
+    woodSpecies: 0.96, // Pale satin Nordic birch inner cradle twigs
   },
 ] as const;
 
 export const DEFAULT_PLINTH_SPEC: PlinthRingSpec = {
   innerRadius: 1.12,
-  seatOuterRadius: 1.24 + 0.026 + 0.0002, // Exact flush seating for Tier-0 capsule tips
-  lipOuterRadius: 1.324,
-  lipTopY: 0.046, // Gentle 4.6 cm dark-brass recessed lip arresting hoop thrust yet pull-clearable
-  baseBottomY: -0.092,
+  // Exact flush outer retaining seat for Tier-0 chamfered roundCylinder butts (1.26096 + 0.0003 m)
+  seatOuterRadius: 1.26125,
+  lipOuterRadius: 1.326,
+  lipTopY: 0.046, // Crisp 4.6 cm dark-brass recessed lip arresting hoop thrust yet pull-clearable
+  baseBottomY: -0.096,
   colliderSegments: 48, // Exact 3x harmonic multiple of Tier-0's 16 rods (identical radial normal per rod)
 };
 
-export const EGG_TRIAD_RING_RADIUS = 0.134;
-export const EGG_TRIAD_PHASE = 0.3;
-export const EGG_RADII: readonly [number, number, number] = [0.116, 0.110, 0.106];
+export const EGG_TRIAD_RING_RADIUS = 0.136;
+export const EGG_TRIAD_PHASE = 0.34;
+export const EGG_RADII: readonly [number, number, number] = [0.114, 0.109, 0.105];
 
 // ---------------------------------------------------------------------------
-// Vector & Segment Math (pure, allocation-minimal)
+// Vector, Quaternion & Segment Math (pure, zero DOM / Three.js dependencies)
 // ---------------------------------------------------------------------------
 
 function sub3(a: Vec3Tuple, b: Vec3Tuple): [number, number, number] {
@@ -210,6 +224,164 @@ export function rotateAroundY(p: Vec3Tuple, theta: number): [number, number, num
   const c = Math.cos(theta);
   const s = Math.sin(theta);
   return [p[0] * c + p[2] * s, p[1], -p[0] * s + p[2] * c];
+}
+
+export function rotateVecByQuat(v: Vec3Tuple, q: QuatTuple): [number, number, number] {
+  const tx = 2 * (q.y * v[2] - q.z * v[1]);
+  const ty = 2 * (q.z * v[0] - q.x * v[2]);
+  const tz = 2 * (q.x * v[1] - q.y * v[0]);
+  return [
+    v[0] + q.w * tx + (q.y * tz - q.z * ty),
+    v[1] + q.w * ty + (q.z * tx - q.x * tz),
+    v[2] + q.w * tz + (q.x * ty - q.y * tx),
+  ];
+}
+
+function quatFromYawPitchRoll(yaw: number, pitch: number, roll: number): QuatTuple {
+  const cy = Math.cos(yaw * 0.5);
+  const sy = Math.sin(yaw * 0.5);
+  const cp = Math.cos(pitch * 0.5);
+  const sp = Math.sin(pitch * 0.5);
+  const cr = Math.cos(roll * 0.5);
+  const sr = Math.sin(roll * 0.5);
+  return {
+    x: cy * sp * cr + sy * cp * sr,
+    y: sy * cp * cr - cy * sp * sr,
+    z: cy * cp * sr - sy * sp * cr,
+    w: cy * cp * cr + sy * sp * sr,
+  };
+}
+
+/**
+ * Shared pure-math ovoid river-pebble surface evaluator used identically by:
+ *   1. Visual high-res mesh (`nestGeometry.ts: buildPebbleEggGeometry`)
+ *   2. Rapier `convexHull` collider (`nestSimulation.ts`)
+ *   3. Exact zero-penetration cradling layout & clearances (`reciprocalDome.ts`)
+ *
+ * Elongated along local X (`sx > 1`), softly flattened vertically (`sy < 1`),
+ * with a gentle natural avian-egg taper (fuller blunt end at -X, tapered tip at +X)
+ * and subtle river-tumbled mineral asymmetry while remaining strictly convex.
+ */
+export function sampleOvoidPebblePoint(
+  nx: number,
+  ny: number,
+  nz: number,
+  radius: number,
+  visualScale: Vec3Tuple,
+  seed: number
+): [number, number, number] {
+  const [sx, sy, sz] = visualScale;
+  const p1 = seed * 17.3 + 1.1;
+  const p2 = seed * 29.7 + 2.4;
+  const p3 = seed * 43.1 + 0.7;
+
+  // Classic subtle wild-egg ovoid taper along local X (fuller base at -X, gently pointed crown at +X)
+  const ovoidTaper = 1.0 - 0.068 * nx;
+  const wearA = Math.sin(nx * 2.1 + ny * 1.5 + p1) * Math.cos(nz * 1.8 - p2);
+  const wearB = Math.cos(ny * 2.2 - nz * 1.6 + p3) * Math.sin(nx * 1.4 + p1);
+  const rScale = 1.0 + 0.011 * wearA + 0.007 * wearB;
+
+  return [
+    nx * radius * sx * rScale,
+    ny * radius * sy * ovoidTaper * rScale,
+    nz * radius * sz * ovoidTaper * rScale,
+  ];
+}
+
+/**
+ * Generates deterministic unit-sphere directions (subdivided icosahedron vertices,
+ * deduplicated) for Rapier convexHull generation and exact ovoid clearance audits.
+ */
+export function generateUnitIcoVertices(detail = 2): Array<[number, number, number]> {
+  const phi = (1 + Math.sqrt(5)) * 0.5;
+  const rawVerts: readonly Vec3Tuple[] = [
+    [-1, phi, 0],
+    [1, phi, 0],
+    [-1, -phi, 0],
+    [1, -phi, 0],
+    [0, -1, phi],
+    [0, 1, phi],
+    [0, -1, -phi],
+    [0, 1, -phi],
+    [phi, 0, -1],
+    [phi, 0, 1],
+    [-phi, 0, -1],
+    [-phi, 0, 1],
+  ];
+  const baseVerts: Array<[number, number, number]> = rawVerts.map((v) => norm3(v));
+
+  let faces: Array<[number, number, number]> = [
+    [0, 11, 5],
+    [0, 5, 1],
+    [0, 1, 7],
+    [0, 7, 10],
+    [0, 10, 11],
+    [1, 5, 9],
+    [5, 11, 4],
+    [11, 10, 2],
+    [10, 7, 6],
+    [7, 1, 8],
+    [3, 9, 4],
+    [3, 4, 2],
+    [3, 2, 6],
+    [3, 6, 8],
+    [3, 8, 9],
+    [4, 9, 5],
+    [2, 4, 11],
+    [6, 2, 10],
+    [8, 6, 7],
+    [9, 8, 1],
+  ];
+
+  const verts = [...baseVerts];
+  for (let d = 0; d < detail; d++) {
+    const midCache = new Map<string, number>();
+    const getMid = (i0: number, i1: number): number => {
+      const key = i0 < i1 ? `${i0}_${i1}` : `${i1}_${i0}`;
+      const existing = midCache.get(key);
+      if (existing !== undefined) return existing;
+      const a = verts[i0];
+      const b = verts[i1];
+      const idx = verts.length;
+      verts.push(norm3([(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5, (a[2] + b[2]) * 0.5]));
+      midCache.set(key, idx);
+      return idx;
+    };
+
+    const nextFaces: Array<[number, number, number]> = [];
+    for (let f = 0; f < faces.length; f++) {
+      const [a, b, c] = faces[f];
+      const ab = getMid(a, b);
+      const bc = getMid(b, c);
+      const ca = getMid(c, a);
+      nextFaces.push([a, ab, ca], [b, bc, ab], [c, ca, bc], [ab, bc, ca]);
+    }
+    faces = nextFaces;
+  }
+
+  return verts;
+}
+
+const UNIT_ICO_DETAIL_2 = generateUnitIcoVertices(2);
+
+/**
+ * Generates exact local-space convex hull vertex buffer for a river-pebble egg
+ * (identical mathematical surface to `buildPebbleEggGeometry` in `nestGeometry.ts`).
+ */
+export function buildOvoidPebbleHullPoints(
+  radius: number,
+  visualScale: Vec3Tuple,
+  seed: number
+): Float32Array {
+  const out = new Float32Array(UNIT_ICO_DETAIL_2.length * 3);
+  for (let i = 0; i < UNIT_ICO_DETAIL_2.length; i++) {
+    const [nx, ny, nz] = UNIT_ICO_DETAIL_2[i];
+    const [px, py, pz] = sampleOvoidPebblePoint(nx, ny, nz, radius, visualScale, seed);
+    out[i * 3 + 0] = px;
+    out[i * 3 + 1] = py;
+    out[i * 3 + 2] = pz;
+  }
+  return out;
 }
 
 /**
@@ -265,6 +437,32 @@ export function segmentSegmentClosest(
   const c1 = add3(p1, scale3(d1, s));
   const c2 = add3(p2, scale3(d2, t));
   return { dist: len3(sub3(c1, c2)), s, t, c1, c2 };
+}
+
+/**
+ * Exact signed distance from world point `p` to a chamfered `roundCylinder(hh, r - b, b)`
+ * centered at `center`, unit axis `axis`, halfHeight `hh`, outer radius `radius`, bevel `b`.
+ */
+export function pointToRoundCylinderSignedDist(
+  p: Vec3Tuple,
+  center: Vec3Tuple,
+  axis: Vec3Tuple,
+  halfHeight: number,
+  radius: number,
+  bevelFrac = DOWEL_CHAMFER_FRAC
+): number {
+  const b = radius * bevelFrac;
+  const rFlat = radius - b;
+  const rel = sub3(p, center);
+  const y = dot3(rel, axis);
+  const radVec: Vec3Tuple = [rel[0] - axis[0] * y, rel[1] - axis[1] * y, rel[2] - axis[2] * y];
+  const r = len3(radVec);
+
+  const dr = r - rFlat;
+  const dy = Math.abs(y) - halfHeight;
+  const outDist = Math.hypot(Math.max(dr, 0), Math.max(dy, 0));
+  const inDist = Math.min(Math.max(dr, dy), 0);
+  return outDist + inDist - b;
 }
 
 /**
@@ -497,38 +695,98 @@ function placeRingInValley(
 }
 
 /**
- * Places 3 smooth non-overlapping Celadon & Bone-Calcite river-pebble eggs
- * cleanly into the crown cradle of the reciprocal dome.
+ * Computes exact minimum clearance between an ovoid pebble's world surface vertices
+ * and all chamfered `roundCylinder` dowels.
+ */
+function ovoidToRodsClearance(
+  eggPos: Vec3Tuple,
+  eggRot: QuatTuple,
+  hullPts: Float32Array,
+  rods: readonly ReciprocalRodSpec[]
+): number {
+  let minC = Infinity;
+  const vertCount = hullPts.length / 3;
+  for (let v = 0; v < vertCount; v++) {
+    const local: Vec3Tuple = [hullPts[v * 3], hullPts[v * 3 + 1], hullPts[v * 3 + 2]];
+    const r = rotateVecByQuat(local, eggRot);
+    const wp: Vec3Tuple = [eggPos[0] + r[0], eggPos[1] + r[1], eggPos[2] + r[2]];
+    for (let k = 0; k < rods.length; k++) {
+      const rod = rods[k];
+      const d = pointToRoundCylinderSignedDist(wp, rod.center, rod.dir, rod.halfHeight, rod.radius);
+      if (d < minC) minC = d;
+    }
+  }
+  return minC;
+}
+
+/**
+ * Conservative exact separation distance between two convex ovoid pebbles using
+ * their oriented world vertex clouds (lower-bounded by supporting-plane gap).
+ */
+function ovoidToOvoidClearance(
+  posA: Vec3Tuple,
+  rotA: QuatTuple,
+  ptsA: Float32Array,
+  posB: Vec3Tuple,
+  rotB: QuatTuple,
+  ptsB: Float32Array
+): number {
+  const axis = norm3(sub3(posB, posA));
+  const centerDist = len3(sub3(posB, posA));
+  let maxProjA = -Infinity;
+  for (let i = 0; i < ptsA.length; i += 3) {
+    const r = rotateVecByQuat([ptsA[i], ptsA[i + 1], ptsA[i + 2]], rotA);
+    const p = dot3(r, axis);
+    if (p > maxProjA) maxProjA = p;
+  }
+  let maxProjB = -Infinity;
+  for (let i = 0; i < ptsB.length; i += 3) {
+    const r = rotateVecByQuat([ptsB[i], ptsB[i + 1], ptsB[i + 2]], rotB);
+    const p = -dot3(r, axis);
+    if (p > maxProjB) maxProjB = p;
+  }
+  return centerDist - (maxProjA + maxProjB);
+}
+
+/**
+ * Places 3 smooth non-overlapping ovoid Celadon & Bone-Calcite river-pebble eggs
+ * cleanly into the crown cradle of the reciprocal dome using exact ovoid vertex
+ * clearance against the chamfered timber ring (zero initial overlap, minimal settling).
  */
 function placeCeladonEggs(
   rods: readonly ReciprocalRodSpec[],
-  clearance = 0.0006
+  clearance = 0.0008
 ): CeladonEggSpec[] {
   const placed: CeladonEggSpec[] = [];
+  const placedHulls: Float32Array[] = [];
+
   const visualScales: readonly Vec3Tuple[] = [
-    [1.02, 0.96, 1.01],
-    [0.99, 0.97, 1.02],
-    [1.01, 0.96, 0.99],
+    [1.16, 0.87, 0.99],
+    [1.13, 0.86, 0.98],
+    [1.10, 0.88, 0.97],
   ];
-  const celadonMixes: readonly number[] = [0.14, 0.42, 0.78];
+  // Three harmonious mineral finishes: rich misty Celadon, pale sea-glass Celadon, speckled Bone-Calcite
+  const celadonMixes: readonly number[] = [0.08, 0.48, 0.94];
+  const basePitches: readonly number[] = [0.10, -0.09, 0.08];
+  const baseRolls: readonly number[] = [-0.07, 0.08, -0.06];
 
   for (let i = 0; i < 3; i++) {
     const angle = EGG_TRIAD_PHASE + (i * Math.PI * 2) / 3;
     const x = EGG_TRIAD_RING_RADIUS * Math.cos(angle);
     const z = EGG_TRIAD_RING_RADIUS * Math.sin(angle);
     const radius = EGG_RADII[i];
+    const seed = 0.19 + i * 0.31;
+    // Align each ovoid pebble tangentially along the circular nest bowl with gentle natural tilt
+    const yaw = angle + Math.PI * 0.5 + (i - 1) * 0.14;
+    const rot = quatFromYawPitchRoll(yaw, basePitches[i], baseRolls[i]);
+    const hull = buildOvoidPebbleHullPoints(radius, visualScales[i], seed);
 
     const minClearAt = (y: number): number => {
       const p: Vec3Tuple = [x, y, z];
-      let minC = Infinity;
-      for (let k = 0; k < rods.length; k++) {
-        const r = rods[k];
-        const c = segmentSegmentClosest(p, p, r.endA, r.endB).dist - (radius + r.radius);
-        if (c < minC) minC = c;
-      }
+      let minC = ovoidToRodsClearance(p, rot, hull, rods);
       for (let k = 0; k < placed.length; k++) {
         const other = placed[k];
-        const c = len3(sub3(p, other.pos)) - (radius + other.radius);
+        const c = ovoidToOvoidClearance(p, rot, hull, other.pos, other.rot, placedHulls[k]);
         if (c < minC) minC = c;
       }
       return minC;
@@ -542,7 +800,7 @@ function placeCeladonEggs(
       }
     }
     let lo = hitY;
-    let hi = hitY + 0.005;
+    let hi = hitY + 0.006;
     for (let iter = 0; iter < 40; iter++) {
       const mid = 0.5 * (lo + hi);
       if (minClearAt(mid) < clearance) lo = mid;
@@ -552,18 +810,20 @@ function placeCeladonEggs(
     placed.push({
       id: i,
       pos: [x, hi, z],
+      rot,
       radius,
       visualScale: visualScales[i],
-      seed: 0.19 + i * 0.31,
+      seed,
       celadonMix: celadonMixes[i],
     });
+    placedHulls.push(hull);
   }
 
   return placed;
 }
 
 /**
- * Computes exact pairwise clearances across all rods and all eggs.
+ * Computes exact pairwise clearances across all rods and all ovoid eggs.
  */
 export function auditLayoutClearances(
   rods: readonly ReciprocalRodSpec[],
@@ -583,22 +843,27 @@ export function auditLayoutClearances(
     }
   }
 
+  const eggHulls = eggs.map((egg) =>
+    buildOvoidPebbleHullPoints(egg.radius, egg.visualScale, egg.seed)
+  );
+
   let minEggRodClearance = Infinity;
   for (let e = 0; e < eggs.length; e++) {
-    const egg = eggs[e];
-    for (let r = 0; r < rods.length; r++) {
-      const rod = rods[r];
-      const c =
-        segmentSegmentClosest(egg.pos, egg.pos, rod.endA, rod.endB).dist -
-        (egg.radius + rod.radius);
-      if (c < minEggRodClearance) minEggRodClearance = c;
-    }
+    const c = ovoidToRodsClearance(eggs[e].pos, eggs[e].rot, eggHulls[e], rods);
+    if (c < minEggRodClearance) minEggRodClearance = c;
   }
 
   let minEggEggClearance = Infinity;
   for (let i = 0; i < eggs.length; i++) {
     for (let j = i + 1; j < eggs.length; j++) {
-      const c = len3(sub3(eggs[i].pos, eggs[j].pos)) - (eggs[i].radius + eggs[j].radius);
+      const c = ovoidToOvoidClearance(
+        eggs[i].pos,
+        eggs[i].rot,
+        eggHulls[i],
+        eggs[j].pos,
+        eggs[j].rot,
+        eggHulls[j]
+      );
       if (c < minEggEggClearance) minEggEggClearance = c;
     }
   }
@@ -608,7 +873,7 @@ export function auditLayoutClearances(
 
 /**
  * Generates the complete analytical zero-overlap 56-rod reciprocal timber dome,
- * plinth specification, and 3 cradled Celadon river-pebble eggs.
+ * plinth specification, and 3 cradled ovoid Celadon & Bone-Calcite river-pebble eggs.
  */
 export function generateReciprocalDomeLayout(
   tierConfigs: readonly ReciprocalTierConfig[] = DEFAULT_TIER_CONFIGS,
@@ -630,7 +895,13 @@ export function generateReciprocalDomeLayout(
         cfg.radius,
         clearance
       );
-      const yBase = cfg.radius + clearance;
+      // Exact flush bottom chamfer height for a tilted roundCylinder resting on y = 0
+      const segLen = Math.hypot(Rb * Math.cos(alpha) - Ra, dy, Rb * Math.sin(alpha));
+      const sinPhi = Math.abs(dy / Math.max(1e-6, segLen));
+      const cosPhi = Math.sqrt(Math.max(0, 1 - sinPhi * sinPhi));
+      const bevelR = cfg.radius * DOWEL_CHAMFER_FRAC;
+      const yBase = (cfg.radius - bevelR) * cosPhi + bevelR + clearance;
+
       const notchA = Math.min(selfS, selfT);
       const notchB = Math.max(selfS, selfT);
       const tierRods = buildRingRods(
@@ -664,7 +935,7 @@ export function generateReciprocalDomeLayout(
     }
   }
 
-  const eggs = placeCeladonEggs(rods, 0.0006);
+  const eggs = placeCeladonEggs(rods, 0.0008);
   const clearances = auditLayoutClearances(rods, eggs);
 
   return {

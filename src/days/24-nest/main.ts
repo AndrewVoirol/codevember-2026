@@ -37,15 +37,15 @@ export async function bootDay24Nest(): Promise<SpecimenStage> {
   const dayEntry = getDayByNumber(24);
   const stage = await SpecimenStage.create({
     day: dayEntry,
-    cameraPosition: [0, 1.95, 3.65],
+    cameraPosition: [0, 1.82, 3.42],
     fov: 35,
     enableOrbit: true,
     enableShadows: true,
   });
 
-  // Hero museum 3/4 framing centered on the suspended ring + woven timber dome + celadon eggs
+  // Hero museum 3/4 framing centered on the suspended ring + woven timber dome + ovoid celadon eggs
   stage.controls.target.set(0, 0.28, 0);
-  stage.controls.minDistance = 1.85;
+  stage.controls.minDistance = 0.85;
   stage.controls.maxDistance = 7.8;
   stage.controls.minPolarAngle = 0.08;
   stage.controls.maxPolarAngle = Math.PI * 0.94;
@@ -54,14 +54,14 @@ export async function bootDay24Nest(): Promise<SpecimenStage> {
   // Studio softbox PMREM environment map for dark-brass, oiled walnut & satin celadon reflections
   const studioEnv = createNestStudioEnvironment(stage.renderer);
   stage.scene.environment = studioEnv.texture;
-  stage.scene.environmentIntensity = 1.05;
+  stage.scene.environmentIntensity = 0.95;
 
   // Subtle warm studio uplift beneath the hollow plinth ring so underside weaving reads crisply
-  const undersideBounce = new THREE.PointLight(0xeae3d2, 1.15, 6.5, 1.6);
+  const undersideBounce = new THREE.PointLight(0xeae3d2, 1.05, 6.5, 1.6);
   undersideBounce.position.set(0.3, -1.65, 0.4);
   stage.specimenGroup.add(undersideBounce);
 
-  // Build exact analytical zero-overlap 56-rod reciprocal dome + 3 Celadon river-pebble eggs
+  // Build exact analytical zero-overlap 56-rod reciprocal dome + 3 ovoid Celadon river-pebble eggs
   const layout = generateReciprocalDomeLayout();
   const sim = new ReciprocalNestSim(RAPIER, layout);
   const mats = createNestMaterials(layout.eggs);
@@ -95,7 +95,7 @@ export async function bootDay24Nest(): Promise<SpecimenStage> {
   nestGroup.add(plinthBrassInnerMesh);
 
   // ---------------------------------------------------------------------------
-  // 2. Five Per-Tier InstancedMesh Groups (56 Tapered Chamfered Timber Dowels)
+  // 2. Five Per-Tier InstancedMesh Groups (56 Chamfered Flat-Ended Timber Dowels)
   // ---------------------------------------------------------------------------
   const tierGroups: TierInstancedGroup[] = [];
   const tierMeshes: THREE.InstancedMesh[] = [];
@@ -147,7 +147,7 @@ export async function bootDay24Nest(): Promise<SpecimenStage> {
   }
 
   // ---------------------------------------------------------------------------
-  // 3. Three Speckled Celadon & Bone-Calcite River-Pebble "Eggs"
+  // 3. Three Speckled Celadon & Bone-Calcite River-Pebble Ovoid "Eggs"
   // ---------------------------------------------------------------------------
   const eggGeoms: THREE.BufferGeometry[] = [];
   const eggMeshes: THREE.Mesh[] = [];
@@ -187,7 +187,7 @@ export async function bootDay24Nest(): Promise<SpecimenStage> {
 
   const rodFlash = new Float32Array(layout.rods.length);
 
-  // Sync all 56 timber instances + 3 egg meshes directly from Rapier world transforms
+  // Sync all 56 timber instances + 3 ovoid egg meshes directly from Rapier world transforms
   const syncMeshesFromPhysics = () => {
     for (let t = 0; t < tierGroups.length; t++) {
       const grp = tierGroups[t];
@@ -234,8 +234,8 @@ export async function bootDay24Nest(): Promise<SpecimenStage> {
   syncMeshesFromPhysics();
 
   // ---------------------------------------------------------------------------
-  // 5. Tactile Jenga Interaction: Hover Highlight, 3D Grab-Spring Pull, Quick Tap,
-  //    360° Empty-Space Orbit, and Double-Click / Space Reset
+  // 5. Tactile Jenga Interaction: Warm Subtle Hover Rim, 3D Grab-Spring Pull,
+  //    Quick Tap-Test, 360° Empty-Space Orbit, and Double-Click / Space Reset
   // ---------------------------------------------------------------------------
   const canvas = stage.shell.canvas;
   let hoveredRodId = -1;
@@ -392,7 +392,7 @@ export async function bootDay24Nest(): Promise<SpecimenStage> {
             [sweepDirVec.x, sweepDirVec.y, sweepDirVec.z],
             0.00065
           );
-          rodFlash[hit.rodId] = Math.max(rodFlash[hit.rodId], 0.35);
+          rodFlash[hit.rodId] = Math.max(rodFlash[hit.rodId], 0.16);
         }
       }
     } else {
@@ -422,9 +422,9 @@ export async function bootDay24Nest(): Promise<SpecimenStage> {
         releasedRodId,
         [dragTargetVec.x, dragTargetVec.y, dragTargetVec.z],
         [pokeDirVec.x, pokeDirVec.y, pokeDirVec.z],
-        0.0115
+        0.0028
       );
-      rodFlash[releasedRodId] = 1.0;
+      rodFlash[releasedRodId] = 0.60;
     }
   };
 
@@ -484,10 +484,14 @@ export async function bootDay24Nest(): Promise<SpecimenStage> {
   stage.onTick(({ dtSec }) => {
     sim.step(dtSec);
 
-    // Smooth hover rim fade & tactile poke flash decay
+    // Smooth hover rim fade & tactile poke flash decay (strict zero tint when unhovered)
     const targetHover = hoveredRodId !== -1 ? 1.0 : 0.0;
     const hoverLerp = Math.min(1, dtSec * 14.0);
     hoverLiftCurrent += (targetHover - hoverLiftCurrent) * hoverLerp;
+    if (hoveredRodId === -1 && hoverLiftCurrent < 0.002) {
+      hoverLiftCurrent = 0;
+      mats.uHoveredRodId.value = -1;
+    }
     mats.uHoverLift.value = hoverLiftCurrent;
 
     const flashDecay = Math.exp(-dtSec * 6.5);
