@@ -1,20 +1,21 @@
 import * as THREE from 'three/webgpu';
 import { getDayByNumber } from '../../core/manifest';
 import { SpecimenStage } from '../../core/stage/SpecimenStage';
+import { MINERAL_PALETTE } from '../../core/palette';
+import { KozoCocoonSimulation } from './cocoonSimulation';
 import {
-  CORE_COUNT,
-  buildCoreAssembly,
-} from './coreAssemblies';
+  buildCalyxBaseCapGeometry,
+  buildEmberPearlGeometry,
+  buildOrigamiWingGeometry,
+  buildPollenBillboardQuadGeometry,
+  buildStamenCrownGeometry,
+  PETAL_BASE_Y,
+} from './kozoGeometry';
 import {
-  createCocoonMaterials,
   createCocoonStudioEnvironment,
-} from './cocoonMaterials';
-import { ShrinkFilmSimulation } from './shrinkPhysics';
-import {
-  DEFAULT_COCOON_CONFIG,
-  type BuiltCoreAssembly,
-  type Day20TelemetryState,
-} from './types';
+  createKozoMaterials,
+} from './kozoMaterials';
+import { DEFAULT_KOZO_CONFIG, type Day20TelemetryState } from './types';
 
 declare global {
   interface Window {
@@ -27,432 +28,417 @@ declare global {
 // Pre-allocated scratch math objects (strictly zero per-frame allocations)
 const _raycaster = new THREE.Raycaster();
 const _ndc = new THREE.Vector2();
+const _camLocal = new THREE.Vector3();
+const _planeHit = new THREE.Vector3();
+const _prevPlaneHit = new THREE.Vector3();
 const _dragPlane = new THREE.Plane();
 const _camDir = new THREE.Vector3();
-const _hitWorld = new THREE.Vector3();
-const _hitLocal = new THREE.Vector3();
-const _camLocal = new THREE.Vector3();
-const _downHitLocal = new THREE.Vector3();
+const _radialDir = new THREE.Vector3();
+const _dragVec = new THREE.Vector3();
+const _dummyMatrix = new THREE.Matrix4();
+const _dummyScale = new THREE.Vector3();
+const _dummyPos = new THREE.Vector3();
+const _colorA = new THREE.Color(MINERAL_PALETTE.boneCalcite.hex);
+const _colorB = new THREE.Color(MINERAL_PALETTE.yellowOchre.hex);
+const _colorC = new THREE.Color(MINERAL_PALETTE.realgarAmber.hex);
+const _tmpCol = new THREE.Color();
 
 export async function bootDay20Cocoon(): Promise<SpecimenStage> {
   const dayEntry = getDayByNumber(20);
   const stage = await SpecimenStage.create({
     day: dayEntry,
-    cameraPosition: [0.42, 0.56, 7.25],
-    fov: 36,
+    cameraPosition: [0.18, 2.38, 5.75],
+    fov: 35,
     enableOrbit: true,
-    enableShadows: true,
+    enableShadows: false,
   });
 
-  stage.controls.target.set(0, 0, 0);
-  stage.controls.minDistance = 2.6;
-  stage.controls.maxDistance = 12.5;
+  stage.camera.near = 0.05;
+  stage.camera.updateProjectionMatrix();
+
+  stage.controls.target.set(0, 0.06, 0);
+  stage.controls.minDistance = 2.0;
+  stage.controls.maxDistance = 10.8;
+  stage.controls.zoomSpeed = 0.85;
   stage.controls.enableDamping = true;
   stage.controls.dampingFactor = 0.065;
   stage.controls.update();
 
-  // Studio softbox PMREM environment map for brass bevels, basalt facets & glossy shrink-film
   const studioEnv = createCocoonStudioEnvironment(stage.renderer);
   stage.scene.environment = studioEnv.texture;
-  stage.scene.environmentIntensity = 1.15;
+  stage.scene.environmentIntensity = 0.72;
 
-  // Tighten shadow frustum onto the suspended cocoon assembly
-  let dirLightIdx = 0;
+  let dirIdx = 0;
   for (const child of stage.scene.children) {
     if (child instanceof THREE.DirectionalLight) {
-      if (dirLightIdx === 0) {
-        child.position.set(2.9, 4.4, 3.4);
-        child.intensity = 2.05;
-        child.shadow.mapSize.set(2048, 2048);
-        const d = 2.1;
-        child.shadow.camera.left = -d;
-        child.shadow.camera.right = d;
-        child.shadow.camera.top = d;
-        child.shadow.camera.bottom = -d;
-        child.shadow.camera.near = 0.8;
-        child.shadow.camera.far = 12.5;
-        child.shadow.bias = -0.0003;
-        child.shadow.normalBias = 0.01;
-        child.shadow.camera.updateProjectionMatrix();
-      } else if (dirLightIdx === 1) {
-        child.intensity = 0.72;
-      } else if (dirLightIdx === 2) {
-        child.intensity = 1.48;
+      if (dirIdx === 0) {
+        child.position.set(2.8, 4.2, 3.6);
+        child.intensity = 1.72;
+      } else if (dirIdx === 1) {
+        child.position.set(-3.4, -1.0, 2.4);
+        child.intensity = 0.65;
+      } else if (dirIdx === 2) {
+        child.position.set(-1.2, 3.6, -3.8);
+        child.intensity = 1.65;
       }
-      dirLightIdx++;
+      dirIdx++;
     } else if (child instanceof THREE.HemisphereLight) {
-      child.intensity = 0.52;
+      child.intensity = 0.62;
     }
   }
 
-  // Root container holding both inner sculptural core and shrink-film sleeve in lockstep local space
   const specimenRoot = new THREE.Group();
-  specimenRoot.name = 'CocoonSpecimenRoot';
+  specimenRoot.name = 'TornRicePaperCocoonRoot';
   stage.specimenGroup.add(specimenRoot);
 
-  const materials = createCocoonMaterials();
+  const sim = new KozoCocoonSimulation(DEFAULT_KOZO_CONFIG);
+  sim.bloom = 0.36;
+  sim.setTargetBloom(DEFAULT_KOZO_CONFIG.initialBloom);
 
-  // Build all 3 hidden sculptural inner assemblies upfront (instant zero-GC cycling)
-  const cores: BuiltCoreAssembly[] = [];
-  for (let i = 0; i < CORE_COUNT; i++) {
-    const built = buildCoreAssembly(i, materials.coreMaterials);
-    built.group.visible = i === 0;
-    specimenRoot.add(built.group);
-    cores.push(built);
+  const mats = createKozoMaterials();
+
+  // Internal honey-amber candle light cradled in the floral heart
+  const heartLight = new THREE.PointLight(0xea8b38, 2.2, 4.8, 1.5);
+  heartLight.position.set(0, PETAL_BASE_Y + 0.36, 0.04);
+  specimenRoot.add(heartLight);
+
+  // Calyx base cup sealing petal roots
+  const calyxGeo = buildCalyxBaseCapGeometry();
+  const calyxMesh = new THREE.Mesh(calyxGeo, mats.bloomPetalMat);
+  calyxMesh.name = 'RicePaperCalyxCap';
+  calyxMesh.renderOrder = 1;
+  specimenRoot.add(calyxMesh);
+
+  // 18 poised torn rice-paper petals across 3 staggered whorls
+  const petalMeshes: THREE.Mesh[] = [];
+  const hitMeshes: THREE.Object3D[] = [calyxMesh];
+  for (let p = 0; p < sim.petals.length; p++) {
+    const m = new THREE.Mesh(sim.petals[p].geometry, mats.bloomPetalMat);
+    m.name = `BloomPetal_W${sim.petals[p].spec.whorl}_${p}`;
+    specimenRoot.add(m);
+    petalMeshes.push(m);
+    hitMeshes.push(m);
   }
-  let activeCoreIndex = 0;
 
-  // Subtle internal warm Realgar-Amber cavity light illuminating brass & basalt crevices from within
-  const cavityLight = new THREE.PointLight(0xe57e36, 2.1, 4.2, 1.85);
-  cavityLight.position.set(0, 0, 0);
-  specimenRoot.add(cavityLight);
+  // Delicate curved botanical stamen crown + soft nectar pearl (strictly between rear & front petals)
+  const emberGeo = buildEmberPearlGeometry();
+  const emberMesh = new THREE.Mesh(emberGeo, mats.emberMat);
+  emberMesh.name = 'FloralNectarPearl';
+  emberMesh.position.set(0, PETAL_BASE_Y + 0.14, 0);
+  emberMesh.renderOrder = 19;
+  specimenRoot.add(emberMesh);
+  hitMeshes.push(emberMesh);
 
-  // XPBD Heat-Shrink / Vacuum-Form Film Simulation
-  const sim = new ShrinkFilmSimulation(cores[activeCoreIndex].descriptor, DEFAULT_COCOON_CONFIG);
+  const stamenGeo = buildStamenCrownGeometry(sim.config.stamenCount);
+  const stamenMesh = new THREE.Mesh(stamenGeo, mats.stamenMat);
+  stamenMesh.name = 'BotanicalStamenCrown';
+  stamenMesh.renderOrder = 20;
+  specimenRoot.add(stamenMesh);
 
-  // Back-then-front dual pass over the shared geometry eliminates alpha self-sorting pops at every angle
-  const filmBackMesh = new THREE.Mesh(sim.geometry, materials.filmBackMat);
-  filmBackMesh.name = 'ShrinkFilmBackPass';
-  filmBackMesh.renderOrder = 2;
-  filmBackMesh.frustumCulled = false;
-  specimenRoot.add(filmBackMesh);
+  // 12 buoyant curl-gliding faceted Realgar-Amber origami moths
+  const leftWingGeo = buildOrigamiWingGeometry(-1);
+  const rightWingGeo = buildOrigamiWingGeometry(1);
+  const mothGroups: THREE.Group[] = [];
+  const mothLeftWings: THREE.Mesh[] = [];
+  const mothRightWings: THREE.Mesh[] = [];
 
-  const filmFrontMesh = new THREE.Mesh(sim.geometry, materials.filmFrontMat);
-  filmFrontMesh.name = 'ShrinkFilmFrontPass';
-  filmFrontMesh.renderOrder = 3;
-  filmFrontMesh.frustumCulled = false;
-  specimenRoot.add(filmFrontMesh);
+  for (let i = 0; i < sim.moths.length; i++) {
+    const mg = new THREE.Group();
+    mg.name = `OrigamiMoth_${i}`;
+    const lw = new THREE.Mesh(leftWingGeo, mats.mothMat);
+    const rw = new THREE.Mesh(rightWingGeo, mats.mothMat);
+    lw.renderOrder = 42;
+    rw.renderOrder = 42;
+    mg.add(lw, rw);
+    specimenRoot.add(mg);
+    mothGroups.push(mg);
+    mothLeftWings.push(lw);
+    mothRightWings.push(rw);
+  }
 
-  // Delicate stretched fibrous silk tether strands spanning freshly opened tear gaps
-  const silkTetherMesh = new THREE.Mesh(sim.tetherGeometry, materials.tetherMat);
-  silkTetherMesh.name = 'SilkTetherStrands';
-  silkTetherMesh.renderOrder = 4;
-  silkTetherMesh.frustumCulled = false;
-  specimenRoot.add(silkTetherMesh);
+  // 280 soft radial-glow backlit pollen & silk motes
+  const pollenGeo = buildPollenBillboardQuadGeometry();
+  const pollenMesh = new THREE.InstancedMesh(pollenGeo, mats.pollenMat, sim.config.pollenCount);
+  pollenMesh.name = 'LuminousPollenMotes';
+  pollenMesh.renderOrder = 44;
+  pollenMesh.frustumCulled = false;
+  for (let i = 0; i < sim.config.pollenCount; i++) {
+    const w = sim.pollenWarmth[i];
+    if (w < 0.45) {
+      _tmpCol.lerpColors(_colorA, _colorB, w / 0.45);
+    } else {
+      _tmpCol.lerpColors(_colorB, _colorC, (w - 0.45) / 0.55);
+    }
+    pollenMesh.setColorAt(i, _tmpCol);
+  }
+  if (pollenMesh.instanceColor) pollenMesh.instanceColor.needsUpdate = true;
+  specimenRoot.add(pollenMesh);
 
-  // Cached raycast list per core (film front + back + active core so rays stop on exposed metal)
-  const corePickLists: THREE.Object3D[][] = cores.map((c) => {
-    const list: THREE.Object3D[] = [filmFrontMesh, filmBackMesh];
-    c.group.traverse((obj: THREE.Object3D) => {
-      if (obj instanceof THREE.Mesh) list.push(obj);
-    });
-    return list;
-  });
+  window.__DAY20__ = {
+    getState: () => sim.getTelemetry(),
+  };
 
-  // Interaction state
+  // =========================================================================
+  // Natural Air-Wake, Direct Petal-Pull & Orbit Controls
+  // =========================================================================
   const canvas = stage.shell.canvas;
-  let isHoveringSleeve = false;
-  let isHoldingHeat = false;
-  let downOnSleeve = false;
-  let downOnEmpty = false;
-  let downShiftKey = false;
+  let bootTime = performance.now();
+  let pointerTravelPx = 0;
+  let lastClientX = Number.NaN;
+  let lastClientY = Number.NaN;
+  let hoverUnlocked = false;
+
+  let isDraggingPetal = false;
+  let grabbedPetalIdx = -1;
+  let activePointerId = -1;
   let downX = 0;
   let downY = 0;
-  let downTimeMs = 0;
-  let lastEmptyClickMs = 0;
-  let lastSleeveClickMs = 0;
-  let heatVisualBlend = 0;
-  let currentHeatWorldValid = false;
+  let hasMovedDuringDrag = false;
+  let hasPrevPlaneHit = false;
+  let prevMoveTimeMs = performance.now();
 
-  // Boot-settle cursor guard (prevents parked OS cursor from melting resting Frame 0)
-  const bootTimeMs = performance.now();
-  let hoverUnlocked = false;
-  let firstHoverX: number | null = null;
-  let firstHoverY: number | null = null;
-
-  function updateNdc(clientX: number, clientY: number): void {
+  const updateNdcFromClient = (clientX: number, clientY: number) => {
     const rect = canvas.getBoundingClientRect();
     _ndc.x = ((clientX - rect.left) / Math.max(1, rect.width)) * 2 - 1;
     _ndc.y = -((clientY - rect.top) / Math.max(1, rect.height)) * 2 + 1;
-  }
+  };
 
-  function pickSleeveOrCore(clientX: number, clientY: number): {
-    kind: 'sleeve' | 'core' | 'empty';
-    point: THREE.Vector3 | null;
-  } {
-    updateNdc(clientX, clientY);
+  const raycastPetal = (clientX: number, clientY: number): number => {
+    updateNdcFromClient(clientX, clientY);
     _raycaster.setFromCamera(_ndc, stage.camera);
-    const hits = _raycaster.intersectObjects(corePickLists[activeCoreIndex], false);
-    if (hits.length === 0) {
-      return { kind: 'empty', point: null };
-    }
-    const first = hits[0];
-    if (first.object === filmFrontMesh || first.object === filmBackMesh) {
-      return { kind: 'sleeve', point: first.point };
-    }
-    return { kind: 'core', point: first.point };
-  }
+    const hits = _raycaster.intersectObjects(hitMeshes, false);
+    if (hits.length === 0) return -2;
+    const obj = hits[0].object;
+    return petalMeshes.indexOf(obj as THREE.Mesh);
+  };
 
-  function cycleCoreAndRewrap(): void {
-    cores[activeCoreIndex].group.visible = false;
-    activeCoreIndex = (activeCoreIndex + 1) % CORE_COUNT;
-    cores[activeCoreIndex].group.visible = true;
-    sim.reset(cores[activeCoreIndex].descriptor, true);
-    isHoveringSleeve = false;
-    isHoldingHeat = false;
-    currentHeatWorldValid = false;
-    canvas.style.cursor = 'default';
-  }
+  const projectOntoSpecimenPlane = (clientX: number, clientY: number, out: THREE.Vector3): boolean => {
+    updateNdcFromClient(clientX, clientY);
+    _raycaster.setFromCamera(_ndc, stage.camera);
+    stage.camera.getWorldDirection(_camDir);
+    _dragPlane.setFromNormalAndCoplanarPoint(_camDir.negate(), specimenRoot.position);
+    if (_raycaster.ray.intersectPlane(_dragPlane, out)) {
+      specimenRoot.worldToLocal(out);
+      return true;
+    }
+    return false;
+  };
+
+  const onPointerMove = (ev: PointerEvent) => {
+    if (!hoverUnlocked) {
+      if (Number.isFinite(lastClientX)) {
+        pointerTravelPx += Math.hypot(ev.clientX - lastClientX, ev.clientY - lastClientY);
+      }
+      lastClientX = ev.clientX;
+      lastClientY = ev.clientY;
+      if (performance.now() - bootTime > 360 && pointerTravelPx >= 8) {
+        hoverUnlocked = true;
+      } else if (!isDraggingPetal) {
+        return;
+      }
+    }
+
+    const nowMs = performance.now();
+    const dtMove = Math.max(0.008, (nowMs - prevMoveTimeMs) / 1000);
+    prevMoveTimeMs = nowMs;
+
+    const planeValid = projectOntoSpecimenPlane(ev.clientX, ev.clientY, _planeHit);
+    let vx = 0;
+    let vy = 0;
+    let vz = 0;
+    if (planeValid && hasPrevPlaneHit) {
+      vx = (_planeHit.x - _prevPlaneHit.x) / dtMove;
+      vy = (_planeHit.y - _prevPlaneHit.y) / dtMove;
+      vz = (_planeHit.z - _prevPlaneHit.z) / dtMove;
+    }
+
+    if (isDraggingPetal && ev.pointerId === activePointerId && planeValid) {
+      const movedPx = Math.hypot(ev.clientX - downX, ev.clientY - downY);
+      if (movedPx > 4) hasMovedDuringDrag = true;
+
+      if (hasPrevPlaneHit) {
+        _dragVec.copy(_planeHit).sub(_prevPlaneHit);
+        if (grabbedPetalIdx >= 0) {
+          const az = sim.petals[grabbedPetalIdx].spec.azimuth;
+          _radialDir.set(Math.sin(az), -0.32, Math.cos(az)).normalize();
+          const outwardDelta = _dragVec.dot(_radialDir);
+          const lateralDelta = _dragVec.x * Math.cos(az) - _dragVec.z * Math.sin(az);
+          sim.pullPetal(grabbedPetalIdx, outwardDelta * 0.95, lateralDelta * 0.85);
+        } else {
+          const prevDist = Math.hypot(_prevPlaneHit.x, _prevPlaneHit.y * 0.7);
+          const curDist = Math.hypot(_planeHit.x, _planeHit.y * 0.7);
+          sim.pullPetal(-1, (curDist - prevDist) * 0.95, 0);
+        }
+      }
+      sim.setAirWake(_planeHit.x, _planeHit.y, _planeHit.z, vx, vy, vz, true);
+    } else if (planeValid) {
+      sim.setAirWake(_planeHit.x, _planeHit.y, _planeHit.z, vx, vy, vz, true);
+      const hitIdx = raycastPetal(ev.clientX, ev.clientY);
+      canvas.style.cursor = hitIdx !== -2 ? 'grab' : 'default';
+    }
+
+    if (planeValid) {
+      _prevPlaneHit.copy(_planeHit);
+      hasPrevPlaneHit = true;
+    }
+    lastClientX = ev.clientX;
+    lastClientY = ev.clientY;
+  };
 
   const onPointerDown = (ev: PointerEvent) => {
     if (ev.button !== 0) return;
     hoverUnlocked = true;
     downX = ev.clientX;
     downY = ev.clientY;
-    downTimeMs = performance.now();
-    downShiftKey = ev.shiftKey;
+    lastClientX = ev.clientX;
+    lastClientY = ev.clientY;
+    hasMovedDuringDrag = false;
+    prevMoveTimeMs = performance.now();
 
-    const pick = pickSleeveOrCore(ev.clientX, ev.clientY);
-    if (pick.kind === 'sleeve' && pick.point) {
-      downOnSleeve = true;
-      downOnEmpty = false;
-      isHoldingHeat = true;
-      isHoveringSleeve = true;
+    if (projectOntoSpecimenPlane(ev.clientX, ev.clientY, _planeHit)) {
+      _prevPlaneHit.copy(_planeHit);
+      hasPrevPlaneHit = true;
+    }
+
+    const hitIdx = raycastPetal(ev.clientX, ev.clientY);
+    if (hitIdx !== -2) {
+      isDraggingPetal = true;
+      grabbedPetalIdx = hitIdx;
+      activePointerId = ev.pointerId;
       stage.controls.enabled = false;
-
-      _hitWorld.copy(pick.point);
-      currentHeatWorldValid = true;
-      specimenRoot.updateMatrixWorld(true);
-      _downHitLocal.copy(pick.point);
-      specimenRoot.worldToLocal(_downHitLocal);
-
-      stage.camera.getWorldDirection(_camDir);
-      _dragPlane.setFromNormalAndCoplanarPoint(_camDir, pick.point);
-      canvas.style.cursor = 'crosshair';
+      canvas.style.cursor = 'grabbing';
       try {
         canvas.setPointerCapture(ev.pointerId);
       } catch {
-        // Ignore if pointer capture unavailable
+        // synthetic pointer events may lack active capture
       }
-    } else {
-      downOnSleeve = false;
-      downOnEmpty = pick.kind === 'empty';
-      isHoldingHeat = false;
-      stage.controls.enabled = true;
-    }
-  };
-
-  const onPointerMove = (ev: PointerEvent) => {
-    if (isHoldingHeat) {
-      const pick = pickSleeveOrCore(ev.clientX, ev.clientY);
-      if (pick.kind === 'sleeve' && pick.point) {
-        _hitWorld.copy(pick.point);
-        currentHeatWorldValid = true;
-        stage.camera.getWorldDirection(_camDir);
-        _dragPlane.setFromNormalAndCoplanarPoint(_camDir, pick.point);
-      } else {
-        updateNdc(ev.clientX, ev.clientY);
-        _raycaster.setFromCamera(_ndc, stage.camera);
-        if (_raycaster.ray.intersectPlane(_dragPlane, _hitWorld)) {
-          currentHeatWorldValid = true;
-        }
-      }
-      return;
-    }
-
-    // Ignore passive hover while OrbitControls is dragging
-    if (ev.buttons !== 0) {
-      isHoveringSleeve = false;
-      return;
-    }
-
-    // Boot-settle guard against parked OS cursor on initial load
-    if (!hoverUnlocked) {
-      if (performance.now() - bootTimeMs < 350) return;
-      if (firstHoverX === null || firstHoverY === null) {
-        firstHoverX = ev.clientX;
-        firstHoverY = ev.clientY;
-        return;
-      }
-      if (Math.hypot(ev.clientX - firstHoverX, ev.clientY - firstHoverY) < 8) return;
-      hoverUnlocked = true;
-    }
-
-    const pick = pickSleeveOrCore(ev.clientX, ev.clientY);
-    if (pick.kind === 'sleeve' && pick.point) {
-      isHoveringSleeve = true;
-      _hitWorld.copy(pick.point);
-      currentHeatWorldValid = true;
-
-      specimenRoot.updateMatrixWorld(true);
-      _hitLocal.copy(pick.point);
-      specimenRoot.worldToLocal(_hitLocal);
-      const near = sim.findNearestVertex(_hitLocal.x, _hitLocal.y, _hitLocal.z);
-      const readyToTear = near.localTension >= 0.10 || near.localShrink >= 0.22;
-      canvas.style.cursor = readyToTear ? 'pointer' : 'crosshair';
-    } else {
-      isHoveringSleeve = false;
-      canvas.style.cursor = 'default';
-    }
-  };
-
-  const releaseCapture = (ev: PointerEvent) => {
-    try {
-      canvas.releasePointerCapture(ev.pointerId);
-    } catch {
-      // Ignore if capture was already released
     }
   };
 
   const onPointerUp = (ev: PointerEvent) => {
-    const moveDist = Math.hypot(ev.clientX - downX, ev.clientY - downY);
-    const heldMs = performance.now() - downTimeMs;
-    const isClick = moveDist < 9 && heldMs < 320;
-
-    if (downOnSleeve) {
-      releaseCapture(ev);
+    if (isDraggingPetal && ev.pointerId === activePointerId) {
+      isDraggingPetal = false;
+      grabbedPetalIdx = -1;
+      activePointerId = -1;
       stage.controls.enabled = true;
-      isHoldingHeat = false;
-
-      if (isClick) {
-        const now = performance.now();
-        const isSleeveDoubleClick = now - lastSleeveClickMs < 360;
-        lastSleeveClickMs = now;
-
-        const forceRupture = downShiftKey || isSleeveDoubleClick;
-        const ruptured = sim.triggerRuptureAtPoint(
-          _downHitLocal.x,
-          _downHitLocal.y,
-          _downHitLocal.z,
-          forceRupture
-        );
-        if (!ruptured) {
-          // Gentle warm poke impulse on unheated soft film so clicks always feel tactile
-          sim.applySoftPoke(_downHitLocal.x, _downHitLocal.y, _downHitLocal.z, 0.72);
+      canvas.style.cursor = 'grab';
+      try {
+        if (canvas.hasPointerCapture(ev.pointerId)) {
+          canvas.releasePointerCapture(ev.pointerId);
         }
+      } catch {
+        // ignore
       }
-      downOnSleeve = false;
-      downOnEmpty = false;
-      return;
-    }
 
-    if (downOnEmpty && isClick) {
-      const now = performance.now();
-      if (now - lastEmptyClickMs < 360) {
-        lastEmptyClickMs = 0;
-        cycleCoreAndRewrap();
-      } else {
-        lastEmptyClickMs = now;
+      if (!hasMovedDuringDrag) {
+        sim.pulseBloomBurst();
       }
     }
-
-    downOnSleeve = false;
-    downOnEmpty = false;
   };
 
-  const onPointerCancel = (ev: PointerEvent) => {
-    releaseCapture(ev);
-    isHoldingHeat = false;
-    isHoveringSleeve = false;
-    downOnSleeve = false;
-    downOnEmpty = false;
-    stage.controls.enabled = true;
-    canvas.style.cursor = 'default';
-  };
-
-  const onPointerLeave = () => {
-    if (!isHoldingHeat) {
-      isHoveringSleeve = false;
+  const onDoubleClick = (ev: MouseEvent) => {
+    const hitIdx = raycastPetal(ev.clientX, ev.clientY);
+    if (hitIdx === -2) {
+      sim.cycleBloomPreset();
+    } else {
+      sim.pulseBloomBurst();
     }
-  };
-
-  const onWheel = () => {
-    hoverUnlocked = true;
   };
 
   const onKeyDown = (ev: KeyboardEvent) => {
     if (ev.code === 'Space') {
       ev.preventDefault();
-      cycleCoreAndRewrap();
+      sim.cycleBloomPreset();
+    } else if (ev.code === 'KeyR') {
+      sim.setTargetBloom(DEFAULT_KOZO_CONFIG.initialBloom);
+      bootTime = performance.now();
+      pointerTravelPx = 0;
+      hoverUnlocked = false;
     }
   };
 
+  canvas.addEventListener('pointermove', onPointerMove);
   canvas.addEventListener('pointerdown', onPointerDown);
-  canvas.addEventListener('pointerleave', onPointerLeave);
-  canvas.addEventListener('wheel', onWheel, { passive: true });
-  window.addEventListener('pointermove', onPointerMove);
   window.addEventListener('pointerup', onPointerUp);
-  window.addEventListener('pointercancel', onPointerCancel);
+  canvas.addEventListener('dblclick', onDoubleClick);
   window.addEventListener('keydown', onKeyDown);
 
-  stage.shell.registerDispose(() => {
-    canvas.removeEventListener('pointerdown', onPointerDown);
-    canvas.removeEventListener('pointerleave', onPointerLeave);
-    canvas.removeEventListener('wheel', onWheel);
-    window.removeEventListener('pointermove', onPointerMove);
-    window.removeEventListener('pointerup', onPointerUp);
-    window.removeEventListener('pointercancel', onPointerCancel);
-    window.removeEventListener('keydown', onKeyDown);
-    stage.scene.environment = null;
-    studioEnv.dispose();
-    for (let i = 0; i < cores.length; i++) {
-      cores[i].dispose();
-    }
-    sim.dispose();
-    materials.dispose();
-  });
-
-  // Read-only diagnostic hook
-  window.__DAY20__ = {
-    getState: () => ({
-      meanShrink: Number(sim.meanShrink.toFixed(4)),
-      maxTension: Number(sim.maxTension.toFixed(4)),
-      tearFraction: Number(sim.tearFraction.toFixed(4)),
-      coreIndex: activeCoreIndex,
-      vertexCount: sim.activeVertexCount,
-      activeTetherCount: sim.activeTetherCount,
-    }),
-  };
-
-  // Main animation tick (strictly zero allocations)
+  // =========================================================================
+  // Animation Loop (Zero Per-Frame Heap Allocations)
+  // =========================================================================
   stage.onTick(({ elapsedSec, dtSec, camera }) => {
-    // Gentle unified cabinet-of-curiosities suspension float (core + cocoon stay 100% locked!)
-    specimenRoot.position.y = Math.sin(elapsedSec * 0.85) * 0.018;
-    specimenRoot.updateMatrixWorld(true);
-
-    // Apply active heat beam when hovering or hold-dragging across the sleeve
-    const heatingNow = (isHoveringSleeve || isHoldingHeat) && currentHeatWorldValid;
-    if (heatingNow) {
-      _hitLocal.copy(_hitWorld);
-      specimenRoot.worldToLocal(_hitLocal);
-      _camLocal.copy(camera.position);
-      specimenRoot.worldToLocal(_camLocal);
-
-      const beamRadius = isHoldingHeat ? 0.86 : 0.66;
-      const beamPower = isHoldingHeat ? 2.85 : 1.35;
-      sim.applyHeatBeam(
-        _hitLocal.x,
-        _hitLocal.y,
-        _hitLocal.z,
-        _camLocal.x,
-        _camLocal.y,
-        _camLocal.z,
-        beamRadius,
-        beamPower,
-        dtSec
-      );
-      materials.uniforms.uHeatOrigin.value.copy(_hitWorld);
-    }
-
-    const targetHeatVisual = heatingNow ? (isHoldingHeat ? 1.0 : 0.62) : 0.0;
-    heatVisualBlend += (targetHeatVisual - heatVisualBlend) * Math.min(1, dtSec * 12);
-
-    // Step XPBD shrink-film physics, analytical core SDF projection, and seam propagation
     sim.step(dtSec);
 
-    // Warm internal amber cavity breath + subtle heat response
-    const cavityPulse = 0.92 + 0.10 * Math.sin(elapsedSec * 1.6) + heatVisualBlend * 0.25;
-    materials.uniforms.uTime.value = elapsedSec;
-    materials.uniforms.uAmberGlow.value = cavityPulse;
-    materials.uniforms.uHeatActive.value = heatVisualBlend;
-    cavityLight.intensity = 1.95 * cavityPulse;
+    specimenRoot.position.y = Math.sin(elapsedSec * 0.72) * 0.024;
+    specimenRoot.rotation.y = Math.sin(elapsedSec * 0.30) * 0.055;
+    specimenRoot.updateMatrixWorld();
+
+    mats.uniforms.uTime.value = elapsedSec;
+    mats.uniforms.uBloom.value = sim.bloom;
+    mats.uniforms.uEmberGlow.value = sim.emberGlow;
+    mats.uniforms.uCandleOffset.value.copy(sim.candleOffset);
+    mats.uniforms.uClosedShadow.value = Math.max(0, Math.min(1, 1.0 - sim.bloom / 0.32));
+    mats.uniforms.uHoverLocal.value.copy(sim.airWakeLocal);
+    mats.uniforms.uHoverStrength.value = sim.airWakeStrength;
+
+    const heartPulse = 1.0 + Math.sin(elapsedSec * 2.1) * 0.06;
+    heartLight.intensity = (0.95 + sim.bloom * 1.75) * sim.emberGlow * heartPulse;
+    heartLight.position.set(
+      sim.candleOffset.x * 0.06,
+      PETAL_BASE_Y + 0.36 + sim.candleOffset.y * 0.05,
+      0.04
+    );
+    emberMesh.scale.setScalar(0.84 + sim.bloom * 0.18 + (sim.emberGlow - 1.0) * 0.14);
+
+    _camLocal.copy(camera.position);
+    specimenRoot.worldToLocal(_camLocal);
+    sim.applyBackToFrontRenderOrder(_camLocal, petalMeshes);
+
+    for (let i = 0; i < sim.moths.length; i++) {
+      const m = sim.moths[i];
+      const mg = mothGroups[i];
+      mg.visible = m.active;
+      if (!m.active) continue;
+
+      mg.position.copy(m.pos);
+      mg.rotation.set(m.pitch, m.heading, m.roll);
+      mg.scale.setScalar(m.scale * (0.45 + 0.55 * m.liftProgress));
+
+      const flap = Math.sin(m.wingPhase) * 0.66 + 0.16;
+      mothLeftWings[i].rotation.z = -flap;
+      mothRightWings[i].rotation.z = flap;
+    }
+
+    for (let i = 0; i < sim.config.pollenCount; i++) {
+      const i3 = i * 3;
+      const alpha = sim.pollenAlpha[i];
+      const sz = alpha > 0.02 ? sim.pollenSize[i] * (0.45 + 0.75 * alpha) : 0.0001;
+      _dummyPos.set(sim.pollenPos[i3], sim.pollenPos[i3 + 1], sim.pollenPos[i3 + 2]);
+      _dummyScale.setScalar(sz);
+      _dummyMatrix.compose(_dummyPos, camera.quaternion, _dummyScale);
+      pollenMesh.setMatrixAt(i, _dummyMatrix);
+    }
+    pollenMesh.instanceMatrix.needsUpdate = true;
+  });
+
+  stage.shell.registerDispose(() => {
+    canvas.removeEventListener('pointermove', onPointerMove);
+    canvas.removeEventListener('pointerdown', onPointerDown);
+    window.removeEventListener('pointerup', onPointerUp);
+    canvas.removeEventListener('dblclick', onDoubleClick);
+    window.removeEventListener('keydown', onKeyDown);
+    calyxGeo.dispose();
+    stamenGeo.dispose();
+    emberGeo.dispose();
+    leftWingGeo.dispose();
+    rightWingGeo.dispose();
+    pollenGeo.dispose();
+    sim.dispose();
+    mats.dispose();
+    studioEnv.dispose();
   });
 
   return stage;
 }
 
-if (typeof document !== 'undefined' && document.getElementById('app')) {
-  bootDay20Cocoon().catch((err) => {
-    console.error('[Day 20 - Cocoon] Failed to initialize WebGPU specimen:', err);
-  });
-}
+void bootDay20Cocoon();

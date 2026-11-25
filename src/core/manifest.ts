@@ -264,8 +264,8 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
     'tsl',
     'warmKaolin',
     'realgarAmber',
-    'Suspended translucent Warm-Kaolin & Realgar-Amber heat-shrink polymer-parchment cocoon enveloping three cyclable hidden sculptural cores (brass-and-basalt astrolabe caliper reliquary, prismatic Bone-Calcite & Verdigris spire cluster, and tri-axis brass gyro-armature around a glowing amber cavity) with real XPBD rest-length contraction, analytical SDF vacuum-forming, optical contact-clarity, and propagating Mode-I seam ruptures',
-    'Hover or sweep (hold-drag to intensify) a warm infrared thermal cone across the crinkled sleeve to shrink and vacuum-form the translucent skin taut over every ridge and spoke; click any high-tension span (or Shift-click / double-click) to rupture and peel the elastic flaps open; drag empty space to orbit; double-click empty space or press Space to wrap a fresh cocoon around the next hidden sculptural core'
+    'Suspended 3-whorl cascading cocoon unfurling into 18 razor-thin hand-torn rice-paper and parchment petals with varied pulp opacity and frayed deckle whiskers around a golden stamen crown, 12 curl-gliding origami moths, and 280 backlit pollen motes',
+    'Sweep across the air or flower to swirl golden pollen motes, steer origami moths, and ripple petals in a wave; grab and pull any petal outward or inward to blossom or fold shut into the candled cocoon; click to stoke a buoyant moth & pollen burst; drag empty space to orbit 360°, or double-click / press Space to toggle closed and full bloom'
   ),
   createDay(
     21,

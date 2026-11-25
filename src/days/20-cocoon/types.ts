@@ -1,126 +1,83 @@
 import * as THREE from 'three/webgpu';
 
-export type CoreMaterialRole = 'brass' | 'basalt' | 'calcite' | 'verdigris' | 'amber';
-
-export interface SdfSpherePrimitive {
-  kind: 'sphere';
-  cx: number;
-  cy: number;
-  cz: number;
-  radius: number;
+export interface BloomPetalSpec {
+  id: number;
+  /** 0 = outer torn rice-paper sepals, 1 = middle sheer silk petals, 2 = inner warm parchment petals */
+  whorl: 0 | 1 | 2;
+  /** Phyllotactic azimuth around Y (rad) */
+  azimuth: number;
+  /** Total arc length along petal spine */
+  length: number;
+  /** Half-width at belly */
+  maxWidth: number;
+  /** Transverse concave spoon cupping depth */
+  cupDepth: number;
+  /** Radial attachment distance inside calyx receptacle */
+  baseRadius: number;
+  /** Tight vertical bud tilt when bloom = 0 (rad; slightly negative leans inward) */
+  closedTilt: number;
+  /** Poised upward-and-outward blooming tilt at bloom = 1 (rad) */
+  openTilt: number;
+  /** Staggered cascading bloom delay in [0, 0.42] */
+  openDelay: number;
+  /** Subtle outward tip curl along upper half of petal */
+  tipRecurve: number;
+  /** Per-petal paper density / opacity multiplier (sheer rice paper vs denser parchment) */
+  opacityBias: number;
+  /** Deterministic organic noise seed */
+  deckleSeed: number;
 }
 
-export interface SdfCapsulePrimitive {
-  kind: 'capsule';
-  ax: number;
-  ay: number;
-  az: number;
-  bx: number;
-  by: number;
-  bz: number;
-  radiusA: number;
-  radiusB: number;
+export interface OrigamiMothState {
+  id: number;
+  pos: THREE.Vector3;
+  vel: THREE.Vector3;
+  orbitRadius: number;
+  orbitHeight: number;
+  orbitPhase: number;
+  orbitSpeed: number;
+  heading: number;
+  pitch: number;
+  roll: number;
+  wingPhase: number;
+  wingSpeed: number;
+  /** 0 = tucked inside closed heart, 1 = flying aloft */
+  liftProgress: number;
+  scale: number;
+  /** Temporary upward buoyant boost timer (s) on click / burst */
+  burstTimer: number;
+  active: boolean;
 }
 
-export interface SdfTorusPrimitive {
-  kind: 'torus';
-  cx: number;
-  cy: number;
-  cz: number;
-  /** Orthonormal frame: local ring lies in (ux,uy,uz)-(vx,vy,vz) plane, axis along (nx,ny,nz) */
-  ux: number;
-  uy: number;
-  uz: number;
-  vx: number;
-  vy: number;
-  vz: number;
-  nx: number;
-  ny: number;
-  nz: number;
-  majorRadius: number;
-  minorRadius: number;
+export interface CocoonSimConfig {
+  /** Initial bloom opening (0 = sealed candled cocoon, 0.74 = poised rice-paper lotus bloom, 1 = full blossom) */
+  initialBloom: number;
+  /** Harmonic spring stiffness for bloom opening */
+  bloomStiffness: number;
+  /** Harmonic spring damping for bloom opening */
+  bloomDamping: number;
+  /** Number of curl-gliding origami moths */
+  mothCount: number;
+  /** Number of soft backlit curl-advected pollen/silk motes */
+  pollenCount: number;
+  /** Number of delicate curved stamens in the floral heart */
+  stamenCount: number;
 }
 
-export interface SdfOrientedBoxPrimitive {
-  kind: 'obox';
-  cx: number;
-  cy: number;
-  cz: number;
-  /** Orthonormal basis rows/axes for local X, Y, Z */
-  ux: number;
-  uy: number;
-  uz: number;
-  vx: number;
-  vy: number;
-  vz: number;
-  wx: number;
-  wy: number;
-  wz: number;
-  hx: number;
-  hy: number;
-  hz: number;
-  bevel: number;
-}
-
-export type CoreSdfPrimitive =
-  | SdfSpherePrimitive
-  | SdfCapsulePrimitive
-  | SdfTorusPrimitive
-  | SdfOrientedBoxPrimitive;
-
-export interface CoreAssemblyDescriptor {
-  index: number;
-  name: string;
-  primitives: readonly CoreSdfPrimitive[];
-  /** Contiguous flat packed SDF buffer (16 floats/primitive) for zero-alloc SIMD-friendly evaluation */
-  packedData: Float32Array;
-  /** Flat AABB per primitive (6 floats: minX,maxX,minY,maxY,minZ,maxZ) for exact early-out culling */
-  packedBounds: Float32Array;
-  /** Primitive kind codes: 0=sphere, 1=capsule, 2=torus, 3=obox */
-  packedKinds: Uint8Array;
-  primCount: number;
-  boundingRadius: number;
-}
-
-export interface BuiltCoreAssembly {
-  descriptor: CoreAssemblyDescriptor;
-  group: THREE.Group;
-  amberHeartMesh: THREE.Mesh;
-  dispose: () => void;
-}
-
-export interface CocoonPhysicsConfig {
-  /** Icosphere subdivision level (4 -> 2,562 vertices, 5,120 triangles) */
-  subdivisions: number;
-  /** Base loose cocoon radial envelope */
-  looseRadius: number;
-  /** Vertical elongation factor of the loose sleeve */
-  looseElongationY: number;
-  /** Maximum fraction of rest-length contraction at shrink = 1.0 */
-  maxShrinkRatio: number;
-  /** Minimum offset between membrane centerline and exact analytical core SDF */
-  skinClearance: number;
-  /** Substeps per animation frame */
-  substeps: number;
-  /** Constraint Gauss-Seidel relaxation iterations per substep */
-  constraintIterations: number;
-}
-
-export const DEFAULT_COCOON_CONFIG: CocoonPhysicsConfig = {
-  subdivisions: 4,
-  looseRadius: 1.46,
-  looseElongationY: 1.19,
-  maxShrinkRatio: 0.58,
-  skinClearance: 0.018,
-  substeps: 3,
-  constraintIterations: 3,
+export const DEFAULT_KOZO_CONFIG: CocoonSimConfig = {
+  initialBloom: 0.74,
+  bloomStiffness: 16.0,
+  bloomDamping: 6.4,
+  mothCount: 12,
+  pollenCount: 280,
+  stamenCount: 18,
 };
 
 export interface Day20TelemetryState {
-  meanShrink: number;
-  maxTension: number;
-  tearFraction: number;
-  coreIndex: number;
-  vertexCount: number;
-  activeTetherCount: number;
+  bloom: number;
+  targetBloom: number;
+  petalCount: number;
+  activeMothCount: number;
+  activePollenCount: number;
+  emberGlow: number;
 }
