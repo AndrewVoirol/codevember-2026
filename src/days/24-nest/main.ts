@@ -33,7 +33,7 @@ declare global {
 
 interface TierInstancedGroup {
   readonly tier: number;
-  readonly startRodId: number;
+  readonly rodIds: readonly number[];
   readonly count: number;
   readonly mesh: THREE.InstancedMesh;
   readonly geometry: THREE.BufferGeometry;
@@ -49,14 +49,14 @@ export async function bootDay24Nest(): Promise<SpecimenStage> {
   const dayEntry = getDayByNumber(24);
   const stage = await SpecimenStage.create({
     day: dayEntry,
-    cameraPosition: [0, 1.82, 3.42],
+    cameraPosition: [0, 1.92, 3.84],
     fov: 35,
     enableOrbit: true,
     enableShadows: true,
   });
 
   // Hero museum 3/4 framing centered on the suspended ring + woven timber dome + ovoid celadon eggs
-  stage.controls.target.set(0, 0.28, 0);
+  stage.controls.target.set(0, 0.15, 0);
   stage.controls.minDistance = 0.85;
   stage.controls.maxDistance = 7.8;
   stage.controls.minPolarAngle = 0.08;
@@ -174,8 +174,9 @@ export async function bootDay24Nest(): Promise<SpecimenStage> {
   nestGroup.add(plinthBrassInnerMesh);
 
   // ---------------------------------------------------------------------------
-  // 2. Five Per-Tier InstancedMesh Groups (56 Chamfered Flat-Ended Timber Dowels)
-  //    Every tier bakes ALL real same-tier + inter-tier crossing burnish stations
+  // 2. Per-Tier / Per-Symmetry InstancedMesh Groups (56 Chamfered Flat-Ended Dowels)
+  //    Every bucket bakes ALL real same-tier + inter-tier crossing burnish stations
+  //    (splits Tier-1's 16 rods cleanly into 2 x 8-rod even/odd buckets for 0-mismatch patina)
   // ---------------------------------------------------------------------------
   const tierGroups: TierInstancedGroup[] = [];
   const tierMeshes: THREE.InstancedMesh[] = [];
@@ -184,59 +185,84 @@ export async function bootDay24Nest(): Promise<SpecimenStage> {
   let rodCursor = 0;
   for (let t = 0; t < layout.tiers.length; t++) {
     const tierMeta = layout.tiers[t];
-    const firstRod = layout.rods[rodCursor];
-    const allCrossings = computeAllRodContactStations(firstRod, layout.rods);
-    const geom = buildDowelGeometry(
-      tierMeta.halfHeight,
-      tierMeta.radius,
-      firstRod.notchParams,
-      28,
-      allCrossings
-    );
+    const bucketList: Array<{ rodsInBucket: typeof layout.rods[number][]; stations: number[] }> = [];
+    const bucketBySig = new Map<string, number>();
 
-    const metaArray = new Float32Array(tierMeta.count * 4);
-    const quatArray = new Float32Array(tierMeta.count * 4);
     for (let i = 0; i < tierMeta.count; i++) {
-      const r = layout.rods[rodCursor + i];
-      metaArray[i * 4 + 0] = r.woodSpecies;
-      metaArray[i * 4 + 1] = r.grainSeed;
-      metaArray[i * 4 + 2] = r.id;
-      metaArray[i * 4 + 3] = 0.0;
-
-      quatArray[i * 4 + 0] = r.quat.x;
-      quatArray[i * 4 + 1] = r.quat.y;
-      quatArray[i * 4 + 2] = r.quat.z;
-      quatArray[i * 4 + 3] = r.quat.w;
+      const rod = layout.rods[rodCursor + i];
+      const stations = computeAllRodContactStations(rod, layout.rods);
+      const sig = stations.map((s) => s.toFixed(3)).join(',');
+      let bIdx = bucketBySig.get(sig);
+      if (bIdx === undefined) {
+        bIdx = bucketList.length;
+        bucketBySig.set(sig, bIdx);
+        bucketList.push({ rodsInBucket: [], stations });
+      }
+      bucketList[bIdx].rodsInBucket.push(rod);
     }
-    const metaAttr = new THREE.InstancedBufferAttribute(metaArray, 4);
-    metaAttr.setUsage(THREE.DynamicDrawUsage);
-    geom.setAttribute('aRodMeta', metaAttr);
 
-    const quatAttr = new THREE.InstancedBufferAttribute(quatArray, 4);
-    quatAttr.setUsage(THREE.DynamicDrawUsage);
-    geom.setAttribute('aRodQuat', quatAttr);
+    for (let bIdx = 0; bIdx < bucketList.length; bIdx++) {
+      const bucket = bucketList[bIdx];
+      const rodsInBucket = bucket.rodsInBucket;
+      const firstRod = rodsInBucket[0];
+      const geom = buildDowelGeometry(
+        tierMeta.halfHeight,
+        tierMeta.radius,
+        firstRod.notchParams,
+        28,
+        bucket.stations
+      );
 
-    const instMesh = new THREE.InstancedMesh(geom, mats.timberMat, tierMeta.count);
-    instMesh.name = `ReciprocalTimberTier${t}`;
-    instMesh.castShadow = true;
-    instMesh.receiveShadow = true;
-    instMesh.frustumCulled = false;
-    nestGroup.add(instMesh);
+      const count = rodsInBucket.length;
+      const metaArray = new Float32Array(count * 4);
+      const quatArray = new Float32Array(count * 4);
+      const rodIds: number[] = [];
+      for (let i = 0; i < count; i++) {
+        const r = rodsInBucket[i];
+        rodIds.push(r.id);
+        metaArray[i * 4 + 0] = r.woodSpecies;
+        metaArray[i * 4 + 1] = r.grainSeed;
+        metaArray[i * 4 + 2] = r.id;
+        metaArray[i * 4 + 3] = 0.0;
 
-    const group: TierInstancedGroup = {
-      tier: t,
-      startRodId: rodCursor,
-      count: tierMeta.count,
-      mesh: instMesh,
-      geometry: geom,
-      metaArray,
-      metaAttr,
-      quatArray,
-      quatAttr,
-    };
-    tierGroups.push(group);
-    tierMeshes.push(instMesh);
-    meshToTierGroup.set(instMesh, group);
+        quatArray[i * 4 + 0] = r.quat.x;
+        quatArray[i * 4 + 1] = r.quat.y;
+        quatArray[i * 4 + 2] = r.quat.z;
+        quatArray[i * 4 + 3] = r.quat.w;
+      }
+      const metaAttr = new THREE.InstancedBufferAttribute(metaArray, 4);
+      metaAttr.setUsage(THREE.DynamicDrawUsage);
+      geom.setAttribute('aRodMeta', metaAttr);
+
+      const quatAttr = new THREE.InstancedBufferAttribute(quatArray, 4);
+      quatAttr.setUsage(THREE.DynamicDrawUsage);
+      geom.setAttribute('aRodQuat', quatAttr);
+
+      const instMesh = new THREE.InstancedMesh(geom, mats.timberMat, count);
+      instMesh.name =
+        bucketList.length === 1
+          ? `ReciprocalTimberTier${t}`
+          : `ReciprocalTimberTier${t}_${bIdx}`;
+      instMesh.castShadow = true;
+      instMesh.receiveShadow = true;
+      instMesh.frustumCulled = false;
+      nestGroup.add(instMesh);
+
+      const group: TierInstancedGroup = {
+        tier: t,
+        rodIds,
+        count,
+        mesh: instMesh,
+        geometry: geom,
+        metaArray,
+        metaAttr,
+        quatArray,
+        quatAttr,
+      };
+      tierGroups.push(group);
+      tierMeshes.push(instMesh);
+      meshToTierGroup.set(instMesh, group);
+    }
     rodCursor += tierMeta.count;
   }
 
@@ -320,9 +346,9 @@ export async function bootDay24Nest(): Promise<SpecimenStage> {
       const grp = tierGroups[t];
       let metaDirty = false;
       for (let i = 0; i < grp.count; i++) {
-        const rodId = grp.startRodId + i;
+        const rodId = grp.rodIds[i];
         const rec = sim.rods[rodId];
-        if (rec.removed) {
+        if (rec.removed || rec.abyssCulled) {
           scratchPos.set(0, -100, 0);
           scratchQuat.identity();
           scratchMat4.compose(scratchPos, scratchQuat, scratchZeroScale);
@@ -359,9 +385,11 @@ export async function bootDay24Nest(): Promise<SpecimenStage> {
 
     for (let i = 0; i < sim.eggs.length; i++) {
       const eggRec = sim.eggs[i];
+      const mesh = eggMeshes[i];
+      mesh.visible = !eggRec.abyssCulled;
+      if (eggRec.abyssCulled) continue;
       const tr = eggRec.body.translation();
       const rq = eggRec.body.rotation();
-      const mesh = eggMeshes[i];
       mesh.position.set(tr.x, tr.y, tr.z);
       mesh.quaternion.set(rq.x, rq.y, rq.z, rq.w);
     }
@@ -375,7 +403,7 @@ export async function bootDay24Nest(): Promise<SpecimenStage> {
       const grp = tierGroups[t];
       let metaDirty = false;
       for (let i = 0; i < grp.count; i++) {
-        const rodId = grp.startRodId + i;
+        const rodId = grp.rodIds[i];
         const pOff = rodId * 3;
         const qOff = rodId * 4;
         scratchPos.set(
@@ -410,6 +438,7 @@ export async function bootDay24Nest(): Promise<SpecimenStage> {
       const pOff = i * 3;
       const qOff = i * 4;
       const mesh = eggMeshes[i];
+      mesh.visible = true;
       mesh.position.set(
         reweave.eggCurrentPos[pOff + 0],
         reweave.eggCurrentPos[pOff + 1],
@@ -526,9 +555,10 @@ export async function bootDay24Nest(): Promise<SpecimenStage> {
         if (h.instanceId === undefined) continue;
         const grp = meshToTierGroup.get(h.object);
         if (!grp) continue;
-        const rodId = grp.startRodId + h.instanceId;
+        const rodId = grp.rodIds[h.instanceId];
+        if (rodId === undefined) continue;
         const rec = sim.rods[rodId];
-        if (!rec || rec.removed) continue;
+        if (!rec || rec.removed || rec.abyssCulled) continue;
         hitWorldVec.copy(h.point);
         return { rodId, point: hitWorldVec };
       }
@@ -806,7 +836,7 @@ export async function bootDay24Nest(): Promise<SpecimenStage> {
     // Detect tumbling dowel impacts on the honed limestone ring (r ∈ [1.10, 1.38]) -> fine chalk/wood puff
     for (let i = 0; i < sim.rods.length; i++) {
       const rec = sim.rods[i];
-      if (rec.removed) {
+      if (rec.removed || rec.abyssCulled) {
         prevRodVelY[i] = 0;
         continue;
       }

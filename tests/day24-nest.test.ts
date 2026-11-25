@@ -366,12 +366,12 @@ describe('Day 24 - Nest: Reciprocal-Frame Timber Dome (Geometry, Equilibrium & C
       sim3.dispose();
     }
 
-    // 2. Remove 4 load-bearing Tier-0 rods directly at boot
+    // 2. Remove 4 load-bearing Tier-0 rods directly at boot and verify abyss deactivation
     const sim4 = new ReciprocalNestSim(RAPIER, sharedLayout, {
       removedRodIds: [0, 1, 2, 3],
     });
     try {
-      for (let f = 0; f < 180; f++) sim4.stepFixedFrame();
+      for (let f = 0; f < 240; f++) sim4.stepFixedFrame();
 
       const state4 = sim4.getState();
       const eggDrops4 = sim4.getEggDrops();
@@ -380,6 +380,27 @@ describe('Day 24 - Nest: Reciprocal-Frame Timber Dome (Geometry, Equilibrium & C
       expect(sim4.getMaxRodDrop()).toBeGreaterThan(5.0);
       for (const drop of eggDrops4) {
         expect(drop).toBeGreaterThan(5.0);
+      }
+
+      const culledRods = sim4.rods.filter((r) => !r.removed && r.abyssCulled);
+      expect(culledRods.length).toBeGreaterThanOrEqual(8);
+      for (const r of culledRods) {
+        expect(r.body.isEnabled()).toBe(false);
+      }
+      for (const egg of sim4.eggs) {
+        expect(egg.abyssCulled).toBe(true);
+        expect(egg.body.isEnabled()).toBe(false);
+      }
+
+      // Reset cleanly re-enables all 56 rods and 3 eggs
+      sim4.reset();
+      for (const r of sim4.rods) {
+        expect(r.abyssCulled).toBe(false);
+        expect(r.body.isEnabled()).toBe(true);
+      }
+      for (const egg of sim4.eggs) {
+        expect(egg.abyssCulled).toBe(false);
+        expect(egg.body.isEnabled()).toBe(true);
       }
     } finally {
       sim4.dispose();
@@ -542,20 +563,45 @@ describe('Day 24 - Nest: Reciprocal-Frame Timber Dome (Geometry, Equilibrium & C
 
   it('Multi-tier contact burnish stations, load-aware pin factor, and zero-allocation dust mote pool', () => {
     // 1. Every tier discovers real physical crossing stations and builds outward-wound geometry
+    //    and Tier-1 splits cleanly into 2 symmetry buckets (even vs odd) with zero station mismatch
     let cursor = 0;
     for (const tierMeta of sharedLayout.tiers) {
-      const sampleRod = sharedLayout.rods[cursor];
-      const stations = computeAllRodContactStations(sampleRod, sharedLayout.rods);
-      expect(stations.length).toBeGreaterThanOrEqual(2);
-      const geom = buildDowelGeometry(
-        tierMeta.halfHeight,
-        tierMeta.radius,
-        sampleRod.notchParams,
-        28,
-        stations
-      );
-      expect(computeSignedVolume(geom)).toBeGreaterThan(0);
-      geom.dispose();
+      const bucketMap = new Map<string, number[]>();
+      for (let i = 0; i < tierMeta.count; i++) {
+        const rod = sharedLayout.rods[cursor + i];
+        const stations = computeAllRodContactStations(rod, sharedLayout.rods);
+        expect(stations.length).toBeGreaterThanOrEqual(2);
+        const sig = stations.map((s) => s.toFixed(3)).join(',');
+        const list = bucketMap.get(sig) ?? [];
+        list.push(rod.id);
+        bucketMap.set(sig, list);
+      }
+
+      if (tierMeta.tier === 1) {
+        expect(bucketMap.size).toBe(2);
+        const sizes = Array.from(bucketMap.values()).map((arr) => arr.length);
+        expect(sizes).toEqual([8, 8]);
+      } else {
+        expect(bucketMap.size).toBe(1);
+      }
+
+      for (const ids of bucketMap.values()) {
+        const sampleRod = sharedLayout.rods[ids[0]];
+        const stations = computeAllRodContactStations(sampleRod, sharedLayout.rods);
+        for (const id of ids) {
+          const rodStations = computeAllRodContactStations(sharedLayout.rods[id], sharedLayout.rods);
+          expect(rodStations.map((s) => s.toFixed(3))).toEqual(stations.map((s) => s.toFixed(3)));
+        }
+        const geom = buildDowelGeometry(
+          tierMeta.halfHeight,
+          tierMeta.radius,
+          sampleRod.notchParams,
+          28,
+          stations
+        );
+        expect(computeSignedVolume(geom)).toBeGreaterThan(0);
+        geom.dispose();
+      }
       cursor += tierMeta.count;
     }
 
@@ -563,12 +609,23 @@ describe('Day 24 - Nest: Reciprocal-Frame Timber Dome (Geometry, Equilibrium & C
     expect(computeSignedVolume(dustGeom)).toBeGreaterThan(0);
     dustGeom.dispose();
 
-    // 2. Load-bearing Tier-0 rod reports strictly higher pin factor than loose Tier-4 crown rod
+    // 2. Live contact-driven pin factor distinguishes loaded Tier-0/Tier-1 odd from unloaded Tier-1 even/Tier-4,
+    //    and drops sharply when upper tiers are removed
     const sim = new ReciprocalNestSim(RAPIER, sharedLayout);
     try {
+      for (let f = 0; f < 60; f++) sim.stepFixedFrame();
+      const pin0 = sim.estimateRodPinFactor(0);
+      const pin16 = sim.estimateRodPinFactor(16); // Tier-1 even (no Tier-2 cross above)
+      const pin17 = sim.estimateRodPinFactor(17); // Tier-1 odd (loaded directly by Tier-2)
+      const pin50 = sim.estimateRodPinFactor(50); // Tier-4 crown
+      expect(pin0).toBeGreaterThan(0.75);
+      expect(pin50).toBeLessThan(0.25);
+      expect(pin17).toBeGreaterThan(pin16);
+
+      const upperIds = sharedLayout.rods.filter((r) => r.tier > 0).map((r) => r.id);
+      sim.removeRods(upperIds);
       for (let f = 0; f < 30; f++) sim.stepFixedFrame();
-      expect(sim.estimateRodPinFactor(0)).toBeGreaterThan(0.75);
-      expect(sim.estimateRodPinFactor(50)).toBeLessThan(0.25);
+      expect(sim.estimateRodPinFactor(0)).toBeLessThan(0.25);
     } finally {
       sim.dispose();
     }

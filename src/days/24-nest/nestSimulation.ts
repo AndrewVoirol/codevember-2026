@@ -56,6 +56,7 @@ export interface RodBodyRecord {
   readonly body: RAPIER_NS.RigidBody;
   readonly collider: RAPIER_NS.Collider;
   removed: boolean;
+  abyssCulled: boolean;
   fallen: boolean;
   drift: number;
   drop: number;
@@ -65,6 +66,7 @@ export interface EggBodyRecord {
   readonly spec: CeladonEggSpec;
   readonly body: RAPIER_NS.RigidBody;
   readonly collider: RAPIER_NS.Collider;
+  abyssCulled: boolean;
   drop: number;
 }
 
@@ -75,6 +77,7 @@ const GRAVITY_Y = -9.81;
 const FALLEN_DROP_THRESHOLD = 0.16;
 const FALLEN_DRIFT_THRESHOLD = 0.26;
 const FALLEN_Y_FLOOR = -0.18;
+const ABYSS_SLEEP_Y = -8.0;
 const COLLAPSED_ROD_THRESHOLD = 6;
 
 const DEFAULT_SIM_OPTIONS: Required<Omit<NestSimOptions, 'removedRodIds'>> = {
@@ -738,6 +741,10 @@ export class ReciprocalNestSim {
   private readonly scratchPtVel: [number, number, number] = [0, 0, 0];
   private readonly scratchImpulse: { x: number; y: number; z: number } = { x: 0, y: 0, z: 0 };
   private readonly scratchPoint: { x: number; y: number; z: number } = { x: 0, y: 0, z: 0 };
+  private readonly scratchZeroVec: { x: number; y: number; z: number } = { x: 0, y: 0, z: 0 };
+
+  private readonly colliderHandleToRodId = new Map<number, number>();
+  private readonly eggColliderHandles = new Set<number>();
 
   // Cached telemetry updated after every step
   private intactRodCount = 0;
@@ -824,6 +831,8 @@ export class ReciprocalNestSim {
 
     // 2. Dynamic Chamfered RoundCylinder Rigid Bodies for all 56 Timber Dowels
     //    Matches `buildDowelGeometry` flat chamfered end-grain profile 1:1 (0.0 mm gap/clip)
+    this.colliderHandleToRodId.clear();
+    this.eggColliderHandles.clear();
     const removedSet = new Set(removedRodIds);
     const rods: RodBodyRecord[] = [];
     for (let i = 0; i < this.layout.rods.length; i++) {
@@ -854,12 +863,14 @@ export class ReciprocalNestSim {
         .setFrictionCombineRule(R.CoefficientCombineRule.Average)
         .setRestitution(0.02);
       const collider = world.createCollider(colliderDesc, body);
+      this.colliderHandleToRodId.set(collider.handle, spec.id);
 
       rods.push({
         spec,
         body,
         collider,
         removed: isRemoved,
+        abyssCulled: false,
         fallen: false,
         drift: 0,
         drop: 0,
@@ -885,8 +896,9 @@ export class ReciprocalNestSim {
         .setFriction(o.eggFriction)
         .setRestitution(0.02);
       const collider = world.createCollider(colliderDesc, body);
+      this.eggColliderHandles.add(collider.handle);
 
-      eggs.push({ spec, body, collider, drop: 0 });
+      eggs.push({ spec, body, collider, abyssCulled: false, drop: 0 });
     }
 
     this.world = world;
@@ -900,15 +912,57 @@ export class ReciprocalNestSim {
 
   /**
    * Estimates how tightly pinned/load-bearing rod `rodId` currently is in [0..1]
-   * based on live tier load and intact upper-tier support (0 = loose/free, 1 = heavily pinned).
+   * by querying live Rapier contact manifolds and normal impulses (0 = free/unloaded,
+   * 1 = heavily pinned beneath upper tiers). Zero per-call allocations.
    */
   estimateRodPinFactor(rodId: number): number {
     const rec = this.rods[rodId];
-    if (!rec || rec.removed || rec.fallen) return 0;
-    const tierWeight = Math.max(0, 1.0 - rec.spec.tier / 4.2);
-    const intactRatio = this.intactRodCount / Math.max(1, this.rods.length);
-    const driftFree = Math.max(0, 1.0 - rec.drift / 0.14);
-    return Math.max(0, Math.min(1, tierWeight * intactRatio * driftFree));
+    if (!rec || rec.removed || rec.fallen || rec.abyssCulled) return 0;
+
+    let totalContacts = 0;
+    let upperCount = 0;
+    let lowerCount = 0;
+    let plinthCount = 0;
+    let totalImpulse = 0;
+
+    this.world.contactPairsWith(rec.collider, (other) => {
+      let hasActive = false;
+      this.world.contactPair(rec.collider, other, (manifold) => {
+        const np = manifold.numContacts();
+        if (np > 0) hasActive = true;
+        for (let k = 0; k < np; k++) {
+          totalImpulse += Math.abs(manifold.contactImpulse(k));
+        }
+      });
+      if (!hasActive) return;
+
+      totalContacts++;
+      const otherRodId = this.colliderHandleToRodId.get(other.handle);
+      if (otherRodId !== undefined) {
+        const otherTier = this.rods[otherRodId].spec.tier;
+        if (otherTier > rec.spec.tier) upperCount++;
+        else if (otherTier < rec.spec.tier) lowerCount++;
+      } else if (!this.eggColliderHandles.has(other.handle)) {
+        plinthCount++;
+      }
+    });
+
+    if (totalContacts === 0) return 0;
+
+    const hasLowerSupport = lowerCount > 0 || plinthCount > 0;
+    const upperLoadScore =
+      upperCount > 0 ? Math.min(1, upperCount * 0.75 + (hasLowerSupport ? 0.25 : 0)) : 0;
+    const weightImpulse = Math.max(1e-6, rec.body.mass() * 9.81 * this.fixedDt);
+    const excessLoad = Math.max(0, totalImpulse / weightImpulse - 1.2);
+    const forceWeight = upperCount > 0 ? 1.0 : 0.22;
+    const forceScore = Math.min(1, excessLoad / 3.5) * forceWeight;
+    const tierClampBonus = plinthCount > 0 && upperCount > 0 ? 0.15 : 0;
+    const driftFactor = Math.max(0, 1.0 - rec.drift / 0.14);
+
+    return Math.max(
+      0,
+      Math.min(1, (upperLoadScore * 0.62 + forceScore * 0.35 + tierClampBonus) * driftFactor)
+    );
   }
 
   /**
@@ -920,7 +974,7 @@ export class ReciprocalNestSim {
     targetWorld: readonly [number, number, number]
   ): boolean {
     const rec = this.rods[rodId];
-    if (!rec || rec.removed) return false;
+    if (!rec || rec.removed || rec.abyssCulled) return false;
     this.activeGrabRodId = rodId;
     this.grabLocalPt[0] = localPt[0];
     this.grabLocalPt[1] = localPt[1];
@@ -953,7 +1007,7 @@ export class ReciprocalNestSim {
     strength = 0.0085
   ): boolean {
     const rec = this.rods[rodId];
-    if (!rec || rec.removed) return false;
+    if (!rec || rec.removed || rec.abyssCulled) return false;
     const len = Math.hypot(dir[0], dir[1], dir[2]) || 1;
     const mass = rec.body.mass();
     const scale = (strength * Math.max(0.001, mass)) / 0.003;
@@ -1171,12 +1225,25 @@ export class ReciprocalNestSim {
       rec.fallen = isFallen;
       if (isFallen) fallen++;
       else intact++;
+
+      if (!rec.abyssCulled && this.activeGrabRodId !== rec.spec.id && tr.y < ABYSS_SLEEP_Y) {
+        rec.body.setLinvel(this.scratchZeroVec, false);
+        rec.body.setAngvel(this.scratchZeroVec, false);
+        rec.body.setEnabled(false);
+        rec.abyssCulled = true;
+      }
     }
 
     for (let i = 0; i < this.eggs.length; i++) {
       const egg = this.eggs[i];
       const tr = egg.body.translation();
       egg.drop = egg.spec.pos[1] - tr.y;
+      if (!egg.abyssCulled && tr.y < ABYSS_SLEEP_Y) {
+        egg.body.setLinvel(this.scratchZeroVec, false);
+        egg.body.setAngvel(this.scratchZeroVec, false);
+        egg.body.setEnabled(false);
+        egg.abyssCulled = true;
+      }
     }
 
     this.intactRodCount = intact;

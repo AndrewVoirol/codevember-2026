@@ -8,32 +8,32 @@
     "drawerCount": 30
   },
   "telemetry": {
-    "frameCount": 359,
+    "frameCount": 349,
     "avgFrameMs": 8.33,
-    "p95FrameMs": 9.9,
+    "p95FrameMs": 9.4,
     "sceneState": {
       "day": 24,
       "slug": "24-nest",
       "headerLabel": "Day 24 - Nest",
-      "frameCount": 359,
+      "frameCount": 349,
       "cameraPos": [
         0,
-        1.8199999999999998,
-        3.42
+        1.9199999999999997,
+        3.84
       ],
       "pointerWorld": [
-        0.2894768093842843,
-        0.0244147140271036,
-        -0.010993760117467666
+        0.3213315835702476,
+        -0.10667128015787708,
+        0.04916879319777179
       ],
       "pointerSpeed": 0,
-      "pointerDwellSec": 1.9312,
-      "pointerImpulse": 0.0007
+      "pointerDwellSec": 2.3499,
+      "pointerImpulse": 0.0009
     }
   },
   "metrics": {
-    "specimenCoverageRatio": 0.283,
-    "interactionMad": 2.36
+    "specimenCoverageRatio": 0.2201,
+    "interactionMad": 3.93
   },
   "gpuErrors": [],
   "gateFailures": [],
