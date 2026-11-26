@@ -95,10 +95,16 @@ export interface DustMote3D {
   alpha: number;
 }
 
-const GRAVITY_ACCEL = 0.29;
-const MAX_FALL_SPEED = 3.35;
-const RECOMPACT_TICKS = 115;
+const GRAVITY_ACCEL = 0.34;
+const MAX_FALL_SPEED = 4.85;
+/** Deep confined consolidation only (>= 7s still AND >= 18 cells overburden): surface dunes stay permanently loose! */
+const RECOMPACT_TICKS = 420;
+const RECOMPACT_MIN_DEPTH = 18;
 const SKY_MIN_OPEN_SPAN = 22;
+/** Critical unbuttressed vertical packed-sand wall height before active Rankine wedge shear */
+const CRITICAL_CLIFF_HEIGHT = 17;
+/** Dry surface-horizon cut depth that ravels sharp 90-deg lips into natural ~46-deg funnels */
+const DRY_RIM_FUNNEL_DROP = 7;
 
 /** Deterministic Mulberry32 PRNG (zero allocations) */
 class SeededRng {
@@ -142,6 +148,8 @@ export class SandSimulation implements ColonyGridHost {
   readonly faultDelay = new Uint8Array(GRID_CELLS);
   readonly velX = new Float32Array(GRID_CELLS);
   readonly velY = new Float32Array(GRID_CELLS);
+  readonly fracX = new Float32Array(GRID_CELLS);
+  readonly fracY = new Float32Array(GRID_CELLS);
   readonly restTicks = new Uint16Array(GRID_CELLS);
   readonly movedStamp = new Uint32Array(GRID_CELLS);
 
@@ -163,11 +171,14 @@ export class SandSimulation implements ColonyGridHost {
   /** RGBA8 Linear: R = 3x3 smoothed cohesive solid mask, G = cavity recess depth, B = solid wall depth, A = packed arch stress */
   readonly fieldTexData = new Uint8Array(GRID_CELLS * 4);
 
-  // Pre-allocated scratch buffers for zero-GC arch/distance passes
+  // Pre-allocated scratch buffers for zero-GC arch/distance/kinematic passes
   private readonly rowOpenSpan = new Int16Array(GRID_W);
+  private readonly colHeight = new Int16Array(GRID_W);
   private readonly smoothHorizon = new Float32Array(GRID_W);
   private readonly skyFloorY = new Int16Array(GRID_W);
   private readonly collapseCooldown = new Uint16Array(GRID_W);
+  private readonly startCellType = new Uint8Array(GRID_CELLS);
+  private readonly bedSupportMask = new Uint8Array(GRID_CELLS);
   private readonly rawCohesiveMask = new Uint8Array(GRID_CELLS);
   private readonly distBufA = new Uint8Array(GRID_CELLS);
   private readonly distBufB = new Uint8Array(GRID_CELLS);
@@ -310,10 +321,13 @@ export class SandSimulation implements ColonyGridHost {
     this.faultDelay.fill(0);
     this.velX.fill(0);
     this.velY.fill(0);
+    this.fracX.fill(0);
+    this.fracY.fill(0);
     this.restTicks.fill(0);
     this.movedStamp.fill(0);
     this.stressField.fill(0);
     this.collapseCooldown.fill(0);
+    this.bedSupportMask.fill(0);
     this.pebbles.length = 0;
 
     for (let i = 0; i < MAX_3D_GRAINS; i++) this.grains3D[i].active = false;
@@ -579,11 +593,27 @@ export class SandSimulation implements ColonyGridHost {
     this.carveOvalChamber(mouthX + 46, mouthY - 62, 7.8, 5.8); // Basalt-lintel brood/gathering chamber
     this.carveOvalChamber(mouthX - 48, mouthY - 70, 7.4, 5.5); // Left granary chamber
 
+    // 4b. Gently bevel the starter entrance funnel collar (~48 deg) so the ant nest has a natural
+    //     weathered throat and deposited crater-rim grains never roll back down the shaft!
+    for (let dy = 0; dy <= 7; dy++) {
+      const y = mouthY - 5 + dy;
+      if (y < 20 || y >= GRID_H - 2) continue;
+      const halfFlare = 5 + Math.ceil(dy * 0.85);
+      for (let x = Math.max(4, mouthX - halfFlare); x <= Math.min(GRID_W - 5, mouthX + 1 + halfFlare); x++) {
+        const idx = y * GRID_W + x;
+        if (this.cellType[idx] === CELL_PACKED_SAND || this.cellType[idx] === CELL_LOOSE_SAND) {
+          this.cellType[idx] = CELL_EMPTY;
+          this.bondHealth[idx] = 0;
+          this.excavatedCells++;
+        }
+      }
+    }
+
     // 5. Deposit a sculpted layered volcanic-cone crater mound of excavated Sienna & Ochre tailings!
-    for (let k = 0; k < 210; k++) {
+    for (let k = 0; k < 240; k++) {
       const side = k % 2 === 0 ? -1 : 1;
-      // Triangular distribution peaks right beside the shaft rim (dist 6..18)
-      const dist = 6 + Math.floor((this.rng.next() + this.rng.next()) * 8.5);
+      // Triangular distribution peaks cleanly on the outer crater rims (dist 11..25)
+      const dist = 11 + Math.floor((this.rng.next() + this.rng.next()) * 8.5);
       const tx = Math.max(5, Math.min(GRID_W - 6, mouthX + side * dist));
       let ty = GRID_H - 3;
       while (ty > 4 && this.cellType[(ty - 1) * GRID_W + tx] === CELL_EMPTY) {
@@ -592,21 +622,23 @@ export class SandSimulation implements ColonyGridHost {
       if (ty < GRID_H - 4 && this.cellType[ty * GRID_W + tx] === CELL_EMPTY) {
         const idx = ty * GRID_W + tx;
         this.cellType[idx] = CELL_LOOSE_SAND;
-        // Layered alternating Sienna, Ochre, and occasional Hematite excavated from below!
-        const r = this.rng.next();
-        this.pigmentId[idx] = r < 0.52 ? 3 : r < 0.86 ? 2 : 5;
+        // Coherent stratified deposit bands (Ochre base -> Burnt Sienna crest -> Hematite accents)
+        const layerT = k / 240;
+        this.pigmentId[idx] = layerT < 0.36 ? 2 : layerT < 0.84 ? 3 : 5;
         this.grainShade[idx] = Math.max(
           36,
-          Math.min(232, Math.round(122 + (this.rng.next() - 0.5) * 76))
+          Math.min(232, Math.round(122 + (this.rng.next() - 0.5) * 68))
         );
         this.bondHealth[idx] = 0;
-        this.velX[idx] = 0;
-        this.velY[idx] = 0;
+        this.velX[idx] = side * 0.22;
+        this.velY[idx] = 0.18;
+        this.fracX[idx] = 0;
+        this.fracY[idx] = 0;
       }
     }
 
     // Settle starter crater mound gently to natural repose angle
-    for (let s = 0; s < 26; s++) {
+    for (let s = 0; s < 36; s++) {
       this.stepLooseSandGravity();
     }
   }
@@ -710,16 +742,18 @@ export class SandSimulation implements ColonyGridHost {
           this.faultDelay[idx] = 0;
           this.velX[idx] = 0;
           this.velY[idx] = 0;
+          this.fracX[idx] = 0;
+          this.fracY[idx] = 0;
           this.restTicks[idx] = 0;
           removed++;
 
-          // Emit a handful of tactile 3D sparkling dislodged sand chips when user actively carves
-          if (scatterLooseRim && this.rng.next() < 0.045) {
+          // Emit crisp 3D tumbling mineral grains across the glass slice when actively carving!
+          if (scatterLooseRim && this.rng.next() < 0.18) {
             this.spawnExcavatedGrain3D(
               x,
               y,
-              (this.rng.next() - 0.5) * 0.9,
-              -0.1 - this.rng.next() * 0.5,
+              (this.rng.next() - 0.5) * 1.15,
+              -0.18 - this.rng.next() * 0.72,
               pig,
               shd
             );
@@ -727,15 +761,31 @@ export class SandSimulation implements ColonyGridHost {
         } else if (
           scatterLooseRim &&
           dist2 <= rimR2 &&
-          ct === CELL_PACKED_SAND &&
-          ddy > radius * 0.35
+          ct === CELL_PACKED_SAND
         ) {
-          // Organic rim raveling: loosen a subtle veil of ceiling & shoulder grains for delightful live trickle!
-          if (this.rng.next() < 0.13) {
+          // Organic rim & steep-shoulder raveling:
+          // - Dry upper dune horizon (`depth <= 16`) loosens generously around both sides & ceiling so cuts funnel!
+          // - Deep moist burrows loosen subtle ceiling & steep shoulder grains (`ddy > -radius * 0.25`)
+          const colTop = this.topSolidY[x] || Math.round(GRID_H * SURFACE_FRAC);
+          const isDryUpperDune = colTop - y <= 16;
+          const ravelChance = isDryUpperDune
+            ? ddy > -radius * 0.35
+              ? 0.42
+              : 0.14
+            : ddy > radius * 0.2
+              ? 0.22
+              : ddy > -radius * 0.15 && Math.abs(ddx) > radius * 0.65
+                ? 0.09
+                : 0;
+          if (ravelChance > 0 && this.rng.next() < ravelChance) {
             this.cellType[idx] = CELL_LOOSE_SAND;
             this.bondHealth[idx] = 0;
-            this.velX[idx] = (this.rng.next() - 0.5) * 0.35;
-            this.velY[idx] = 0.25 + this.rng.next() * 0.2;
+            const inwardSign = ddx > 0 ? -1 : 1;
+            this.velX[idx] = inwardSign * (0.18 + this.rng.next() * 0.32);
+            this.velY[idx] = 0.22 + this.rng.next() * 0.34;
+            this.fracX[idx] = this.rng.next() * 0.5;
+            this.fracY[idx] = this.rng.next() * 0.7;
+            this.restTicks[idx] = 0;
           }
         }
       }
@@ -804,36 +854,39 @@ export class SandSimulation implements ColonyGridHost {
 
     let spawned = 0;
     for (let k = 0; k < grainBudget; k++) {
-      // Focused triangular/hourglass nozzle dispersion (not a scattered rectangular rain box!)
-      const ox = Math.round(((this.rng.next() + this.rng.next()) - 1.0) * 3.1);
-      const oy = Math.round((this.rng.next() - 0.5) * 2.4);
+      // Cohesive hourglass-nozzle stream core with natural aerodynamic dispersion
+      const ox = Math.round(((this.rng.next() + this.rng.next()) - 1.0) * 2.6);
+      const oy = Math.round((this.rng.next() - 0.5) * 3.2);
       const x = Math.max(3, Math.min(GRID_W - 4, cx + ox));
       const y = Math.max(4, Math.min(GRID_H - 2, cy + oy));
       const idx = y * GRID_W + x;
       if (this.cellType[idx] === CELL_EMPTY) {
         const pig =
-          this.rng.next() < 0.14
+          this.rng.next() < 0.08
             ? pourPalette[(Math.floor(this.pourPigmentPhase) + 1) % pourPalette.length]
             : basePigment;
         const shd = Math.max(
           28,
-          Math.min(238, Math.round(128 + (this.rng.next() - 0.5) * 96))
+          Math.min(238, Math.round(128 + (this.rng.next() - 0.5) * 88))
         );
         this.cellType[idx] = CELL_LOOSE_SAND;
         this.pigmentId[idx] = pig;
         this.grainShade[idx] = shd;
         this.bondHealth[idx] = 0;
         this.faultDelay[idx] = 0;
-        const vx = (this.rng.next() - 0.5) * 0.42;
-        const vy = 0.52 + this.rng.next() * 0.48;
+        const vx = ox * 0.055 + (this.rng.next() - 0.5) * 0.26;
+        const vy = 0.72 + this.rng.next() * 0.68;
         this.velX[idx] = vx;
         this.velY[idx] = vy;
+        // Staggered sub-cell phase eliminates scanline banding in poured streams!
+        this.fracX[idx] = (this.rng.next() - 0.5) * 0.8;
+        this.fracY[idx] = this.rng.next() * 0.92;
         this.restTicks[idx] = 0;
         spawned++;
 
-        // Pair poured stream with glistening 3D tumbling granules inside the glass gap
-        if (this.rng.next() < 0.45) {
-          this.spawnExcavatedGrain3D(x, y, vx * 0.7, -vy * 0.75, pig, shd);
+        // Dense 1:1-feel 3D tumbling mineral stream inside the glass slice cavity!
+        if (this.rng.next() < 0.82) {
+          this.spawnExcavatedGrain3D(x, y, vx, -vy, pig, shd);
         }
       }
     }
@@ -916,21 +969,22 @@ export class SandSimulation implements ColonyGridHost {
     const g = this.grains3D[this.grain3DCursor];
     this.grain3DCursor = (this.grain3DCursor + 1) % MAX_3D_GRAINS;
     g.active = true;
-    g.x = gx + (this.rng.next() - 0.5) * 0.9;
-    g.y = gy + (this.rng.next() - 0.5) * 0.9;
-    g.z = (this.rng.next() - 0.5) * 1.48; // Distributed nicely across front-to-back glass thickness!
+    g.x = gx + (this.rng.next() - 0.5) * 0.78;
+    g.y = gy + (this.rng.next() - 0.5) * 0.78;
+    g.z = (this.rng.next() - 0.5) * 1.64; // Full front-to-back glass cavity distribution
     g.vx = vx;
     g.vy = vy;
-    g.vz = (this.rng.next() - 0.5) * 0.035;
+    g.vz = (this.rng.next() - 0.5) * 0.045;
     g.rotX = this.rng.next() * Math.PI * 2;
     g.rotY = this.rng.next() * Math.PI * 2;
     g.rotZ = this.rng.next() * Math.PI * 2;
-    g.vRot = (this.rng.next() < 0.5 ? -1 : 1) * (0.14 + this.rng.next() * 0.28);
-    g.scale = 0.72 + this.rng.next() * 0.65;
+    g.vRot = (this.rng.next() < 0.5 ? -1 : 1) * (0.16 + this.rng.next() * 0.34);
+    g.scale = 0.68 + this.rng.next() * 0.62;
     g.pigmentId = pigmentId;
     g.shade = shade;
     g.age = 0;
-    g.life = 28 + Math.floor(this.rng.next() * 34);
+    // Long safety ceiling so zero grains ever blink out mid-air; grains retire strictly on bed settle!
+    g.life = 220;
   }
 
   /** Spawns a delicate, subtle warm mineral dust wisp inside a collapsing cavity (zero GC). */
@@ -945,7 +999,7 @@ export class SandSimulation implements ColonyGridHost {
     m.vy = 0.04 + this.rng.next() * 0.1;
     m.size = 0.42 + this.rng.next() * 0.48;
     m.age = 0;
-    m.life = 32 + Math.floor(this.rng.next() * 24);
+    m.life = 36 + Math.floor(this.rng.next() * 28);
     m.pigmentId = pigmentId;
     m.alpha = Math.min(0.18, alpha);
   }
@@ -963,14 +1017,16 @@ export class SandSimulation implements ColonyGridHost {
         continue;
       }
 
-      g.vy = Math.max(-3.2, g.vy - 0.16);
-      g.vx *= 0.97;
+      // Exact gravitational parity with the 2D granular solver (g.vy < 0 = downward in grid rows/tick)
+      const massMul = 0.91 + (g.shade * (0.18 / 255));
+      g.vy = Math.max(-MAX_FALL_SPEED * massMul, g.vy - GRAVITY_ACCEL * massMul);
+      g.vx *= 0.985;
       const nx = g.x + g.vx;
       const ny = g.y + g.vy;
       g.z += g.vz;
-      if (g.z > 0.82 || g.z < -0.82) {
-        g.z = Math.max(-0.82, Math.min(0.82, g.z));
-        g.vz *= -0.45;
+      if (g.z > 0.86 || g.z < -0.86) {
+        g.z = Math.max(-0.86, Math.min(0.86, g.z));
+        g.vz *= -0.42;
       }
 
       const ix = Math.round(nx);
@@ -980,27 +1036,64 @@ export class SandSimulation implements ColonyGridHost {
         continue;
       }
 
-      const cell = ct[iy * GRID_W + ix];
-      // Collide only against static solid surfaces (packed sand, pebbles, or resting loose piles),
-      // NEVER killing airborne granules against adjacent falling grains traveling in the same stream!
+      const cellIdx = iy * GRID_W + ix;
+      const cell = ct[cellIdx];
+      // Collide against static solid surfaces or slow/settled sand slopes (never kill mid-stream!)
       const hitSolid =
         cell === CELL_PACKED_SAND ||
         cell === CELL_PEBBLE ||
-        (cell === CELL_LOOSE_SAND && this.velY[iy * GRID_W + ix] < 0.25);
+        (cell === CELL_LOOSE_SAND && this.velY[cellIdx] < 0.45);
+
       if (hitSolid) {
-        // Real lively pebble or slope bounce!
-        if (cell === CELL_PEBBLE && Math.abs(g.vy) > 0.65 && g.age < g.life - 8) {
-          g.vy = Math.abs(g.vy) * 0.36;
-          g.vx += (g.vx >= 0 ? 1 : -1) * (0.35 + this.rng.next() * 0.45);
-          g.vRot *= -1.1;
-        } else if (Math.abs(g.vy) > 1.1 && g.age < g.life - 10) {
-          // Tiny energetic sand-splash rebound on fast impact
-          g.vy = Math.abs(g.vy) * 0.22;
-          g.vx += (this.rng.next() - 0.5) * 0.8;
-          g.age += 6;
+        const impactSpeed = Math.hypot(g.vx, g.vy);
+        if (cell === CELL_PEBBLE && impactSpeed > 0.42) {
+          // Crisp lively river-stone ricochet & flank roll!
+          const curX = Math.round(g.x);
+          const pebbleSlopeSign =
+            Math.abs(g.vx) > 0.16 ? Math.sign(g.vx) : ix >= curX ? (this.rng.next() < 0.5 ? -1 : 1) : -1;
+          g.vy = Math.min(1.6, Math.abs(g.vy) * 0.38 + 0.14);
+          g.vx = g.vx * 0.55 + pebbleSlopeSign * (0.42 + Math.min(1.2, Math.abs(g.vy) * 0.55));
+          g.y = Math.max(g.y, iy + 0.65);
+          g.vRot = -pebbleSlopeSign * (0.28 + this.rng.next() * 0.25);
         } else {
-          g.active = false;
-          continue;
+          // Check if an open surface slope chute exists to left or right so 3D grains saltate & roll down dunes!
+          const openL =
+            ix > 3 &&
+            ct[iy * GRID_W + (ix - 1)] === CELL_EMPTY &&
+            ct[(iy + 1) * GRID_W + (ix - 1)] === CELL_EMPTY;
+          const openR =
+            ix < GRID_W - 4 &&
+            ct[iy * GRID_W + (ix + 1)] === CELL_EMPTY &&
+            ct[(iy + 1) * GRID_W + (ix + 1)] === CELL_EMPTY;
+
+          let rollDir = 0;
+          if (openL && openR) {
+            rollDir = Math.abs(g.vx) > 0.12 ? Math.sign(g.vx) : this.rng.next() < 0.5 ? -1 : 1;
+          } else if (openL) {
+            rollDir = -1;
+          } else if (openR) {
+            rollDir = 1;
+          }
+
+          if (rollDir !== 0 && impactSpeed > 0.34 && g.age < g.life - 12) {
+            // Saltate / tumble tangentially along the inclined sand slipface!
+            const tangSpeed = Math.min(2.1, impactSpeed * 0.68);
+            g.vx = rollDir * Math.max(0.36, tangSpeed * 0.82);
+            g.vy = Math.min(0.45, Math.abs(g.vy) * 0.18 - 0.16);
+            g.x = ix + rollDir * 0.65;
+            g.y = iy + 0.55;
+            g.vRot = -rollDir * (0.24 + tangSpeed * 0.18);
+          } else if (Math.abs(g.vy) > 1.55 && ct[(iy + 1) * GRID_W + ix] === CELL_EMPTY && g.age < g.life - 18) {
+            // Energetic low-angle impact splash grain on flat floor
+            g.vy = Math.min(0.85, Math.abs(g.vy) * 0.22);
+            g.vx = (Math.abs(g.vx) > 0.15 ? Math.sign(g.vx) : this.rng.next() < 0.5 ? -1 : 1) * (0.38 + this.rng.next() * 0.52);
+            g.y = iy + 0.72;
+            g.age += 18;
+          } else {
+            // Cleanly absorbed into the settled granular bed!
+            g.active = false;
+            continue;
+          }
         }
       } else {
         g.x = nx;
@@ -1203,6 +1296,115 @@ export class SandSimulation implements ColonyGridHost {
         }
       }
     }
+
+    // Active Rankine Steep-Cliff & Dry-Surface-Rim Shear Failure (every 4 ticks + step 1):
+    // Prevents unnatural 90-deg vertical concrete cliffs on tall trenches or surface cuts while
+    // preserving normal vaulted subterranean ant tunnels (`faceH < CRITICAL_CLIFF_HEIGHT`)!
+    if ((this.stepCount & 3) === 1) {
+      this.evaluateSteepCliffAndRimSlump();
+    }
+  }
+
+  private evaluateSteepCliffAndRimSlump(): void {
+    const ct = this.cellType;
+    const fd = this.faultDelay;
+
+    for (let x = 3; x < GRID_W - 3; x++) {
+      const colTop = this.topSolidY[x];
+      if (colTop < 12) continue;
+
+      for (let side = 0; side < 2; side++) {
+        const outDir = side === 0 ? -1 : 1; // Direction of open void adjacent to column `x`
+        const adjX = x + outDir;
+        let y = 3;
+
+        while (y <= colTop && y < GRID_H - 2) {
+          const idx = y * GRID_W + x;
+          const isExposedWall =
+            ct[idx] === CELL_PACKED_SAND &&
+            fd[idx] === 0 &&
+            ct[y * GRID_W + adjX] === CELL_EMPTY;
+
+          if (!isExposedWall) {
+            y++;
+            continue;
+          }
+
+          const yStart = y;
+          while (
+            y <= colTop &&
+            y < GRID_H - 2 &&
+            ct[y * GRID_W + x] === CELL_PACKED_SAND &&
+            fd[y * GRID_W + x] === 0 &&
+            ct[y * GRID_W + adjX] === CELL_EMPTY
+          ) {
+            y++;
+          }
+          const yEnd = y - 1;
+          const faceH = yEnd - yStart + 1;
+
+          // Check if `yEnd` reaches within 6 cells of the column top (even if capped by loose mound!)
+          let packedAbove = false;
+          for (let checkY = yEnd + 1; checkY <= Math.min(GRID_H - 2, yEnd + 6); checkY++) {
+            if (ct[checkY * GRID_W + x] === CELL_PACKED_SAND || ct[checkY * GRID_W + x] === CELL_PEBBLE) {
+              packedAbove = true;
+              break;
+            }
+          }
+          const reachesDryRim = !packedAbove && yEnd >= colTop - 8;
+          const exceedsCriticalCliff = faceH >= CRITICAL_CLIFF_HEIGHT;
+          const exceedsDryRimDrop = reachesDryRim && faceH >= DRY_RIM_FUNNEL_DROP;
+
+          if (!exceedsCriticalCliff && !exceedsDryRimDrop) continue;
+
+          // True uncapped Rankine slip plane (~59 deg for tall cliffs, ~48 deg for dry top dune rims):
+          // Never clamp `backW` low (`11`), which previously carved a brand-new vertical cliff behind the cut!
+          const slipToeY = exceedsCriticalCliff ? yStart + 3 : yStart + 2;
+          const invTanTheta = exceedsCriticalCliff ? 0.58 : 0.78;
+          const maxBackCut = exceedsCriticalCliff ? 34 : 18;
+          let queuedWedge = 0;
+
+          for (let wy = slipToeY; wy <= yEnd + 4 && wy < GRID_H - 2; wy++) {
+            const dyAboveToe = wy - slipToeY;
+            const jitter = Math.sin(wy * 0.37 + x * 0.23) * 0.65;
+            const backW = Math.min(maxBackCut, Math.max(1, Math.floor(dyAboveToe * invTanTheta + jitter)));
+
+            for (let stepIn = 0; stepIn < backW; stepIn++) {
+              const tx = x - outDir * stepIn;
+              if (tx < 2 || tx >= GRID_W - 2) break;
+              const ti = wy * GRID_W + tx;
+              if (ct[ti] === CELL_PEBBLE) break; // River cobbles buttress cliffs behind them!
+              if (ct[ti] !== CELL_PACKED_SAND) continue;
+
+              const delay = Math.max(
+                1,
+                Math.min(36, 1 + stepIn * 2 + Math.floor(dyAboveToe * 0.14))
+              );
+              if (fd[ti] === 0) {
+                fd[ti] = delay;
+                this.activeFaultCells++;
+              } else if (delay < fd[ti]) {
+                fd[ti] = delay;
+              }
+              // Pre-bias velX outward toward the open trench so released Rankine slices peel cleanly!
+              this.velX[ti] = outDir * (0.48 + Math.min(0.45, dyAboveToe * 0.018));
+              this.stressField[ti] = 230;
+              queuedWedge++;
+            }
+          }
+
+          if (queuedWedge >= 6 && this.collapseCooldown[x] === 0) {
+            this.collapseEvents++;
+            for (let cx = Math.max(0, x - 8); cx <= Math.min(GRID_W - 1, x + 8); cx++) {
+              this.collapseCooldown[cx] = 22;
+            }
+            this.colony.recordDisturbance(x, (yStart + yEnd) * 0.5, 14, 1.5);
+            this.spawnDustMote(adjX, (yStart + yEnd) * 0.5, this.pigmentId[yEnd * GRID_W + x] || 2, 0.15);
+            this.texturesDirty = true;
+          }
+        }
+      }
+    }
   }
 
   private measureRoofThickness(x: number, startY: number): number {
@@ -1257,11 +1459,13 @@ export class SandSimulation implements ColonyGridHost {
       const y = baseY + dy;
       if (y >= GRID_H - 1) break;
 
-      // Gently curved parabolic gothic-arch convergence (looks vastly more geological than straight lines!)
+      // Organic parabolic Mohr-Coulomb vault convergence with irrational multi-scale fracture contour
       const hNorm = dy / Math.max(1, maxWedgeH);
       const archCurve = dy * baseSlope * (0.85 + 0.32 * hNorm);
-      const jitterL = Math.sin(y * 0.43 + spanL * 0.13) * 1.45;
-      const jitterR = Math.cos(y * 0.49 + spanR * 0.17) * 1.45;
+      const jitterL =
+        Math.sin(y * 0.29 + spanL * 0.19) * 0.95 + Math.cos(y * 0.71 - spanL * 0.11) * 0.55;
+      const jitterR =
+        Math.cos(y * 0.31 + spanR * 0.17) * 0.95 + Math.sin(y * 0.67 - spanR * 0.13) * 0.55;
       const rowL = Math.max(1, Math.floor(spanL + archCurve + jitterL));
       const rowR = Math.min(GRID_W - 2, Math.ceil(spanR - archCurve + jitterR));
       if (rowL > rowR) break;
@@ -1285,22 +1489,20 @@ export class SandSimulation implements ColonyGridHost {
         if (shieldedByPebble) continue;
 
         anySandInRow = true;
-        // Center keystone breaks FIRST, then shoulders unzip outward + upward in staggered strata waves!
-        const centerDistNorm = Math.abs(x - midX) / Math.max(1, halfSpan);
-        const shoulderLag = Math.floor(centerDistNorm * 3.2);
-        const delay = Math.max(
-          1,
-          Math.min(
-            48,
-            1 + Math.floor(dy * 0.44) + shoulderLag + (this.rng.next() < 0.35 ? 1 : 0)
-          )
-        );
+        // Cohesive strata-preserving wave: center keystone releases first, shoulders follow smoothly
+        // without random per-pixel delay static so mineral bands slump intact before fanning!
+        const signedNorm = (x - midX) / Math.max(1, halfSpan);
+        const centerDistNorm = Math.abs(signedNorm);
+        const shoulderLag = Math.floor(centerDistNorm * 2.6);
+        const delay = Math.max(1, Math.min(46, 1 + Math.floor(dy * 0.38) + shoulderLag));
         if (fd[idx] === 0) {
           fd[idx] = delay;
           this.activeFaultCells++;
         } else if (delay < fd[idx]) {
           fd[idx] = delay;
         }
+        // Smooth radial-arch release velocity preserves layered geological bands!
+        this.velX[idx] = signedNorm * 0.18;
         this.stressField[idx] = 255;
         queuedCells++;
       }
@@ -1342,18 +1544,22 @@ export class SandSimulation implements ColonyGridHost {
         if (ct[i] === CELL_PACKED_SAND) {
           ct[i] = CELL_LOOSE_SAND;
           this.bondHealth[i] = 0;
-          const vx = (this.rng.next() - 0.5) * 0.45;
-          const vy = 0.44 + this.rng.next() * 0.36;
+          // Preserve pre-seeded coherent fault/Rankine outward velocity (zero salt-and-pepper scrambling!)
+          const preVx = this.velX[i];
+          const vx = Math.abs(preVx) > 0.02 ? preVx : (this.rng.next() - 0.5) * 0.08;
+          const vy = 0.46 + (this.grainShade[i] / 255) * 0.22;
           this.velX[i] = vx;
           this.velY[i] = vy;
+          this.fracX[i] = 0;
+          this.fracY[i] = (this.grainShade[i] / 255) * 0.65;
           this.restTicks[i] = 0;
           this.texturesDirty = true;
 
-          // Sample a vibrant scatter of released fault grains into the 3D tumbling granule layer!
-          if (this.rng.next() < 0.085) {
+          // Rich 3D tumbling mineral curtain synchronized to delaminating strata!
+          if (this.active3DGrains < MAX_3D_GRAINS - 24 && this.rng.next() < 0.28) {
             const x = i % GRID_W;
             const y = (i - x) / GRID_W;
-            this.spawnExcavatedGrain3D(x, y, vx * 0.9, -vy * 0.75, this.pigmentId[i], this.grainShade[i]);
+            this.spawnExcavatedGrain3D(x, y, vx, -vy, this.pigmentId[i], this.grainShade[i]);
           }
         }
       }
@@ -1362,16 +1568,40 @@ export class SandSimulation implements ColonyGridHost {
   }
 
   /**
-   * Moves `LOOSE_SAND` grains downward under gravity with true 2D momentum (`velX`, `velY`),
-   * pebble-crown ricochet fanning, impact-coupled slope avalanches, and ~33-36 deg repose dunes.
+   * Moves `LOOSE_SAND` grains under continuous sub-cell kinematics (`fracX`, `fracY`),
+   * dilatant free-fall, active cliff-face outward peeling (zero Pez-dispenser columns!),
+   * multi-step Bagnold surface-layer cascades, down-slope collisional momentum transfer,
+   * and static/dynamic angle-of-repose hysteresis (~37 deg start -> ~31.5 deg settle).
    * Strictly 1-to-1 cell swaps (`src -> EMPTY`, `EMPTY -> dst`): ZERO grains vanish or duplicate!
    */
   private stepLooseSandGravity(): number {
     this.moveTickId++;
     const stamp = this.moveTickId;
     const ct = this.cellType;
+    const startCt = this.startCellType;
+    startCt.set(ct);
+
     const vxArr = this.velX;
     const vyArr = this.velY;
+    const fxArr = this.fracX;
+    const fyArr = this.fracY;
+    const colH = this.colHeight;
+
+    // Fast O(W) column support horizon for laminar slope-gradient sorting:
+    // Scans near `topSolidY[x]` first instead of sweeping full 220 rows from top every tick!
+    for (let x = 0; x < GRID_W; x++) {
+      let top = 0;
+      const startScanY = Math.min(GRID_H - 1, (this.topSolidY[x] || GRID_H - 1) + 12);
+      for (let y = startScanY; y >= 0; y--) {
+        const c = startCt[y * GRID_W + x];
+        if (c === CELL_PACKED_SAND || c === CELL_PEBBLE || (c === CELL_LOOSE_SAND && vyArr[y * GRID_W + x] < 0.55)) {
+          top = y;
+          break;
+        }
+      }
+      colH[x] = top;
+    }
+
     const leftToRight = (this.stepCount & 1) === 0;
     let fallingCount = 0;
     let movedCount = 0;
@@ -1384,166 +1614,390 @@ export class SandSimulation implements ColonyGridHost {
         if (ct[idx] !== CELL_LOOSE_SAND || this.movedStamp[idx] === stamp) continue;
 
         const belowIdx = idx - GRID_W;
-        const belowType = ct[belowIdx];
+        const belowNow = ct[belowIdx];
+        const belowStart = startCt[belowIdx];
 
-        // 1. Direct free-fall with gravity acceleration & subtle lateral drift (`velX`)!
-        if (belowType === CELL_EMPTY) {
-          let vy = vyArr[idx] + GRAVITY_ACCEL;
-          if (vy > MAX_FALL_SPEED) vy = MAX_FALL_SPEED;
-          const vx = vxArr[idx] * 0.94;
-          const maxSteps = Math.max(1, Math.floor(vy));
+        // 0. Active Cliff-Face Outward Peel (Eliminates vertical Pez-dispenser column pistons!):
+        //    If the grain underneath was present at tick-start and just moved away, AND this grain
+        //    sits on an unconfined lateral cliff face, lateral granular pressure pushes it OUTWARD
+        //    into the open void rather than dropping straight down its own vertical column!
+        if (belowNow === CELL_EMPTY && belowStart !== CELL_EMPTY && x > 2 && x < GRID_W - 3) {
+          const openL = startCt[idx - 1] === CELL_EMPTY && ct[belowIdx - 1] === CELL_EMPTY && ct[idx - 1] === CELL_EMPTY;
+          const openR = startCt[idx + 1] === CELL_EMPTY && ct[belowIdx + 1] === CELL_EMPTY && ct[idx + 1] === CELL_EMPTY;
+          const backedL = startCt[idx + 1] !== CELL_EMPTY;
+          const backedR = startCt[idx - 1] !== CELL_EMPTY;
+          const peelDir = openL && backedL ? -1 : openR && backedR ? 1 : 0;
+
+          if (peelDir !== 0) {
+            const nx = x + peelDir;
+            const diagIdx = (y - 1) * GRID_W + nx;
+            let destIdx = diagIdx;
+            if (y >= 2 && ct[(y - 2) * GRID_W + nx] === CELL_EMPTY && vyArr[idx] > 0.45) {
+              destIdx = (y - 2) * GRID_W + nx;
+            }
+            const nextVx = peelDir * Math.min(1.65, Math.abs(vxArr[idx]) * 0.7 + 0.54);
+            const nextVy = Math.min(MAX_FALL_SPEED, Math.max(0.58, vyArr[idx] + GRAVITY_ACCEL));
+            this.moveGrain(idx, destIdx, nextVx, nextVy, 0, fyArr[idx] * 0.5, stamp);
+            if (this.active3DGrains < MAX_3D_GRAINS - 24 && this.rng.next() < 0.22) {
+              this.spawnExcavatedGrain3D(nx, y - 1, nextVx, -nextVy, this.pigmentId[destIdx], this.grainShade[destIdx]);
+            }
+            fallingCount++;
+            movedCount++;
+            continue;
+          }
+        }
+
+        // 1. Sub-Cell Continuous Ballistic Free-Fall & Aerodynamic Dilatancy (`belowNow === CELL_EMPTY`)
+        if (belowNow === CELL_EMPTY) {
+          const massMul = 0.91 + this.grainShade[idx] * (0.18 / 255);
+          // Trailing grains inside a newly vacated column accelerate slightly slower than the leading
+          // free-air edge (`0.76x`), naturally opening dilatant air gaps through falling curtains!
+          const wakeMul = belowStart === CELL_EMPTY ? 1.0 : 0.76;
+          let vy = vyArr[idx] + GRAVITY_ACCEL * massMul * wakeMul;
+          const maxV = MAX_FALL_SPEED * massMul;
+          if (vy > maxV) vy = maxV;
+          let vx = vxArr[idx] * 0.985;
+
+          const totalY = fyArr[idx] + vy;
+          const stepsY = Math.floor(totalY);
+          let remY = totalY - stepsY;
+
+          const totalX = fxArr[idx] + vx;
+          const stepsX = totalX >= 0 ? Math.floor(totalX) : Math.ceil(totalX);
+          const absStepsX = Math.abs(stepsX);
+          const dirX = stepsX > 0 ? 1 : -1;
+
+          // Smooth sub-cell accumulation frame before crossing cell boundary
+          if (stepsY === 0 && absStepsX === 0) {
+            vyArr[idx] = vy;
+            vxArr[idx] = vx;
+            fyArr[idx] = remY;
+            fxArr[idx] = totalX;
+            this.restTicks[idx] = 0;
+            this.movedStamp[idx] = stamp;
+            if (vy > 0.12) fallingCount++;
+            continue;
+          }
 
           let destX = x;
           let destY = y;
-          for (let s = 1; s <= maxSteps; s++) {
-            const ny = y - s;
-            if (ny < 0) break;
-            // Subtle lateral momentum drift during air fall (strictly checking open cells!)
-            let candX = destX;
-            if (Math.abs(vx) > 0.35 && s === 1) {
-              const tryX = destX + (vx > 0 ? 1 : -1);
+          let usedX = 0;
+          let hitGroundMidStep = false;
+          const totalMicro = Math.max(stepsY, absStepsX);
+
+          for (let s = 1; s <= totalMicro; s++) {
+            const wantVert = s <= stepsY;
+            const wantHoriz =
+              absStepsX > 0 &&
+              Math.floor((s * absStepsX) / totalMicro) > Math.floor(((s - 1) * absStepsX) / totalMicro);
+
+            let ny = wantVert ? destY - 1 : destY;
+            let nx = destX;
+
+            if (wantHoriz) {
+              const tryX = destX + dirX;
               if (
                 tryX >= 1 &&
                 tryX < GRID_W - 1 &&
                 ct[destY * GRID_W + tryX] === CELL_EMPTY &&
-                ct[ny * GRID_W + tryX] === CELL_EMPTY
+                (ny >= 0 ? ct[ny * GRID_W + tryX] === CELL_EMPTY : false)
               ) {
-                candX = tryX;
+                nx = tryX;
+                usedX += dirX;
               }
             }
-            if (ct[ny * GRID_W + candX] !== CELL_EMPTY) break;
-            destX = candX;
+
+            if (ny < 0 || ct[ny * GRID_W + nx] !== CELL_EMPTY) {
+              // If vertical step blocked, check if pure diagonal roll on impact is open right here!
+              if (wantVert && ny >= 0) {
+                hitGroundMidStep = true;
+              }
+              break;
+            }
+            destX = nx;
             destY = ny;
           }
 
+          const remX = Math.max(-0.99, Math.min(0.99, totalX - usedX));
+          if (hitGroundMidStep) {
+            remY = 0;
+            // Pre-convert part of mid-step landing speed into slope-directed lateral velocity!
+            const hL = colH[Math.max(0, destX - 2)];
+            const hR = colH[Math.min(GRID_W - 1, destX + 2)];
+            const slopeSign =
+              Math.abs(hL - hR) >= 2
+                ? hL > hR
+                  ? 1
+                  : -1
+                : Math.abs(vx) > 0.15
+                  ? Math.sign(vx)
+                  : ((destX + this.stepCount) & 1) === 0
+                    ? 1
+                    : -1;
+            vx = vx * 0.65 + slopeSign * Math.min(1.5, vy * 0.42);
+            vy = Math.max(0.42, vy * 0.68);
+          }
+
           const destIdx = destY * GRID_W + destX;
-          this.moveGrain(idx, destIdx, vx, vy, stamp);
-          // Sample brisk avalanche grains into the sparkling 3D tumbling granule layer!
-          if (vy > 1.35 && this.active3DGrains < MAX_3D_GRAINS - 20 && this.rng.next() < 0.032) {
-            this.spawnExcavatedGrain3D(
-              destX,
-              destY,
-              vx * 0.8 + (this.rng.next() - 0.5) * 0.35,
-              -vy * 0.55,
-              this.pigmentId[destIdx],
-              this.grainShade[destIdx]
-            );
+          if (destIdx !== idx) {
+            this.moveGrain(idx, destIdx, vx, vy, remX, remY, stamp);
+            if (
+              vy > 1.15 &&
+              this.active3DGrains < MAX_3D_GRAINS - 24 &&
+              this.rng.next() < 0.085
+            ) {
+              this.spawnExcavatedGrain3D(
+                destX,
+                destY,
+                vx + (this.rng.next() - 0.5) * 0.22,
+                -vy * 0.88,
+                this.pigmentId[destIdx],
+                this.grainShade[destIdx]
+              );
+            }
+            movedCount++;
+          } else {
+            vxArr[idx] = vx;
+            vyArr[idx] = vy;
+            fxArr[idx] = remX;
+            fyArr[idx] = remY;
+            this.movedStamp[idx] = stamp;
           }
           fallingCount++;
-          movedCount++;
           continue;
         }
 
-        // 2. Impact energy conversion & slope avalanching!
-        //    Fast-falling grains impacting solid ground or river pebbles convert downward kinetic
-        //    energy into lively lateral tumbling velocity (`velX`) and wake adjacent steep loose slopes!
+        // 2. Impact Conversion, Slope-Aligned Laminar Sorting & Multi-Step Bagnold Surface Cascade
         let curVx = vxArr[idx];
-        const curVy = vyArr[idx];
+        let curVy = vyArr[idx];
 
-        if (curVy > 0.85) {
-          // Convert portion of downward impact momentum into lateral roll velocity
+        const hL = colH[Math.max(0, x - 2)];
+        const hR = colH[Math.min(GRID_W - 1, x + 2)];
+        const slopeDiff = hL - hR; // > 0 means bed slopes down toward +X (right)
+
+        if (curVy > 0.68) {
+          // Slope-aligned laminar deflection (preserves crisp cross-bedded strata tongues!)
           const scatterSign =
-            Math.abs(curVx) > 0.1 ? Math.sign(curVx) : this.rng.next() < 0.5 ? -1 : 1;
-          const boost = belowType === CELL_PEBBLE ? 0.85 : 0.52;
-          curVx = curVx * 0.5 + scatterSign * Math.min(1.6, curVy * boost);
+            Math.abs(slopeDiff) >= 2
+              ? slopeDiff > 0
+                ? 1
+                : -1
+              : Math.abs(curVx) > 0.16
+                ? Math.sign(curVx)
+                : ((x + (y >> 1) + (this.stepCount >> 2)) & 1) === 0
+                  ? 1
+                  : -1;
+          const boost = belowNow === CELL_PEBBLE ? 0.92 : 0.62;
+          curVx = curVx * 0.55 + scatterSign * Math.min(2.1, curVy * boost);
 
-          // Spawn a crisp splash of dust on heavy multi-cell avalanche impact
-          if (curVy > 2.1 && this.rng.next() < 0.014) {
-            this.spawnDustMote(x, y + 1, this.pigmentId[idx], 0.22);
+          if (curVy > 2.0 && this.rng.next() < 0.022) {
+            this.spawnDustMote(x, y + 1, this.pigmentId[idx], 0.19);
           }
 
-          // Kinetic impact wake-up: jostle adjacent resting loose grains on steep shoulders
-          if (x > 2 && ct[idx - 1] === CELL_LOOSE_SAND && vyArr[idx - 1] < 0.2) {
-            vxArr[idx - 1] -= 0.45;
-            vyArr[idx - 1] = Math.max(vyArr[idx - 1], 0.32);
-          }
-          if (x < GRID_W - 3 && ct[idx + 1] === CELL_LOOSE_SAND && vyArr[idx + 1] < 0.2) {
-            vxArr[idx + 1] += 0.45;
-            vyArr[idx + 1] = Math.max(vyArr[idx + 1], 0.32);
+          // Collisional momentum transfer into adjacent surface grains to nucleate avalanche waves!
+          const pushMag = Math.min(0.85, curVy * 0.34);
+          const fwdX = x + scatterSign;
+          if (fwdX > 1 && fwdX < GRID_W - 2) {
+            const adjIdx = rowOff + fwdX;
+            if (ct[adjIdx] === CELL_LOOSE_SAND && vyArr[adjIdx] < 0.35) {
+              vxArr[adjIdx] += scatterSign * pushMag;
+              vyArr[adjIdx] = Math.max(vyArr[adjIdx], 0.38);
+            }
+            const adjDiag = (y - 1) * GRID_W + fwdX;
+            if (ct[adjDiag] === CELL_LOOSE_SAND && vyArr[adjDiag] < 0.35) {
+              vxArr[adjDiag] += scatterSign * pushMag * 0.85;
+              vyArr[adjDiag] = Math.max(vyArr[adjDiag], 0.34);
+            }
           }
         }
 
-        // Preferred slide direction honors existing lateral momentum `velX`!
+        // Preferred slide direction strictly honors slope gradient & existing tangential momentum
         const dirFirst =
-          Math.abs(curVx) > 0.14 ? (curVx > 0 ? 1 : -1) : this.rng.next() < 0.5 ? -1 : 1;
-        let slid = false;
+          Math.abs(curVx) > 0.22
+            ? curVx > 0
+              ? 1
+              : -1
+            : Math.abs(slopeDiff) >= 1
+              ? slopeDiff > 0
+                ? 1
+                : -1
+              : leftToRight
+                ? 1
+                : -1;
 
-        for (let attempt = 0; attempt < 2; attempt++) {
-          const dir = attempt === 0 ? dirFirst : -dirFirst;
-          const nx = x + dir;
-          if (nx < 1 || nx >= GRID_W - 1) continue;
+        const initSpeed = Math.hypot(curVx, curVy);
+        const isAlreadyFlowing = initSpeed > 0.24 || belowNow === CELL_PEBBLE;
 
-          const sideIdx = rowOff + nx;
-          const diagIdx = (y - 1) * GRID_W + nx;
+        let curX = x;
+        let curY = y;
+        let slopeSpeed = Math.max(0.42, initSpeed);
+        let slideDirChosen = 0;
+        let glideStepsTaken = 0;
 
-          // A. Primary 45-deg diagonal roll (never clips diagonally through solid corners!)
-          if (ct[sideIdx] === CELL_EMPTY && ct[diagIdx] === CELL_EMPTY) {
-            const nextVy = Math.max(0.38, curVy * 0.62);
-            const nextVx = dir * Math.min(1.8, Math.max(0.35, Math.abs(curVx) * 0.78 + 0.24));
-            this.moveGrain(idx, diagIdx, nextVx, nextVy, stamp);
-            fallingCount++;
-            movedCount++;
-            slid = true;
+        const glideTotal = fyArr[idx] + Math.min(2.85, slopeSpeed);
+        const maxGlideSteps = isAlreadyFlowing ? Math.max(1, Math.min(3, Math.floor(glideTotal))) : 1;
+
+        for (let gStep = 0; gStep < maxGlideSteps; gStep++) {
+          let steppedThisIter = false;
+          const cRowOff = curY * GRID_W;
+          const supportBelow = ct[(curY - 1) * GRID_W + curX];
+
+          // If glide carried us off a lip into open mid-air, stop surface-gliding here and enter ballistic fall!
+          if (gStep > 0 && supportBelow === CELL_EMPTY) {
+            slopeSpeed = Math.min(MAX_FALL_SPEED, slopeSpeed + GRAVITY_ACCEL * 0.5);
             break;
           }
 
-          // B. Kinetic 2:1 repose avalanche (~32-35 deg natural sand-dune slope!)
-          const nx2 = x + dir * 2;
-          if (nx2 >= 1 && nx2 < GRID_W - 1) {
-            const kineticEnergy = curVy + Math.abs(curVx);
-            const rollChance =
-              belowType === CELL_PEBBLE ? 0.78 : kineticEnergy > 0.35 ? 0.64 : 0.22;
-            if (this.rng.next() < rollChance) {
-              const side2Idx = rowOff + nx2;
-              const diag2Idx = (y - 1) * GRID_W + nx2;
-              if (
-                ct[sideIdx] === CELL_EMPTY &&
-                ct[side2Idx] === CELL_EMPTY &&
-                ct[diag2Idx] === CELL_EMPTY
-              ) {
-                const nextVy = Math.max(0.28, curVy * 0.48);
-                const nextVx = dir * Math.min(1.6, Math.max(0.28, Math.abs(curVx) * 0.72 + 0.16));
-                this.moveGrain(idx, diag2Idx, nextVx, nextVy, stamp);
-                fallingCount++;
-                movedCount++;
-                slid = true;
+          for (let attempt = 0; attempt < 2; attempt++) {
+            if (gStep > 0 && attempt > 0) break; // Keep multi-step cascade coherent along one flank!
+            const dir = gStep > 0 ? slideDirChosen : attempt === 0 ? dirFirst : -dirFirst;
+            const nx = curX + dir;
+            if (nx < 1 || nx >= GRID_W - 1 || curY < 1) continue;
+
+            const sideIdx = cRowOff + nx;
+            const diagIdx = (curY - 1) * GRID_W + nx;
+
+            // A. Steep >= 45-deg chute (`sin 45 - mu cos 45 > 0` -> Coulomb acceleration!)
+            if (ct[sideIdx] === CELL_EMPTY && ct[diagIdx] === CELL_EMPTY) {
+              curX = nx;
+              curY -= 1;
+              slideDirChosen = dir;
+              slopeSpeed = Math.min(2.9, slopeSpeed + 0.22);
+              steppedThisIter = true;
+              glideStepsTaken++;
+              break;
+            }
+
+            // B. Bagnold 2:1 / 3:2 repose slipface with true Static (~37 deg) vs Dynamic (~31.5 deg) Hysteresis!
+            const nx2 = curX + dir * 2;
+            if (nx2 >= 1 && nx2 < GRID_W - 1 && ct[sideIdx] === CELL_EMPTY) {
+              const side2Idx = cRowOff + nx2;
+              const diag2Idx = (curY - 1) * GRID_W + nx2;
+              if (ct[side2Idx] === CELL_EMPTY && ct[diag2Idx] === CELL_EMPTY) {
+                // Static resting grains only nucleate a fresh slide when slope > ~37 deg
+                // (either deeper drop at nx2, or backed by higher grain upslope, or perched on slick pebble);
+                // already-flowing avalanche grains glide smoothly down to ~31 deg before Coulomb friction stops them!
+                const deepDrop2 = curY >= 2 && ct[(curY - 2) * GRID_W + nx2] === CELL_EMPTY;
+                const upslopeX = curX - dir;
+                const hasUpslopeHead =
+                  upslopeX >= 1 &&
+                  upslopeX < GRID_W - 1 &&
+                  curY + 1 < GRID_H &&
+                  ct[(curY + 1) * GRID_W + upslopeX] !== CELL_EMPTY;
+                const staticFailure = supportBelow === CELL_PEBBLE || deepDrop2 || hasUpslopeHead;
+
+                if (isAlreadyFlowing || staticFailure) {
+                  curX = nx2;
+                  curY -= 1;
+                  slideDirChosen = dir;
+                  // Gentle Coulomb basal deceleration on 26.6-deg step (`mu_d ~ 0.61`)
+                  slopeSpeed =
+                    supportBelow === CELL_PEBBLE
+                      ? Math.min(2.4, slopeSpeed + 0.14)
+                      : Math.max(0.26, slopeSpeed * 0.84 - 0.05);
+                  steppedThisIter = true;
+                  glideStepsTaken++;
+
+                  // Retrogressive avalanche coupling: mobilize resting surface grain directly upslope!
+                  if (gStep === 0 && hasUpslopeHead) {
+                    const upIdx = (curY + 2) * GRID_W + upslopeX;
+                    if (ct[upIdx] === CELL_LOOSE_SAND && vyArr[upIdx] < 0.28) {
+                      vxArr[upIdx] = dir * 0.48;
+                      vyArr[upIdx] = 0.38;
+                    }
+                  }
+                  break;
+                }
+              }
+            }
+
+            // C. High-energy horizontal skitter across flat chamber floor or smooth river pebble crown
+            if (slopeSpeed > 0.72 && (Math.abs(curVx) > 0.58 || supportBelow === CELL_PEBBLE) && ct[sideIdx] === CELL_EMPTY) {
+              const sideBelow = (curY - 1) * GRID_W + nx;
+              if (ct[sideBelow] !== CELL_EMPTY || supportBelow === CELL_PEBBLE) {
+                curX = nx;
+                slideDirChosen = dir;
+                slopeSpeed *= supportBelow === CELL_PEBBLE ? 0.82 : 0.62;
+                steppedThisIter = true;
+                glideStepsTaken++;
                 break;
               }
             }
           }
 
-          // C. High-energy horizontal skitter along flat floor or pebble crown (prevents tall spikes!)
-          if (Math.abs(curVx) > 0.55 && ct[sideIdx] === CELL_EMPTY) {
-            const sideBelow = (y - 1) * GRID_W + nx;
-            // Only skitter laterally if supported or dropping off a ledge (keeps natural dune flow!)
-            if (ct[sideBelow] !== CELL_EMPTY || belowType === CELL_PEBBLE) {
-              this.moveGrain(idx, sideIdx, curVx * 0.62, curVy * 0.35, stamp);
-              fallingCount++;
-              movedCount++;
-              slid = true;
-              break;
-            }
-          }
+          if (!steppedThisIter) break;
         }
 
-        if (!slid) {
-          // Grain settled on support
-          vxArr[idx] = curVx * 0.25;
-          if (Math.abs(vxArr[idx]) < 0.04) vxArr[idx] = 0;
-          vyArr[idx] = curVy * 0.25;
-          if (vyArr[idx] < 0.05) vyArr[idx] = 0;
+        if (glideStepsTaken > 0) {
+          const destIdx = curY * GRID_W + curX;
+          const finalVx = slideDirChosen * Math.min(2.2, Math.max(0.28, slopeSpeed * 0.78));
+          const finalVy = Math.min(2.2, Math.max(0.26, slopeSpeed * 0.58));
+          const nextRemY = Math.max(0, Math.min(0.95, glideTotal - glideStepsTaken));
+          this.moveGrain(idx, destIdx, finalVx, finalVy, 0, nextRemY, stamp);
+
+          // Spawn surface-saltating 3D mineral granules along brisk active slipfaces!
+          if (
+            slopeSpeed > 0.95 &&
+            this.active3DGrains < MAX_3D_GRAINS - 24 &&
+            this.rng.next() < 0.065
+          ) {
+            this.spawnExcavatedGrain3D(
+              curX,
+              curY + 0.35,
+              finalVx * 0.92,
+              -finalVy * 0.55,
+              this.pigmentId[destIdx],
+              this.grainShade[destIdx]
+            );
+          }
+
+          fallingCount++;
+          movedCount++;
+        } else {
+          // Blocked on slope/pile: transfer collisional momentum forward into down-slope loose neighbor
+          // before damping, so traffic never kills an active avalanche wave!
+          if (initSpeed > 0.32) {
+            const pushX = x + dirFirst;
+            if (pushX >= 1 && pushX < GRID_W - 1) {
+              const blockSide = rowOff + pushX;
+              const blockDiag = (y - 1) * GRID_W + pushX;
+              const targetIdx =
+                ct[blockDiag] === CELL_LOOSE_SAND
+                  ? blockDiag
+                  : ct[blockSide] === CELL_LOOSE_SAND
+                    ? blockSide
+                    : -1;
+              if (targetIdx !== -1) {
+                vxArr[targetIdx] = vxArr[targetIdx] * 0.5 + dirFirst * Math.min(1.4, initSpeed * 0.52);
+                vyArr[targetIdx] = Math.max(vyArr[targetIdx], Math.min(1.1, initSpeed * 0.42));
+              }
+            }
+          }
+
+          vxArr[idx] = curVx * 0.38;
+          if (Math.abs(vxArr[idx]) < 0.05) vxArr[idx] = 0;
+          vyArr[idx] = curVy * 0.38;
+          if (vyArr[idx] < 0.06) vyArr[idx] = 0;
+          fxArr[idx] = 0;
+          fyArr[idx] = 0;
 
           const rt = this.restTicks[idx] + 1;
           this.restTicks[idx] = rt > 65000 ? 65000 : rt;
 
-          // Gently re-compact deeply buried settled loose grains back into PACKED_SAND
-          // (only when buried >= 7 cells below open air and firmly supported underneath!)
-          if (rt >= RECOMPACT_TICKS && y + 7 < GRID_H) {
-            const aboveSolid =
-              ct[(y + 1) * GRID_W + x] !== CELL_EMPTY &&
-              ct[(y + 4) * GRID_W + x] !== CELL_EMPTY &&
-              ct[(y + 7) * GRID_W + x] !== CELL_EMPTY;
-            if (aboveSolid) {
+          // Deep-overburden + laterally-confined consolidation ONLY (`>= 18` cells deep, `>= 7s` still):
+          // Keeps surface dunes, crater cones, and talus slopes permanently loose & cascade-ready!
+          if (
+            rt >= RECOMPACT_TICKS &&
+            y + RECOMPACT_MIN_DEPTH < colH[x] &&
+            x >= 5 &&
+            x < GRID_W - 5
+          ) {
+            const confined =
+              ct[(y + 8) * GRID_W + x] !== CELL_EMPTY &&
+              ct[(y + RECOMPACT_MIN_DEPTH) * GRID_W + x] !== CELL_EMPTY &&
+              ct[rowOff + x - 4] !== CELL_EMPTY &&
+              ct[rowOff + x + 4] !== CELL_EMPTY;
+            if (confined) {
               ct[idx] = CELL_PACKED_SAND;
               this.bondHealth[idx] = 220;
               this.restTicks[idx] = 0;
@@ -1563,6 +2017,8 @@ export class SandSimulation implements ColonyGridHost {
     dstIdx: number,
     newVelX: number,
     newVelY: number,
+    newFracX: number,
+    newFracY: number,
     stamp: number
   ): void {
     this.cellType[dstIdx] = CELL_LOOSE_SAND;
@@ -1572,6 +2028,8 @@ export class SandSimulation implements ColonyGridHost {
     this.faultDelay[dstIdx] = 0;
     this.velX[dstIdx] = newVelX;
     this.velY[dstIdx] = newVelY;
+    this.fracX[dstIdx] = newFracX;
+    this.fracY[dstIdx] = newFracY;
     this.restTicks[dstIdx] = 0;
     this.movedStamp[dstIdx] = stamp;
 
@@ -1580,41 +2038,67 @@ export class SandSimulation implements ColonyGridHost {
     this.faultDelay[srcIdx] = 0;
     this.velX[srcIdx] = 0;
     this.velY[srcIdx] = 0;
+    this.fracX[srcIdx] = 0;
+    this.fracY[srcIdx] = 0;
     this.restTicks[srcIdx] = 0;
   }
 
   /**
-   * Computes column top surfaces, classifies `AIR_SKY` vs `AIR_CAVITY`, and computes
-   * smooth signed-style 2-pass Manhattan distance fields for recessed 3D tunnel depth
-   * and backlit thin-sand edge translucency. Zero allocations.
+   * Computes grounded bed support (`bedSupportMask`), column top surfaces (strictly ignoring
+   * airborne pour streams!), `AIR_SKY` vs `AIR_CAVITY`, and 2-pass Chamfer distance fields.
+   * Zero allocations.
    */
-  recomputeSurfaceAndOpticalFields(): void {
+  private updateBedSupportMask(): void {
     const ct = this.cellType;
+    const sup = this.bedSupportMask;
+
+    for (let x = 0; x < GRID_W; x++) {
+      sup[x] = ct[x] !== CELL_EMPTY ? 1 : 0;
+    }
+
+    for (let y = 1; y < GRID_H; y++) {
+      const rowOff = y * GRID_W;
+      const belOff = rowOff - GRID_W;
+      for (let x = 0; x < GRID_W; x++) {
+        const i = rowOff + x;
+        const c = ct[i];
+        if (c === CELL_EMPTY) {
+          sup[i] = 0;
+        } else if (c === CELL_PACKED_SAND || c === CELL_PEBBLE) {
+          sup[i] = 1;
+        } else {
+          // CELL_LOOSE_SAND is part of the grounded sand bed (including sliding surface avalanches!)
+          // iff supported directly or diagonally by grounded bed below; mid-air streams stay `0`!
+          const sBel =
+            sup[belOff + x] |
+            (x > 0 ? sup[belOff + x - 1] : 0) |
+            (x + 1 < GRID_W ? sup[belOff + x + 1] : 0);
+          sup[i] = sBel;
+        }
+      }
+    }
+  }
+
+  recomputeSurfaceAndOpticalFields(): void {
+    this.updateBedSupportMask();
+    const ct = this.cellType;
+    const sup = this.bedSupportMask;
     const air = this.airClass;
-    const vy = this.velY;
 
     for (let x = 0; x < GRID_W; x++) {
       let topRestY = 0;
       let topOverY = 0;
       let topPigment = 0;
       let topShade = 128;
+
       for (let y = GRID_H - 1; y >= 0; y--) {
         const idx = y * GRID_W + x;
-        const c = ct[idx];
-        if (c === CELL_EMPTY) continue;
+        if (sup[idx] === 0) continue; // Strictly ignore airborne poured/falling grains!
 
         if (topOverY === 0) {
-          const isDenseSlump =
-            c !== CELL_LOOSE_SAND ||
-            vy[idx] <= 0.35 ||
-            (y >= 2 &&
-              (ct[(y - 1) * GRID_W + x] !== CELL_EMPTY ||
-                ct[(y - 2) * GRID_W + x] !== CELL_EMPTY));
-          if (isDenseSlump) {
-            topOverY = y;
-          }
+          topOverY = y;
         }
-        if (topRestY === 0 && (c === CELL_PACKED_SAND || c === CELL_PEBBLE || vy[idx] <= 0.25)) {
+        if (topRestY === 0) {
           topRestY = y;
           topPigment = this.pigmentId[idx];
           topShade = this.grainShade[idx];
@@ -1651,13 +2135,13 @@ export class SandSimulation implements ColonyGridHost {
       const rowOff = y * GRID_W;
       let x = 0;
       while (x < GRID_W) {
-        if (ct[rowOff + x] !== CELL_EMPTY) {
+        if (sup[rowOff + x] !== 0) {
           this.rowOpenSpan[x] = 0;
           x++;
           continue;
         }
         const runStart = x;
-        while (x < GRID_W && ct[rowOff + x] === CELL_EMPTY) {
+        while (x < GRID_W && sup[rowOff + x] === 0) {
           x++;
         }
         const runLen = x - runStart;
@@ -1670,12 +2154,13 @@ export class SandSimulation implements ColonyGridHost {
         const idx = rowOff + cx;
         if (ct[idx] !== CELL_EMPTY) {
           air[idx] = AIR_SOLID;
-          if (y > this.skyFloorY[cx]) this.skyFloorY[cx] = y;
+          // Only grounded bed cells raise `skyFloorY` — airborne pour streams NEVER tent the 3D crest!
+          if (sup[idx] !== 0 && y > this.skyFloorY[cx]) this.skyFloorY[cx] = y;
           continue;
         }
         if (y > this.overburdenTopY[cx]) {
           const horiz = this.smoothHorizon[cx];
-          if (y >= horiz - 2 || (y >= horiz - 12 && this.rowOpenSpan[cx] >= SKY_MIN_OPEN_SPAN)) {
+          if (y >= horiz - 2 || (y >= horiz - 14 && this.rowOpenSpan[cx] >= SKY_MIN_OPEN_SPAN)) {
             air[idx] = AIR_SKY;
           } else {
             air[idx] = AIR_CAVITY;
@@ -1688,14 +2173,19 @@ export class SandSimulation implements ColonyGridHost {
       }
     }
 
+    // Tighter, slope-preserving 5-tap crest filter (`x - 2 .. x + 2`) so surface rims stay crisp
     for (let x = 0; x < GRID_W; x++) {
+      const centerH = this.skyFloorY[x];
       let sum = 0;
       let wSum = 0;
-      const x0 = Math.max(0, x - 4);
-      const x1 = Math.min(GRID_W - 1, x + 4);
+      const x0 = Math.max(0, x - 2);
+      const x1 = Math.min(GRID_W - 1, x + 2);
       for (let k = x0; k <= x1; k++) {
-        const w = 5 - Math.abs(k - x);
-        sum += this.skyFloorY[k] * w;
+        const nh = this.skyFloorY[k];
+        // Bilateral clamp prevents stretching a wide ramp across a freshly carved trench mouth
+        const clampedNh = Math.abs(nh - centerH) > 6 ? centerH : nh;
+        const w = 3 - Math.abs(k - x);
+        sum += clampedNh * w;
         wSum += w;
       }
       this.surfaceY[x] = wSum > 0 ? sum / wSum : this.topSolidY[x];
@@ -1790,7 +2280,9 @@ export class SandSimulation implements ColonyGridHost {
    * - `fieldTex.a`: compacted PACKED_SAND arch shear stress ONLY (`0` on LOOSE_SAND!)
    */
   packTextures(): void {
+    this.updateBedSupportMask();
     const ct = this.cellType;
+    const sup = this.bedSupportMask;
     const pig = this.pigmentId;
     const shd = this.grainShade;
     const bgP = this.bgPigmentId;
@@ -1807,9 +2299,12 @@ export class SandSimulation implements ColonyGridHost {
     for (let i = 0; i < GRID_CELLS; i++) {
       const o = i << 2;
       const c = ct[i];
-      const isFalling = c === CELL_LOOSE_SAND && vy[i] > 0.12;
+      const isActiveMotion = c === CELL_LOOSE_SAND && vy[i] > 0.12;
+      // Grounded bed sand (including Bagnold surface grains gliding in contact with a dune slope!)
+      // keeps cohesive silhouette continuity (`coh = 1 -> zero slope strobing`), while genuinely
+      // airborne mid-air grains (`sup[i] === 0`) keep `coh = 0` (zero wall parallax extrusion)!
       const isCohesive =
-        c === CELL_PACKED_SAND || c === CELL_PEBBLE || (c === CELL_LOOSE_SAND && !isFalling);
+        c === CELL_PACKED_SAND || c === CELL_PEBBLE || (c === CELL_LOOSE_SAND && sup[i] === 1);
       coh[i] = isCohesive ? 1 : 0;
 
       const pId = c === CELL_EMPTY ? bgP[i] : pig[i];
@@ -1818,7 +2313,7 @@ export class SandSimulation implements ColonyGridHost {
       cOut[o] = lut[lutOff];
       cOut[o + 1] = lut[lutOff + 1];
       cOut[o + 2] = lut[lutOff + 2];
-      cOut[o + 3] = isFalling ? 255 : 0;
+      cOut[o + 3] = isActiveMotion ? 255 : 0;
 
       fOut[o + 1] = rec[i];
       fOut[o + 2] = wal[i];

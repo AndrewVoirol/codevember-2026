@@ -1245,7 +1245,7 @@ export function buildTerrariumAssembly(materials: BurrowMaterialsContract): Terr
   // ---------------------------------------------------------------------------
   // 5. Live 3D Tumbling Mineral Sand Granules & Subtle Avalanche Dust Motes
   // ---------------------------------------------------------------------------
-  const tumblingGrainGeo = createFacetedMineralGrainGeometry(0.0036);
+  const tumblingGrainGeo = createFacetedMineralGrainGeometry(0.0029);
   const tumblingColorArr = new Float32Array(MAX_3D_GRAINS * 4);
   const tumblingColorAttr = new THREE.InstancedBufferAttribute(tumblingColorArr, 4);
   tumblingGrainGeo.setAttribute('aGrainColor', tumblingColorAttr);
@@ -1312,6 +1312,9 @@ export function buildTerrariumAssembly(materials: BurrowMaterialsContract): Terr
   const crestPosAttr = sandCrestGeo.attributes.position as THREE.BufferAttribute;
   const crestNormAttr = sandCrestGeo.attributes.normal as THREE.BufferAttribute;
   const crestColAttr = sandCrestGeo.attributes.color as THREE.BufferAttribute;
+  const crestAlphaArr = new Float32Array(rows * GRID_W).fill(1);
+  const crestAlphaAttr = new THREE.BufferAttribute(crestAlphaArr, 1);
+  sandCrestGeo.setAttribute('aCrestAlpha', crestAlphaAttr);
   const posArr = crestPosAttr.array as Float32Array;
   const normArr = crestNormAttr.array as Float32Array;
   const colArr = crestColAttr.array as Float32Array;
@@ -1325,11 +1328,23 @@ export function buildTerrariumAssembly(materials: BurrowMaterialsContract): Terr
       const yBase = -CAVITY_HALF_H + (yCell + 0.5) * dyPerCell;
       const yL = surfaceY[c > 0 ? c - 1 : 0];
       const yR = surfaceY[c < GRID_W - 1 ? c + 1 : GRID_W - 1];
-      const slopeX = ((yR - yL) * dyPerCell) / (2 * dxWorld);
+      const dyStep = Math.max(Math.abs(yCell - yL), Math.abs(yR - yCell));
+      const slopeX = Math.max(-2.6, Math.min(2.6, ((yR - yL) * dyPerCell) / (2 * dxWorld)));
 
-      const cr = surfaceRgb[c * 3];
-      const cg = surfaceRgb[c * 3 + 1];
-      const cb = surfaceRgb[c * 3 + 2];
+      // On steep funnel/trench lips (`dyStep > 4`), pick the lower subsurface column's mineral color
+      // rather than vertex-interpolating top green moss across a steep drop!
+      let colorCol = c;
+      if (dyStep > 4) {
+        if (c > 0 && yL < yCell - 3) colorCol = c - 1;
+        else if (c < GRID_W - 1 && yR < yCell - 3) colorCol = c + 1;
+      }
+      const cr = surfaceRgb[colorCol * 3];
+      const cg = surfaceRgb[colorCol * 3 + 1];
+      const cb = surfaceRgb[colorCol * 3 + 2];
+
+      // Break `SandCrestTopRibbon` cleanly across open vertical shaft mouths / steep cliff drops (`dyStep > 3.6`)
+      // so it NEVER stretches a vertical curtain across open air!
+      const crestValid = dyStep > 3.6 ? 0.0 : 1.0;
 
       for (let r = 0; r < rows; r++) {
         const v = r / depthSegs;
@@ -1340,6 +1355,7 @@ export function buildTerrariumAssembly(materials: BurrowMaterialsContract): Terr
         const vi = r * GRID_W + c;
         const o3 = vi * 3;
         posArr[o3 + 1] = Math.min(CAVITY_HALF_H - 0.004, yBase + crownLift);
+        crestAlphaArr[vi] = crestValid;
 
         const nx = -slopeX;
         const ny = 1.0;
@@ -1359,6 +1375,7 @@ export function buildTerrariumAssembly(materials: BurrowMaterialsContract): Terr
     crestPosAttr.needsUpdate = true;
     crestNormAttr.needsUpdate = true;
     crestColAttr.needsUpdate = true;
+    crestAlphaAttr.needsUpdate = true;
   };
 
   // Coxa socket positions for Front (0), Mid (1), Hind (2) leg pairs in ant-local space

@@ -8,14 +8,14 @@
     "drawerCount": 30
   },
   "telemetry": {
-    "frameCount": 344,
-    "avgFrameMs": 8.33,
-    "p95FrameMs": 9,
+    "frameCount": 367,
+    "avgFrameMs": 8.83,
+    "p95FrameMs": 15.3,
     "sceneState": {
       "day": 27,
       "slug": "27-burrow",
       "headerLabel": "Day 27 - Burrow",
-      "frameCount": 344,
+      "frameCount": 367,
       "cameraPos": [
         0.34,
         0.14000000000000004,
@@ -27,13 +27,13 @@
         -0.014073075489704934
       ],
       "pointerSpeed": 0,
-      "pointerDwellSec": 2.2265,
-      "pointerImpulse": 0.001
+      "pointerDwellSec": 1.9239,
+      "pointerImpulse": 0.0007
     }
   },
   "metrics": {
-    "specimenCoverageRatio": 0.4341,
-    "interactionMad": 0.64
+    "specimenCoverageRatio": 0.4335,
+    "interactionMad": 0.664
   },
   "gpuErrors": [],
   "gateFailures": [],

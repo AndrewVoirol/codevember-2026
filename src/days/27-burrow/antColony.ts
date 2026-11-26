@@ -766,9 +766,9 @@ export class AntColony {
     const gy = this.clampGridY(Math.round(a.y));
     const curIdx = gy * GRID_W + gx;
 
-    // Detect if a cave-in just sealed us off from the surface (rebuild fresh first if nav is dirty!)
+    // Detect if a cave-in just sealed us off from the surface (throttled BFS check!)
     if (this.distToSurface[curIdx] >= INF_DIST) {
-      if (this.navDirty) {
+      if (this.navDirty && this.ticksSinceNavRebuild >= 6) {
         this.rebuildNavigationFields(host);
       }
       if (this.distToSurface[curIdx] >= INF_DIST) {
@@ -1015,9 +1015,9 @@ export class AntColony {
     const curIdx = gy * GRID_W + gx;
     const dSurf = this.distToSurface[curIdx];
 
-    // If a cave-in just sealed off our escape shaft while we were hauling up -> verify fresh BFS first!
+    // If a cave-in just sealed off our escape shaft while we were hauling up -> verify throttled BFS!
     if (dSurf >= INF_DIST) {
-      if (this.navDirty) {
+      if (this.navDirty && this.ticksSinceNavRebuild >= 6) {
         this.rebuildNavigationFields(host);
       }
       if (this.distToSurface[curIdx] >= INF_DIST) {
@@ -1030,9 +1030,9 @@ export class AntColony {
 
     // Reached the open surface crest! Transition to crater-rim deposit
     if (dSurf <= 3 || (host.airClass[curIdx] === AIR_SKY && gy >= (host.topSolidY[gx] || 150))) {
-      // Walk outward onto the crater flank (away from open shaft mouth!) before dropping the grain
+      // Walk outward onto the outer crater flank (well clear of open shaft throat!) before dropping the grain
       const side = (a.id + host.tailingsDeposited) % 2 === 0 ? -1 : 1;
-      const rimDist = 7 + ((a.id * 3 + host.tailingsDeposited * 2) % 13);
+      const rimDist = 11 + ((a.id * 3 + host.tailingsDeposited * 2) % 14);
       a.homeShaftX = gx;
       a.targetX = Math.max(12, Math.min(GRID_W - 13, gx + side * rimDist));
       a.targetY = Math.min(GRID_H - 6, this.findSurfaceY(host, Math.round(a.targetX)) + 2);
@@ -1083,10 +1083,10 @@ export class AntColony {
       }
     }
 
-    // Verify we aren't dropping directly into a vertical shaft mouth (prefer solid support below!)
+    // Verify we aren't dropping into or onto the inner lip of a vertical shaft mouth!
     let dropX = this.clampGridX(Math.round(a.x));
-    if (Math.abs(dropX - a.homeShaftX) < 5) {
-      const nudge = dropX >= a.homeShaftX ? 6 : -6;
+    if (Math.abs(dropX - a.homeShaftX) < 9) {
+      const nudge = dropX >= a.homeShaftX ? 10 : -10;
       dropX = this.clampGridX(a.homeShaftX + nudge);
     }
 
@@ -1098,19 +1098,20 @@ export class AntColony {
       }
       if (ct[dropY * GRID_W + dropX] === CELL_EMPTY) {
         const idx = dropY * GRID_W + dropX;
+        const outDir = dropX >= a.homeShaftX ? 1 : -1;
         ct[idx] = CELL_LOOSE_SAND;
         host.pigmentId[idx] = a.carryingPigment;
         host.grainShade[idx] = a.carryingShade;
         host.bondHealth[idx] = 0;
         host.faultDelay[idx] = 0;
-        host.velX[idx] = Math.sign(dropX - a.homeShaftX) * 0.28;
-        host.velY[idx] = 0.22;
+        host.velX[idx] = outDir * 0.58;
+        host.velY[idx] = 0.34;
         host.restTicks[idx] = 0;
         host.spawnExcavatedGrain3D?.(
           dropX,
           dropY,
           host.velX[idx],
-          -0.25,
+          -0.36,
           a.carryingPigment,
           a.carryingShade
         );

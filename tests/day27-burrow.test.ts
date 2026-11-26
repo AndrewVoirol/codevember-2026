@@ -659,4 +659,102 @@ describe('Day 27 - Burrow (Glass-Walled Stratified Sand-Slice Terrarium)', () =>
     colorTex.dispose();
     fieldTex.dispose();
   });
+
+  it('slumps tall 90-degree vertical surface cuts along active Rankine slip wedges instead of freezing like concrete', () => {
+    const sim = new SandSimulation(10);
+    sim.reset(10, false);
+
+    // Carve a steep 95-cell-tall vertical trench open to the top sky (width 14 <= ARCH_SPAN_LIMIT)
+    sim.excavateBox(140, 80, 153, 185);
+    for (let t = 0; t < 180; t++) {
+      sim.step({ enableDiggers: false, enableArchCheck: true });
+    }
+
+    let slumpedInTrench = 0;
+    for (let y = 80; y <= 176; y++) {
+      for (let x = 140; x <= 153; x++) {
+        if (sim.cellType[sim.idx(x, y)] !== CELL_EMPTY) {
+          slumpedInTrench++;
+        }
+      }
+    }
+
+    expect(sim.collapseEvents).toBeGreaterThan(0);
+    expect(slumpedInTrench).toBeGreaterThan(450);
+  });
+
+  it('keeps poured surface dunes permanently loose so undercutting the toe triggers a full repose cascade', () => {
+    const sim = new SandSimulation(21);
+    sim.reset(21, false);
+    for (let y = 0; y < GRID_H; y++) {
+      for (let x = 0; x < GRID_W; x++) {
+        sim.cellType[sim.idx(x, y)] = y <= 40 ? CELL_PACKED_SAND : CELL_EMPTY;
+      }
+    }
+    sim.recomputeSurfaceAndOpticalFields();
+
+    // Pour a tall loose sand cone and let it sit well past 200 ticks
+    for (let t = 0; t < 240; t++) {
+      if (t < 150) sim.pourSandAt(150, 140, 10);
+      sim.step({ enableDiggers: false, enableArchCheck: false });
+    }
+
+    // Undercut the entire left half of the rested sand cone
+    for (let y = 41; y <= 95; y++) {
+      for (let x = 90; x <= 146; x++) {
+        sim.cellType[sim.idx(x, y)] = CELL_EMPTY;
+      }
+    }
+
+    // Step 90 frames -> entire steep loose face must peel from crest down to natural repose (zero frozen cliff!)
+    for (let t = 0; t < 90; t++) {
+      sim.step({ enableDiggers: false, enableArchCheck: false });
+    }
+
+    let maxStep = 0;
+    for (let x = 110; x <= 185; x++) {
+      let h0 = 40;
+      let h1 = 40;
+      for (let y = 120; y > 40; y--) {
+        if (sim.cellType[sim.idx(x, y)] !== CELL_EMPTY) {
+          h0 = y;
+          break;
+        }
+      }
+      for (let y = 120; y > 40; y--) {
+        if (sim.cellType[sim.idx(x + 1, y)] !== CELL_EMPTY) {
+          h1 = y;
+          break;
+        }
+      }
+      maxStep = Math.max(maxStep, Math.abs(h1 - h0));
+    }
+
+    expect(maxStep).toBeLessThanOrEqual(2);
+  });
+
+  it('prevents airborne pour streams from tenting SandCrestTopRibbon or darkening open sky into AIR_CAVITY', () => {
+    const sim = new SandSimulation(1);
+    const baselineCrestY = sim.surfaceY[180];
+
+    for (let t = 0; t < 6; t++) {
+      sim.pourSandAt(180, GRID_H - 8, 12);
+      sim.step({ enableDiggers: false, enableArchCheck: false });
+    }
+    sim.syncOpticalTextures();
+
+    // Airborne grains still falling well above the dune must NOT pull `surfaceY` up into mid-air
+    expect(Math.abs(sim.surfaceY[180] - baselineCrestY)).toBeLessThan(0.5);
+
+    let skyTurnedToCavity = 0;
+    for (let y = Math.ceil(baselineCrestY) + 5; y < GRID_H - 5; y++) {
+      for (let x = 168; x <= 192; x++) {
+        const idx = sim.idx(x, y);
+        if (sim.cellType[idx] === CELL_EMPTY && sim.airClass[idx] === AIR_CAVITY) {
+          skyTurnedToCavity++;
+        }
+      }
+    }
+    expect(skyTurnedToCavity).toBe(0);
+  });
 });

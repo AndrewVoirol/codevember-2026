@@ -170,8 +170,8 @@ export const DIGGER_COUNT = 12;
 export const ANT_COUNT = DIGGER_COUNT;
 
 /** Live 3D instanced tumbling mineral granule & avalanche dust pool capacities */
-export const MAX_3D_GRAINS = 420;
-export const MAX_DUST_MOTES = 72;
+export const MAX_3D_GRAINS = 2200;
+export const MAX_DUST_MOTES = 120;
 
 /** Convert linear [0..1] channel to sRGB byte [0..255] for RGBA8 SRGB DataTexture */
 export function linearToSrgbByte(v: number): number {

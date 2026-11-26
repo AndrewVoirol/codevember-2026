@@ -466,7 +466,6 @@ export function createBurrowMaterials(
     // All primary texture samples unconditionally in uniform control flow
     const colSurf = texture(sandColorTex, grainDitherUv).level(float(0.0));
     const colSnap = texture(sandColorTex, snapUv).level(float(0.0));
-    const colRawA = texture(sandColorTex, baseUv).level(float(0.0)).a;
     const fldSurf = texture(sandFieldTex, baseUv).level(float(0.0));
 
     const fL = texture(sandFieldTex, clamp(baseUv.add(vec2(texelX.negate(), 0.0)), 0.001, 0.999))
@@ -549,13 +548,15 @@ export function createBurrowMaterials(
       inwardRay.y.div(float(CAVITY_H))
     ).mul(float(CAVITY_D).div(zDenom));
 
-    // Smooth cohesive solid surface + crisp, artifact-free falling sand grains (zero square bilinear blobs!)
+    // Smooth cohesive solid surface + crisp, organically faceted airborne sand grains (never erased by bilinear alpha!)
     const isCohesiveSurf = fldSurf.r.greaterThan(0.48);
     const isPebbleSurf = pebR2.lessThan(1.01);
-    const fallThreshold = float(0.66).sub(microGrain.mul(0.18));
-    const isFallingSurf = colRawA
-      .greaterThan(fallThreshold)
-      .and(colSnap.a.greaterThan(0.5))
+    const cellGridPos = baseUv.mul(vec2(float(GRID_W), float(GRID_H)));
+    const cellLocal = cellGridPos.sub(floor(cellGridPos)).sub(0.5);
+    const grainContourR = length(cellLocal).add(microGrain.sub(0.5).mul(0.24));
+    const isFallingSurf = colSnap.a
+      .greaterThan(0.5)
+      .and(grainContourR.lessThan(0.47))
       .and(isCohesiveSurf.not())
       .and(isPebbleSurf.not());
     const isSolidSurf = isCohesiveSurf.or(isPebbleSurf).or(isFallingSurf);
@@ -815,9 +816,11 @@ export function createBurrowMaterials(
     metalness: 0.02,
     roughness: 0.88,
     envMapIntensity: 0.5,
+    alphaTest: 0.5,
   });
   {
     const vCol = attribute('color', 'vec3');
+    const aCrestAlpha = attribute('aCrestAlpha', 'float');
     const grain = mineralToothFbm(positionLocal.mul(vec3(180.0, 180.0, 180.0)), float(1.15));
     const sparkle = pow(
       clamp(mineralToothFbm(positionLocal.add(vec3(5.2, 3.1, 8.7)), float(240.0)), 0.0, 1.0),
@@ -826,6 +829,7 @@ export function createBurrowMaterials(
 
     sandCrestTop.colorNode = vCol.mul(float(0.85).add(grain.mul(0.28))).add(cCalcite.mul(sparkle));
     sandCrestTop.normalNode = perturbNormal3DFbm(normalLocal, positionLocal, float(135.0), float(0.22));
+    sandCrestTop.opacityNode = aCrestAlpha;
   }
 
   // ---------------------------------------------------------------------------
@@ -898,9 +902,9 @@ export function createBurrowMaterials(
   // 9. 3D Faceted Tumbling & Ant-Carried Mineral Sand Granules (`aGrainColor`)
   // ---------------------------------------------------------------------------
   const mineralGrain3D = new THREE.MeshStandardNodeMaterial({
-    metalness: 0.04,
-    roughness: 0.62,
-    envMapIntensity: 0.78,
+    metalness: 0.05,
+    roughness: 0.52,
+    envMapIntensity: 0.94,
   });
   {
     const aCol = attribute('aGrainColor', 'vec4');
