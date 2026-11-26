@@ -264,8 +264,8 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
     'tsl',
     'warmKaolin',
     'realgarAmber',
-    'Suspended 3-whorl cascading cocoon unfurling into 18 razor-thin hand-torn rice-paper and parchment petals with varied pulp opacity and frayed deckle whiskers around a golden stamen crown, 12 curl-gliding origami moths, and 280 backlit pollen motes',
-    'Sweep across the air or flower to swirl golden pollen motes, steer origami moths, and ripple petals in a wave; grab and pull any petal outward or inward to blossom or fold shut into the candled cocoon; click to stoke a buoyant moth & pollen burst; drag empty space to orbit 360°, or double-click / press Space to toggle closed and full bloom'
+    'Suspended 12-rib ovoid handmade Unryu kozo-paper and dark-roasted split-bamboo sky lantern bound across its belly in 340 crisscrossing golden-ochre raw-silk cocoon filaments and 38 unspooling gossamer catenary loops, releasing 14 multi-ply folded mineral-washi origami butterflies and 160 dual-population silk-dust & rising thermal ember motes from its candled amber heart',
+    'Sweep gently across the waist to billow the unspooling raw-silk loops, steer the origami butterflies, and rock the lantern on its 3-ply hemp cord; click the lantern to stoke the ember core, unwind more silk, and release fresh butterflies from the open bamboo mouth; drag empty space to orbit 360° (including looking up into the recessed burner saucer); double-click or press Space to re-spin the tight cocoon and replay the bound → unwinding → emerged → buoyant cycle'
   ),
   createDay(
     21,
@@ -368,6 +368,41 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
     'Click over the beaker (or press Space) to drop fresh crystalline mineral cubes cycling through Celadon, Realgar Amber, Azurite, Cinnabar, and Yellow Ochre; drag inside the beaker to dip and sweep the borosilicate stirring rod into a central vortex; drag empty space to orbit 360°; double-click empty space to flush clear water and drop a starter crystal'
   ),
 ];
+
+export interface StandbyEntry extends DayEntry {
+  /** URL route under /standby/<slug>/ */
+  route: string;
+  /** Short origin tag rendered in the drawer (e.g., 'Day 20 · v1') */
+  originLabel: string;
+}
+
+export const STANDBY_MANIFEST: readonly StandbyEntry[] = [
+  {
+    day: -20,
+    pad: '20',
+    slug: '20-cocoon-blossom',
+    route: '/standby/20-cocoon-blossom/',
+    originLabel: 'Day 20 · v1',
+    title: 'Cocoon (Blossom v1)',
+    headerLabel: 'Standby · Day 20 - Cocoon (Blossom v1)',
+    status: 'complete',
+    substrate: 'tsl',
+    primaryPigment: 'warmKaolin',
+    secondaryPigment: 'realgarAmber',
+    specimenSummary:
+      'Original Day 20 tangent: suspended 3-whorl cascading cocoon unfurling into 18 hand-torn rice-paper petals with frayed deckle whiskers around a golden stamen crown, 12 curl-gliding origami moths, and 280 backlit pollen motes',
+    pointerInteraction:
+      'Sweep to swirl pollen and steer moths; grab and pull any petal to blossom or fold shut; click to stoke a burst; double-click or press Space to toggle closed and full bloom',
+  },
+];
+
+export function getStandbyBySlug(slug: string): StandbyEntry {
+  const found = STANDBY_MANIFEST.find((s) => s.slug === slug);
+  if (!found) {
+    throw new Error(`Standby entry '${slug}' not found in STANDBY_MANIFEST`);
+  }
+  return found;
+}
 
 export function getDayByNumber(dayNumber: number): DayEntry {
   if (dayNumber === 0) return CALIBRATION_DAY;

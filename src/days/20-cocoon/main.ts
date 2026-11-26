@@ -1,53 +1,67 @@
 import * as THREE from 'three/webgpu';
 import { getDayByNumber } from '../../core/manifest';
 import { SpecimenStage } from '../../core/stage/SpecimenStage';
-import { MINERAL_PALETTE } from '../../core/palette';
-import { KozoCocoonSimulation } from './cocoonSimulation';
 import {
-  buildCalyxBaseCapGeometry,
-  buildEmberPearlGeometry,
-  buildOrigamiWingGeometry,
-  buildPollenBillboardQuadGeometry,
-  buildStamenCrownGeometry,
-  PETAL_BASE_Y,
-} from './kozoGeometry';
+  buildEmberCoreGeometry,
+  buildEmberQuadGeometry,
+  buildOrigamiButterflyBodyGeometry,
+  buildOrigamiButterflyWingGeometry,
+  buildOvoidBambooFrameGeometry,
+  buildOvoidPaperDomeGeometry,
+  buildSilkGossamerVeilGeometry,
+  buildSilkWrapBandsGeometry,
+  buildSuspensionCordGeometry,
+  buildUnspoolingSilkLoopsGeometry,
+} from './lanternGeometry';
 import {
-  createCocoonStudioEnvironment,
-  createKozoMaterials,
-} from './kozoMaterials';
-import { DEFAULT_KOZO_CONFIG, type Day20TelemetryState } from './types';
+  createLanternStudioEnvironment,
+  createSilkLanternMaterials,
+} from './lanternMaterials';
+import { SilkLanternSimulation } from './lanternSimulation';
+import {
+  DEFAULT_SILK_CONFIG,
+  type ChrysalisStage,
+  type Day20Alt1Telemetry,
+} from './types';
 
 declare global {
   interface Window {
-    __DAY20__?: {
-      getState: () => Day20TelemetryState;
+    __COCOON_ALT1__?: {
+      getState: () => Day20Alt1Telemetry;
+      setPhase: (stage: ChrysalisStage) => void;
+      resetToBound: () => void;
+      stokeBurst: (worldX?: number, worldY?: number, worldZ?: number) => number;
+      setOrbit: (azimuth: number, pitch: number, distance: number, targetY?: number) => void;
     };
   }
 }
 
-// Pre-allocated scratch math objects (strictly zero per-frame allocations)
+const PENDULUM_PIVOT_Y = 2.0;
+const BUTTERFLY_BASE_SCALE = 0.112;
+
+// Pre-allocated scratch math objects (strictly zero per-frame heap allocations)
 const _raycaster = new THREE.Raycaster();
 const _ndc = new THREE.Vector2();
-const _camLocal = new THREE.Vector3();
 const _planeHit = new THREE.Vector3();
 const _prevPlaneHit = new THREE.Vector3();
+const _pointerVel = new THREE.Vector3();
+const _targetPointerWorld = new THREE.Vector3();
+const _smoothPointerWorld = new THREE.Vector3();
+const _smoothPointerVel = new THREE.Vector3();
 const _dragPlane = new THREE.Plane();
 const _camDir = new THREE.Vector3();
-const _radialDir = new THREE.Vector3();
-const _dragVec = new THREE.Vector3();
-const _dummyMatrix = new THREE.Matrix4();
-const _dummyScale = new THREE.Vector3();
+const _flameWorldPos = new THREE.Vector3();
+const _camOffset = new THREE.Vector3();
+const _tiltAxis = new THREE.Vector3();
 const _dummyPos = new THREE.Vector3();
-const _colorA = new THREE.Color(MINERAL_PALETTE.boneCalcite.hex);
-const _colorB = new THREE.Color(MINERAL_PALETTE.yellowOchre.hex);
-const _colorC = new THREE.Color(MINERAL_PALETTE.realgarAmber.hex);
-const _tmpCol = new THREE.Color();
+const _dummyScale = new THREE.Vector3();
+const _dummyMatrix = new THREE.Matrix4();
 
-export async function bootDay20Cocoon(): Promise<SpecimenStage> {
+export async function bootDay20CocoonAlt1(): Promise<SpecimenStage> {
   const dayEntry = getDayByNumber(20);
   const stage = await SpecimenStage.create({
     day: dayEntry,
-    cameraPosition: [0.18, 2.38, 5.75],
+    cameraPosition: [0.0, 0.04, 4.55],
     fov: 35,
     enableOrbit: true,
     enableShadows: false,
@@ -56,144 +70,224 @@ export async function bootDay20Cocoon(): Promise<SpecimenStage> {
   stage.camera.near = 0.05;
   stage.camera.updateProjectionMatrix();
 
-  stage.controls.target.set(0, 0.06, 0);
-  stage.controls.minDistance = 2.0;
-  stage.controls.maxDistance = 10.8;
+  stage.controls.target.set(0, 0.02, 0);
+  stage.controls.minDistance = 1.15;
+  stage.controls.maxDistance = 8.5;
+  stage.controls.minPolarAngle = 0.22;
+  stage.controls.maxPolarAngle = Math.PI - 0.14;
   stage.controls.zoomSpeed = 0.85;
   stage.controls.enableDamping = true;
   stage.controls.dampingFactor = 0.065;
   stage.controls.update();
 
-  const studioEnv = createCocoonStudioEnvironment(stage.renderer);
+  // 7-softbox studio PMREM environment for oiled bamboo, raw silk, and kozo paper
+  const studioEnv = createLanternStudioEnvironment(stage.renderer);
   stage.scene.environment = studioEnv.texture;
-  stage.scene.environmentIntensity = 0.72;
+  stage.scene.environmentIntensity = 0.86;
 
+  // Calibrate studio 3-point softbox lighting for sculptural raking light over dry kozo folds
   let dirIdx = 0;
   for (const child of stage.scene.children) {
     if (child instanceof THREE.DirectionalLight) {
       if (dirIdx === 0) {
-        child.position.set(2.8, 4.2, 3.6);
-        child.intensity = 1.72;
+        child.position.set(4.2, 3.6, 2.8);
+        child.intensity = 2.15;
       } else if (dirIdx === 1) {
-        child.position.set(-3.4, -1.0, 2.4);
-        child.intensity = 0.65;
+        child.position.set(-4.2, 0.4, 2.2);
+        child.intensity = 0.44;
       } else if (dirIdx === 2) {
-        child.position.set(-1.2, 3.6, -3.8);
-        child.intensity = 1.65;
+        child.position.set(-1.2, 3.8, -3.6);
+        child.intensity = 1.62;
       }
       dirIdx++;
     } else if (child instanceof THREE.HemisphereLight) {
-      child.intensity = 0.62;
+      child.intensity = 0.36;
     }
   }
 
   const specimenRoot = new THREE.Group();
-  specimenRoot.name = 'TornRicePaperCocoonRoot';
+  specimenRoot.name = 'SilkLanternChrysalisRoot';
   stage.specimenGroup.add(specimenRoot);
 
-  const sim = new KozoCocoonSimulation(DEFAULT_KOZO_CONFIG);
-  sim.bloom = 0.36;
-  sim.setTargetBloom(DEFAULT_KOZO_CONFIG.initialBloom);
+  const sim = new SilkLanternSimulation(DEFAULT_SILK_CONFIG);
+  const mats = createSilkLanternMaterials();
 
-  const mats = createKozoMaterials();
+  // -------------------------------------------------------------------------
+  // 1. Suspended Lantern Hierarchy (Decoupled Pendulum Pivot + Torsional Yaw)
+  // -------------------------------------------------------------------------
+  const pendulumPivot = new THREE.Group();
+  pendulumPivot.name = 'SuspensionCordPivot';
+  pendulumPivot.position.set(0, PENDULUM_PIVOT_Y, 0);
+  specimenRoot.add(pendulumPivot);
 
-  // Internal honey-amber candle light cradled in the floral heart
-  const heartLight = new THREE.PointLight(0xea8b38, 2.2, 4.8, 1.5);
-  heartLight.position.set(0, PETAL_BASE_Y + 0.36, 0.04);
-  specimenRoot.add(heartLight);
+  const lanternYawGroup = new THREE.Group();
+  lanternYawGroup.name = 'OvoidLanternYawGroup';
+  lanternYawGroup.position.set(0, -PENDULUM_PIVOT_Y, 0);
+  pendulumPivot.add(lanternYawGroup);
 
-  // Calyx base cup sealing petal roots
-  const calyxGeo = buildCalyxBaseCapGeometry();
-  const calyxMesh = new THREE.Mesh(calyxGeo, mats.bloomPetalMat);
-  calyxMesh.name = 'RicePaperCalyxCap';
-  calyxMesh.renderOrder = 1;
-  specimenRoot.add(calyxMesh);
+  const paperDomeGeo = buildOvoidPaperDomeGeometry(12, 56);
+  const paperDomeMesh = new THREE.Mesh(paperDomeGeo, mats.ricePaper);
+  paperDomeMesh.name = 'OvoidKozoPaperCanopy';
+  paperDomeMesh.renderOrder = 2;
+  lanternYawGroup.add(paperDomeMesh);
 
-  // 18 poised torn rice-paper petals across 3 staggered whorls
-  const petalMeshes: THREE.Mesh[] = [];
-  const hitMeshes: THREE.Object3D[] = [calyxMesh];
-  for (let p = 0; p < sim.petals.length; p++) {
-    const m = new THREE.Mesh(sim.petals[p].geometry, mats.bloomPetalMat);
-    m.name = `BloomPetal_W${sim.petals[p].spec.whorl}_${p}`;
-    specimenRoot.add(m);
-    petalMeshes.push(m);
-    hitMeshes.push(m);
+  const bambooFrameGeo = buildOvoidBambooFrameGeometry(12);
+  const bambooFrameMesh = new THREE.Mesh(bambooFrameGeo, mats.bambooFrame);
+  bambooFrameMesh.name = 'OvoidBambooFrame';
+  bambooFrameMesh.renderOrder = 3;
+  lanternYawGroup.add(bambooFrameMesh);
+
+  const suspensionCordGeo = buildSuspensionCordGeometry();
+  const suspensionCordMesh = new THREE.Mesh(suspensionCordGeo, mats.suspensionCord);
+  suspensionCordMesh.name = 'SuspensionCordAndKnot';
+  suspensionCordMesh.renderOrder = 3;
+  lanternYawGroup.add(suspensionCordMesh);
+
+  const silkVeilGeo = buildSilkGossamerVeilGeometry(12, 28);
+  const silkVeilMesh = new THREE.Mesh(silkVeilGeo, mats.silkVeil);
+  silkVeilMesh.name = 'RawSilkGossamerVeil';
+  silkVeilMesh.renderOrder = 4;
+  lanternYawGroup.add(silkVeilMesh);
+
+  const silkWrapGeo = buildSilkWrapBandsGeometry(340);
+  const silkWrapMesh = new THREE.Mesh(silkWrapGeo, mats.silkWrap);
+  silkWrapMesh.name = 'RawSilkWrapBands';
+  silkWrapMesh.renderOrder = 5;
+  lanternYawGroup.add(silkWrapMesh);
+
+  const silkLoopsGeo = buildUnspoolingSilkLoopsGeometry(sim.config.silkLoopCount);
+  const silkLoopsMesh = new THREE.Mesh(silkLoopsGeo, mats.silkLoops);
+  silkLoopsMesh.name = 'UnspoolingSilkLoops';
+  silkLoopsMesh.renderOrder = 6;
+  lanternYawGroup.add(silkLoopsMesh);
+
+  const emberCoreGeo = buildEmberCoreGeometry();
+  const emberCoreMesh = new THREE.Mesh(emberCoreGeo, mats.emberCore);
+  emberCoreMesh.name = 'LanternEmberCore';
+  emberCoreMesh.position.set(0, -0.32, 0);
+  emberCoreMesh.renderOrder = 18;
+  lanternYawGroup.add(emberCoreMesh);
+
+  // Warm interior PointLight illuminating silk strands, bamboo ribs, and emerging butterflies
+  const lanternLight = new THREE.PointLight(0xff9c42, 3.1, 5.4, 1.4);
+  lanternLight.position.set(0, -0.34, 0);
+  lanternYawGroup.add(lanternLight);
+
+  // -------------------------------------------------------------------------
+  // 2. 14 Articulated Multi-Ply Folded Origami Butterflies (4 Mineral Washi Hues)
+  // -------------------------------------------------------------------------
+  const leftWingGeo = buildOrigamiButterflyWingGeometry(-1);
+  const rightWingGeo = buildOrigamiButterflyWingGeometry(1);
+  const bodyPleatGeo = buildOrigamiButterflyBodyGeometry();
+  const butterflyGroups: THREE.Group[] = [];
+  const butterflyLeftWings: THREE.Mesh[] = [];
+  const butterflyRightWings: THREE.Mesh[] = [];
+
+  for (let i = 0; i < sim.butterflies.length; i++) {
+    const bg = new THREE.Group();
+    bg.name = `OrigamiButterfly_${i}`;
+    bg.rotation.order = 'YXZ';
+    const matIdx = i % mats.origamiButterflies.length;
+    const wingMat = mats.origamiButterflies[matIdx];
+    const lw = new THREE.Mesh(leftWingGeo, wingMat);
+    const rw = new THREE.Mesh(rightWingGeo, wingMat);
+    const body = new THREE.Mesh(bodyPleatGeo, wingMat);
+    lw.renderOrder = 26;
+    rw.renderOrder = 26;
+    body.renderOrder = 26;
+    bg.add(body, lw, rw);
+    specimenRoot.add(bg);
+    butterflyGroups.push(bg);
+    butterflyLeftWings.push(lw);
+    butterflyRightWings.push(rw);
   }
 
-  // Delicate curved botanical stamen crown + soft nectar pearl (strictly between rear & front petals)
-  const emberGeo = buildEmberPearlGeometry();
-  const emberMesh = new THREE.Mesh(emberGeo, mats.emberMat);
-  emberMesh.name = 'FloralNectarPearl';
-  emberMesh.position.set(0, PETAL_BASE_Y + 0.14, 0);
-  emberMesh.renderOrder = 19;
+  // -------------------------------------------------------------------------
+  // 3. 160 Instanced Dual-Population Silk-Dust & Rising Ember Motes
+  // -------------------------------------------------------------------------
+  const emberQuadGeo = buildEmberQuadGeometry();
+  const moteMetaArr = new Float32Array(sim.embers.length * 4);
+  const moteMetaAttr = new THREE.InstancedBufferAttribute(moteMetaArr, 4);
+  emberQuadGeo.setAttribute('aMoteMeta', moteMetaAttr);
+  const emberMesh = new THREE.InstancedMesh(emberQuadGeo, mats.emberMotes, sim.embers.length);
+  emberMesh.name = 'EmberMotes';
+  emberMesh.renderOrder = 30;
+  emberMesh.frustumCulled = false;
   specimenRoot.add(emberMesh);
-  hitMeshes.push(emberMesh);
 
-  const stamenGeo = buildStamenCrownGeometry(sim.config.stamenCount);
-  const stamenMesh = new THREE.Mesh(stamenGeo, mats.stamenMat);
-  stamenMesh.name = 'BotanicalStamenCrown';
-  stamenMesh.renderOrder = 20;
-  specimenRoot.add(stamenMesh);
+  const hitMeshes: THREE.Object3D[] = [
+    paperDomeMesh,
+    bambooFrameMesh,
+    silkWrapMesh,
+    emberCoreMesh,
+  ];
 
-  // 12 buoyant curl-gliding faceted Realgar-Amber origami moths
-  const leftWingGeo = buildOrigamiWingGeometry(-1);
-  const rightWingGeo = buildOrigamiWingGeometry(1);
-  const mothGroups: THREE.Group[] = [];
-  const mothLeftWings: THREE.Mesh[] = [];
-  const mothRightWings: THREE.Mesh[] = [];
+  // -------------------------------------------------------------------------
+  // Telemetry & Programmatic Auditioning API (window.__COCOON_ALT1__)
+  // -------------------------------------------------------------------------
+  const getTelemetry = (): Day20Alt1Telemetry => {
+    const s = sim.getState();
+    _camOffset.copy(stage.camera.position).sub(stage.controls.target);
+    const dist = Math.max(0.001, _camOffset.length());
+    const pitch = Math.asin(Math.max(-1, Math.min(1, _camOffset.y / dist)));
+    const azimuth = Math.atan2(_camOffset.x, _camOffset.z);
 
-  for (let i = 0; i < sim.moths.length; i++) {
-    const mg = new THREE.Group();
-    mg.name = `OrigamiMoth_${i}`;
-    const lw = new THREE.Mesh(leftWingGeo, mats.mothMat);
-    const rw = new THREE.Mesh(rightWingGeo, mats.mothMat);
-    lw.renderOrder = 42;
-    rw.renderOrder = 42;
-    mg.add(lw, rw);
-    specimenRoot.add(mg);
-    mothGroups.push(mg);
-    mothLeftWings.push(lw);
-    mothRightWings.push(rw);
-  }
-
-  // 280 soft radial-glow backlit pollen & silk motes
-  const pollenGeo = buildPollenBillboardQuadGeometry();
-  const pollenMesh = new THREE.InstancedMesh(pollenGeo, mats.pollenMat, sim.config.pollenCount);
-  pollenMesh.name = 'LuminousPollenMotes';
-  pollenMesh.renderOrder = 44;
-  pollenMesh.frustumCulled = false;
-  for (let i = 0; i < sim.config.pollenCount; i++) {
-    const w = sim.pollenWarmth[i];
-    if (w < 0.45) {
-      _tmpCol.lerpColors(_colorA, _colorB, w / 0.45);
-    } else {
-      _tmpCol.lerpColors(_colorB, _colorC, (w - 0.45) / 0.55);
-    }
-    pollenMesh.setColorAt(i, _tmpCol);
-  }
-  if (pollenMesh.instanceColor) pollenMesh.instanceColor.needsUpdate = true;
-  specimenRoot.add(pollenMesh);
-
-  window.__DAY20__ = {
-    getState: () => sim.getTelemetry(),
+    return {
+      stage: s.stage,
+      unravel: s.unravel,
+      breathExpansion: s.breathExpansion,
+      ignition: s.ignition,
+      emberPulse: s.emberPulse,
+      lanternSwingX: s.lanternSwingX,
+      lanternSwingZ: s.lanternSwingZ,
+      lanternYaw: s.lanternYaw,
+      lanternLiftY: s.lanternLiftY,
+      butterfliesEmerged: s.butterfliesEmerged,
+      activeButterflies: s.activeButterflies,
+      time: s.time,
+      cameraAzimuth: azimuth,
+      cameraPitch: pitch,
+      cameraDistance: dist,
+    };
   };
 
-  // =========================================================================
-  // Natural Air-Wake, Direct Petal-Pull & Orbit Controls
-  // =========================================================================
+  const setOrbit = (azimuth: number, pitch: number, distance: number, targetY?: number): void => {
+    const clampedDist = Math.max(stage.controls.minDistance, Math.min(stage.controls.maxDistance, distance));
+    const clampedPitch = Math.max(-Math.PI * 0.44, Math.min(Math.PI * 0.44, pitch));
+    if (typeof targetY === 'number' && Number.isFinite(targetY)) {
+      stage.controls.target.y = targetY;
+    }
+    const cosP = Math.cos(clampedPitch);
+    stage.camera.position.set(
+      stage.controls.target.x + Math.sin(azimuth) * cosP * clampedDist,
+      stage.controls.target.y + Math.sin(clampedPitch) * clampedDist,
+      stage.controls.target.z + Math.cos(azimuth) * cosP * clampedDist,
+    );
+    stage.camera.lookAt(stage.controls.target);
+    stage.controls.update();
+  };
+
+  window.__COCOON_ALT1__ = {
+    getState: getTelemetry,
+    setPhase: (phase: ChrysalisStage) => sim.setPhase(phase),
+    resetToBound: () => sim.resetToBound(),
+    stokeBurst: (wx = 0, wy = -0.35, wz = 0) => sim.stokeBurst(wx, wy, wz),
+    setOrbit,
+  };
+
+  // -------------------------------------------------------------------------
+  // Continuous Pointer Swirl, Click Stoke Burst, Orbit & Keyboard Shortcuts
+  // -------------------------------------------------------------------------
   const canvas = stage.shell.canvas;
-  let bootTime = performance.now();
+  const bootTime = performance.now();
   let pointerTravelPx = 0;
   let lastClientX = Number.NaN;
   let lastClientY = Number.NaN;
   let hoverUnlocked = false;
 
-  let isDraggingPetal = false;
-  let grabbedPetalIdx = -1;
-  let activePointerId = -1;
+  let isPointerDown = false;
   let downX = 0;
   let downY = 0;
-  let hasMovedDuringDrag = false;
   let hasPrevPlaneHit = false;
   let prevMoveTimeMs = performance.now();
 
@@ -201,15 +295,6 @@ export async function bootDay20Cocoon(): Promise<SpecimenStage> {
     const rect = canvas.getBoundingClientRect();
     _ndc.x = ((clientX - rect.left) / Math.max(1, rect.width)) * 2 - 1;
     _ndc.y = -((clientY - rect.top) / Math.max(1, rect.height)) * 2 + 1;
-  };
-
-  const raycastPetal = (clientX: number, clientY: number): number => {
-    updateNdcFromClient(clientX, clientY);
-    _raycaster.setFromCamera(_ndc, stage.camera);
-    const hits = _raycaster.intersectObjects(hitMeshes, false);
-    if (hits.length === 0) return -2;
-    const obj = hits[0].object;
-    return petalMeshes.indexOf(obj as THREE.Mesh);
   };
 
   const projectOntoSpecimenPlane = (clientX: number, clientY: number, out: THREE.Vector3): boolean => {
@@ -224,6 +309,12 @@ export async function bootDay20Cocoon(): Promise<SpecimenStage> {
     return false;
   };
 
+  const hitsSpecimen = (clientX: number, clientY: number): boolean => {
+    updateNdcFromClient(clientX, clientY);
+    _raycaster.setFromCamera(_ndc, stage.camera);
+    return _raycaster.intersectObjects(hitMeshes, false).length > 0;
+  };
+
   const onPointerMove = (ev: PointerEvent) => {
     if (!hoverUnlocked) {
       if (Number.isFinite(lastClientX)) {
@@ -233,7 +324,7 @@ export async function bootDay20Cocoon(): Promise<SpecimenStage> {
       lastClientY = ev.clientY;
       if (performance.now() - bootTime > 360 && pointerTravelPx >= 8) {
         hoverUnlocked = true;
-      } else if (!isDraggingPetal) {
+      } else if (!isPointerDown) {
         return;
       }
     }
@@ -242,45 +333,44 @@ export async function bootDay20Cocoon(): Promise<SpecimenStage> {
     const dtMove = Math.max(0.008, (nowMs - prevMoveTimeMs) / 1000);
     prevMoveTimeMs = nowMs;
 
-    const planeValid = projectOntoSpecimenPlane(ev.clientX, ev.clientY, _planeHit);
-    let vx = 0;
-    let vy = 0;
-    let vz = 0;
-    if (planeValid && hasPrevPlaneHit) {
-      vx = (_planeHit.x - _prevPlaneHit.x) / dtMove;
-      vy = (_planeHit.y - _prevPlaneHit.y) / dtMove;
-      vz = (_planeHit.z - _prevPlaneHit.z) / dtMove;
-    }
-
-    if (isDraggingPetal && ev.pointerId === activePointerId && planeValid) {
-      const movedPx = Math.hypot(ev.clientX - downX, ev.clientY - downY);
-      if (movedPx > 4) hasMovedDuringDrag = true;
-
+    if (projectOntoSpecimenPlane(ev.clientX, ev.clientY, _planeHit)) {
+      let vx = 0;
+      let vy = 0;
+      let vz = 0;
       if (hasPrevPlaneHit) {
-        _dragVec.copy(_planeHit).sub(_prevPlaneHit);
-        if (grabbedPetalIdx >= 0) {
-          const az = sim.petals[grabbedPetalIdx].spec.azimuth;
-          _radialDir.set(Math.sin(az), -0.32, Math.cos(az)).normalize();
-          const outwardDelta = _dragVec.dot(_radialDir);
-          const lateralDelta = _dragVec.x * Math.cos(az) - _dragVec.z * Math.sin(az);
-          sim.pullPetal(grabbedPetalIdx, outwardDelta * 0.95, lateralDelta * 0.85);
-        } else {
-          const prevDist = Math.hypot(_prevPlaneHit.x, _prevPlaneHit.y * 0.7);
-          const curDist = Math.hypot(_planeHit.x, _planeHit.y * 0.7);
-          sim.pullPetal(-1, (curDist - prevDist) * 0.95, 0);
-        }
+        vx = (_planeHit.x - _prevPlaneHit.x) / dtMove;
+        vy = (_planeHit.y - _prevPlaneHit.y) / dtMove;
+        vz = (_planeHit.z - _prevPlaneHit.z) / dtMove;
+      } else {
+        _smoothPointerWorld.copy(_planeHit);
       }
-      sim.setAirWake(_planeHit.x, _planeHit.y, _planeHit.z, vx, vy, vz, true);
-    } else if (planeValid) {
-      sim.setAirWake(_planeHit.x, _planeHit.y, _planeHit.z, vx, vy, vz, true);
-      const hitIdx = raycastPetal(ev.clientX, ev.clientY);
-      canvas.style.cursor = hitIdx !== -2 ? 'grab' : 'default';
-    }
+      // Softly low-pass raw pointer velocity so 120Hz trackpad jitter never twitches strands
+      const clampedVx = Math.max(-1.8, Math.min(1.8, vx));
+      const clampedVy = Math.max(-1.8, Math.min(1.8, vy));
+      const clampedVz = Math.max(-1.8, Math.min(1.8, vz));
+      _pointerVel.x += (clampedVx - _pointerVel.x) * 0.22;
+      _pointerVel.y += (clampedVy - _pointerVel.y) * 0.22;
+      _pointerVel.z += (clampedVz - _pointerVel.z) * 0.22;
+      _targetPointerWorld.copy(_planeHit);
 
-    if (planeValid) {
+      sim.applyPointer(
+        _planeHit.x,
+        _planeHit.y,
+        _planeHit.z,
+        _pointerVel.x,
+        _pointerVel.y,
+        _pointerVel.z,
+        isPointerDown,
+        dtMove,
+      );
       _prevPlaneHit.copy(_planeHit);
       hasPrevPlaneHit = true;
     }
+
+    if (!isPointerDown) {
+      canvas.style.cursor = hitsSpecimen(ev.clientX, ev.clientY) ? 'pointer' : 'grab';
+    }
+
     lastClientX = ev.clientX;
     lastClientY = ev.clientY;
   };
@@ -288,72 +378,52 @@ export async function bootDay20Cocoon(): Promise<SpecimenStage> {
   const onPointerDown = (ev: PointerEvent) => {
     if (ev.button !== 0) return;
     hoverUnlocked = true;
+    isPointerDown = true;
     downX = ev.clientX;
     downY = ev.clientY;
     lastClientX = ev.clientX;
     lastClientY = ev.clientY;
-    hasMovedDuringDrag = false;
     prevMoveTimeMs = performance.now();
+    canvas.style.cursor = 'grabbing';
 
     if (projectOntoSpecimenPlane(ev.clientX, ev.clientY, _planeHit)) {
       _prevPlaneHit.copy(_planeHit);
       hasPrevPlaneHit = true;
     }
-
-    const hitIdx = raycastPetal(ev.clientX, ev.clientY);
-    if (hitIdx !== -2) {
-      isDraggingPetal = true;
-      grabbedPetalIdx = hitIdx;
-      activePointerId = ev.pointerId;
-      stage.controls.enabled = false;
-      canvas.style.cursor = 'grabbing';
-      try {
-        canvas.setPointerCapture(ev.pointerId);
-      } catch {
-        // synthetic pointer events may lack active capture
-      }
-    }
   };
 
   const onPointerUp = (ev: PointerEvent) => {
-    if (isDraggingPetal && ev.pointerId === activePointerId) {
-      isDraggingPetal = false;
-      grabbedPetalIdx = -1;
-      activePointerId = -1;
-      stage.controls.enabled = true;
-      canvas.style.cursor = 'grab';
-      try {
-        if (canvas.hasPointerCapture(ev.pointerId)) {
-          canvas.releasePointerCapture(ev.pointerId);
-        }
-      } catch {
-        // ignore
-      }
+    if (!isPointerDown) return;
+    isPointerDown = false;
+    const movedPx = Math.hypot(ev.clientX - downX, ev.clientY - downY);
 
-      if (!hasMovedDuringDrag) {
-        sim.pulseBloomBurst();
+    if (movedPx < 6 && hitsSpecimen(ev.clientX, ev.clientY)) {
+      if (projectOntoSpecimenPlane(ev.clientX, ev.clientY, _planeHit)) {
+        sim.stokeBurst(_planeHit.x, _planeHit.y, _planeHit.z);
+      } else {
+        sim.stokeBurst(0, -0.35, 0);
       }
     }
+
+    canvas.style.cursor = hitsSpecimen(ev.clientX, ev.clientY) ? 'pointer' : 'grab';
   };
 
-  const onDoubleClick = (ev: MouseEvent) => {
-    const hitIdx = raycastPetal(ev.clientX, ev.clientY);
-    if (hitIdx === -2) {
-      sim.cycleBloomPreset();
-    } else {
-      sim.pulseBloomBurst();
-    }
+  const onDoubleClick = () => {
+    sim.resetToBound();
   };
 
   const onKeyDown = (ev: KeyboardEvent) => {
     if (ev.code === 'Space') {
       ev.preventDefault();
-      sim.cycleBloomPreset();
-    } else if (ev.code === 'KeyR') {
-      sim.setTargetBloom(DEFAULT_KOZO_CONFIG.initialBloom);
-      bootTime = performance.now();
-      pointerTravelPx = 0;
-      hoverUnlocked = false;
+      sim.resetToBound();
+    } else if (ev.code === 'Digit1') {
+      sim.setPhase('bound');
+    } else if (ev.code === 'Digit2') {
+      sim.setPhase('unwinding');
+    } else if (ev.code === 'Digit3') {
+      sim.setPhase('emerged');
+    } else if (ev.code === 'Digit4') {
+      sim.setPhase('buoyant');
     }
   };
 
@@ -363,62 +433,109 @@ export async function bootDay20Cocoon(): Promise<SpecimenStage> {
   canvas.addEventListener('dblclick', onDoubleClick);
   window.addEventListener('keydown', onKeyDown);
 
-  // =========================================================================
-  // Animation Loop (Zero Per-Frame Heap Allocations)
-  // =========================================================================
+  // -------------------------------------------------------------------------
+  // Animation Loop (Strictly Zero Per-Frame Heap Allocations)
+  // -------------------------------------------------------------------------
+  const syncSceneToSim = (elapsedSec: number, dtSec: number, camera: THREE.Camera) => {
+    const s = sim.state;
+
+    // 1. Isotropic world-space pendulum tilt on top cord pivot + decoupled torsional yaw on child
+    const tiltAngle = Math.hypot(s.lanternSwingX, s.lanternSwingZ);
+    if (tiltAngle > 1e-6) {
+      _tiltAxis.set(s.lanternSwingX / tiltAngle, 0, s.lanternSwingZ / tiltAngle);
+      pendulumPivot.quaternion.setFromAxisAngle(_tiltAxis, tiltAngle);
+    } else {
+      pendulumPivot.quaternion.identity();
+    }
+
+    lanternYawGroup.position.set(0, -PENDULUM_PIVOT_Y + s.lanternLiftY, 0);
+    lanternYawGroup.rotation.set(0, s.lanternYaw, 0);
+
+    const coreScale = 0.72 + 0.32 * s.ignition + 0.16 * s.emberPulse;
+    emberCoreMesh.scale.set(coreScale, coreScale * 1.15, coreScale);
+
+    specimenRoot.updateMatrixWorld(true);
+
+    // 2. Critically-damped viscous breeze filter for peaceful, zero-jitter silk motion
+    const safeDt = Math.max(0.001, Math.min(0.05, dtSec));
+    const rawDecay = Math.exp(-safeDt * 2.2);
+    _pointerVel.multiplyScalar(rawDecay);
+
+    const posAlpha = 1.0 - Math.exp(-safeDt * 4.2);
+    _smoothPointerWorld.lerp(_targetPointerWorld, posAlpha);
+    mats.uniforms.uPointerWorld.value.copy(_smoothPointerWorld);
+
+    const velAlpha = 1.0 - Math.exp(-safeDt * 3.8);
+    _smoothPointerVel.lerp(_pointerVel, velAlpha);
+    mats.uniforms.uPointerVel.value.copy(_smoothPointerVel);
+
+    // 3. Synchronize TSL material uniforms & interior candle PointLight
+    const breathPulse = 1.0 + s.emberPulse * 0.54 + Math.sin(elapsedSec * 2.3) * 0.06;
+    mats.uniforms.uTime.value = elapsedSec;
+    mats.uniforms.uUnravel.value = s.unravel;
+    mats.uniforms.uBreath.value = s.breathExpansion;
+    mats.uniforms.uIgnition.value = s.ignition;
+    mats.uniforms.uEmberPulse.value = breathPulse;
+
+    emberCoreMesh.getWorldPosition(_flameWorldPos);
+    mats.uniforms.uFlamePos.value.copy(_flameWorldPos);
+
+    lanternLight.intensity = (0.55 + s.ignition * 3.1) * breathPulse;
+
+    // 4. Update 14 articulated origami butterflies
+    for (let i = 0; i < sim.butterflies.length; i++) {
+      const bf = sim.butterflies[i];
+      const bg = butterflyGroups[i];
+      bg.visible = bf.active;
+      if (!bf.active) continue;
+
+      bg.position.set(bf.pos[0], bf.pos[1], bf.pos[2]);
+      bg.rotation.set(bf.pitch, bf.yaw, bf.roll);
+      bg.scale.setScalar(bf.scale * BUTTERFLY_BASE_SCALE);
+
+      const flap = Math.sin(bf.wingPhase) * 0.44 + 0.22;
+      butterflyLeftWings[i].rotation.z = -flap;
+      butterflyRightWings[i].rotation.z = flap;
+    }
+
+    // 5. Update 160 instanced silk-dust & rising ember motes (strictly hidden when tightly bound)
+    const emberVisible = s.stage !== 'bound' && s.unravel > 0.06;
+    emberMesh.visible = emberVisible;
+    if (emberVisible) {
+      const emberGate = Math.min(1, (s.unravel - 0.06) * 3.0);
+      for (let i = 0; i < sim.embers.length; i++) {
+        const mote = sim.embers[i];
+        const lifeFrac = mote.maxLife > 0 ? Math.max(0, Math.min(1, mote.life / mote.maxLife)) : 0;
+        const env = Math.sin(lifeFrac * Math.PI);
+        const isEmber = mote.seed > 0.68 ? 1.0 : 0.0;
+        const speed = Math.hypot(mote.vel[0], mote.vel[1], mote.vel[2]);
+        const stretch = isEmber > 0.5 ? Math.min(1.0, speed * 1.15) : 0.0;
+
+        // 68% ultra-fine pinpoint golden silk-dust sparks; 32% softly elongated warm rising embers
+        const baseScale = isEmber > 0.5 ? mote.size * 0.92 : mote.size * 0.54;
+        const sz = env > 0.02 ? baseScale * (0.48 + 0.68 * env) * emberGate : 0.0001;
+        _dummyPos.set(mote.pos[0], mote.pos[1], mote.pos[2]);
+        _dummyScale.set(sz, sz * (1.0 + stretch * 0.42), sz);
+        _dummyMatrix.compose(_dummyPos, camera.quaternion, _dummyScale);
+        emberMesh.setMatrixAt(i, _dummyMatrix);
+
+        const m4 = i * 4;
+        moteMetaArr[m4] = lifeFrac;
+        moteMetaArr[m4 + 1] = mote.seed;
+        moteMetaArr[m4 + 2] = isEmber;
+        moteMetaArr[m4 + 3] = stretch;
+      }
+      emberMesh.instanceMatrix.needsUpdate = true;
+      moteMetaAttr.needsUpdate = true;
+    }
+  };
+
+  // Sync frame 0 immediately so the initial render is cleanly posed
+  syncSceneToSim(0, 1 / 60, stage.camera);
+
   stage.onTick(({ elapsedSec, dtSec, camera }) => {
     sim.step(dtSec);
-
-    specimenRoot.position.y = Math.sin(elapsedSec * 0.72) * 0.024;
-    specimenRoot.rotation.y = Math.sin(elapsedSec * 0.30) * 0.055;
-    specimenRoot.updateMatrixWorld();
-
-    mats.uniforms.uTime.value = elapsedSec;
-    mats.uniforms.uBloom.value = sim.bloom;
-    mats.uniforms.uEmberGlow.value = sim.emberGlow;
-    mats.uniforms.uCandleOffset.value.copy(sim.candleOffset);
-    mats.uniforms.uClosedShadow.value = Math.max(0, Math.min(1, 1.0 - sim.bloom / 0.32));
-    mats.uniforms.uHoverLocal.value.copy(sim.airWakeLocal);
-    mats.uniforms.uHoverStrength.value = sim.airWakeStrength;
-
-    const heartPulse = 1.0 + Math.sin(elapsedSec * 2.1) * 0.06;
-    heartLight.intensity = (0.95 + sim.bloom * 1.75) * sim.emberGlow * heartPulse;
-    heartLight.position.set(
-      sim.candleOffset.x * 0.06,
-      PETAL_BASE_Y + 0.36 + sim.candleOffset.y * 0.05,
-      0.04
-    );
-    emberMesh.scale.setScalar(0.84 + sim.bloom * 0.18 + (sim.emberGlow - 1.0) * 0.14);
-
-    _camLocal.copy(camera.position);
-    specimenRoot.worldToLocal(_camLocal);
-    sim.applyBackToFrontRenderOrder(_camLocal, petalMeshes);
-
-    for (let i = 0; i < sim.moths.length; i++) {
-      const m = sim.moths[i];
-      const mg = mothGroups[i];
-      mg.visible = m.active;
-      if (!m.active) continue;
-
-      mg.position.copy(m.pos);
-      mg.rotation.set(m.pitch, m.heading, m.roll);
-      mg.scale.setScalar(m.scale * (0.45 + 0.55 * m.liftProgress));
-
-      const flap = Math.sin(m.wingPhase) * 0.66 + 0.16;
-      mothLeftWings[i].rotation.z = -flap;
-      mothRightWings[i].rotation.z = flap;
-    }
-
-    for (let i = 0; i < sim.config.pollenCount; i++) {
-      const i3 = i * 3;
-      const alpha = sim.pollenAlpha[i];
-      const sz = alpha > 0.02 ? sim.pollenSize[i] * (0.45 + 0.75 * alpha) : 0.0001;
-      _dummyPos.set(sim.pollenPos[i3], sim.pollenPos[i3 + 1], sim.pollenPos[i3 + 2]);
-      _dummyScale.setScalar(sz);
-      _dummyMatrix.compose(_dummyPos, camera.quaternion, _dummyScale);
-      pollenMesh.setMatrixAt(i, _dummyMatrix);
-    }
-    pollenMesh.instanceMatrix.needsUpdate = true;
+    syncSceneToSim(elapsedSec, dtSec, camera);
   });
 
   stage.shell.registerDispose(() => {
@@ -427,12 +544,17 @@ export async function bootDay20Cocoon(): Promise<SpecimenStage> {
     window.removeEventListener('pointerup', onPointerUp);
     canvas.removeEventListener('dblclick', onDoubleClick);
     window.removeEventListener('keydown', onKeyDown);
-    calyxGeo.dispose();
-    stamenGeo.dispose();
-    emberGeo.dispose();
+    paperDomeGeo.dispose();
+    bambooFrameGeo.dispose();
+    suspensionCordGeo.dispose();
+    silkVeilGeo.dispose();
+    silkWrapGeo.dispose();
+    silkLoopsGeo.dispose();
+    emberCoreGeo.dispose();
     leftWingGeo.dispose();
     rightWingGeo.dispose();
-    pollenGeo.dispose();
+    bodyPleatGeo.dispose();
+    emberQuadGeo.dispose();
     sim.dispose();
     mats.dispose();
     studioEnv.dispose();
@@ -441,4 +563,4 @@ export async function bootDay20Cocoon(): Promise<SpecimenStage> {
   return stage;
 }
 
-void bootDay20Cocoon();
+void bootDay20CocoonAlt1();

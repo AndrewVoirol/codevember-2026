@@ -1,6 +1,7 @@
 import {
   CALIBRATION_DAY,
   DAYS_MANIFEST,
+  STANDBY_MANIFEST,
   type DayEntry,
   getAdjacentCompletedDays,
   getDayByNumber,
@@ -91,6 +92,45 @@ export function mountDayShell(dayNumberOrEntry: number | DayEntry): MountedDaySh
   }
 
   drawerBackdrop.appendChild(grid);
+
+  if (STANDBY_MANIFEST.length > 0) {
+    const standbySection = document.createElement('div');
+    standbySection.className = 'day-drawer-standby';
+
+    const standbyHeading = document.createElement('div');
+    standbyHeading.className = 'day-drawer-section-label';
+    standbyHeading.textContent = 'Standby Ideas & Tangents';
+    standbySection.appendChild(standbyHeading);
+
+    const standbyGrid = document.createElement('div');
+    standbyGrid.className = 'day-drawer-standby-grid';
+
+    for (const entry of STANDBY_MANIFEST) {
+      const isCurrent = entry.slug === day.slug;
+      const link = document.createElement('a');
+      link.className = 'day-drawer-standby-item is-complete';
+      link.href = entry.route;
+      if (isCurrent) {
+        link.classList.add('is-current');
+        link.setAttribute('aria-current', 'page');
+      }
+
+      const numSpan = document.createElement('span');
+      numSpan.className = 'day-drawer-num';
+      numSpan.textContent = entry.originLabel;
+
+      const titleSpan = document.createElement('span');
+      titleSpan.textContent = `— ${entry.title}`;
+
+      link.appendChild(numSpan);
+      link.appendChild(titleSpan);
+      standbyGrid.appendChild(link);
+    }
+
+    standbySection.appendChild(standbyGrid);
+    drawerBackdrop.appendChild(standbySection);
+  }
+
   document.body.appendChild(drawerBackdrop);
 
   let isOpen = false;

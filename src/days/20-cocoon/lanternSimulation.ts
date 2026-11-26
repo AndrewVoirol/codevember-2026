@@ -274,38 +274,38 @@ export class SilkLanternSimulation {
     this.wakeY = wy;
     this.wakeZ = wz;
 
-    const blend = 1 - Math.exp(-safeDt * 18);
+    const blend = 1 - Math.exp(-safeDt * 6.5);
     this.wakeVelX += (cvx - this.wakeVelX) * blend;
     this.wakeVelY += (cvy - this.wakeVelY) * blend;
     this.wakeVelZ += (cvz - this.wakeVelZ) * blend;
 
     if (speed > 0.025 || isDown) {
       this.wakeStrength = clamp(
-        this.wakeStrength + (isDown ? 0.42 : 0.24) * (0.35 + Math.min(1.6, speed * 0.45)),
+        this.wakeStrength + (isDown ? 0.22 : 0.11) * (0.28 + Math.min(1.0, speed * 0.30)),
         0,
-        1.5
+        0.95
       );
     }
 
-    // Hanging lantern pendulum torque & torsional yaw from pointer wind
+    // Hanging lantern pendulum torque & torsional yaw from gentle pointer breeze
     const dyLantern = wy - this.state.lanternLiftY;
     const lanternDistSq = wx * wx + dyLantern * dyLantern + wz * wz;
     const lanternProx = Math.exp(-lanternDistSq * 0.65);
 
     if (speed > 0.02) {
-      const windGain = lanternProx * safeDt * (isDown ? 2.5 : 1.55);
-      // Horizontal sweep swings the hanging lantern in the direction of airflow
-      this.swingZVel += clamp(cvx * windGain * 0.45, -0.85, 0.85);
-      this.swingXVel += clamp(-cvz * windGain * 0.42 + cvy * windGain * 0.12, -0.85, 0.85);
-      const torqueY = (wz * cvx - wx * cvz) * windGain * 0.42;
-      this.yawVel += clamp(torqueY, -0.8, 0.8);
+      const windGain = lanternProx * safeDt * (isDown ? 1.45 : 0.72);
+      // Horizontal sweep gently rocks the hanging lantern in the direction of airflow
+      this.swingZVel += clamp(cvx * windGain * 0.38, -0.45, 0.45);
+      this.swingXVel += clamp(-cvz * windGain * 0.36 + cvy * windGain * 0.10, -0.45, 0.45);
+      const torqueY = (wz * cvx - wx * cvz) * windGain * 0.34;
+      this.yawVel += clamp(torqueY, -0.45, 0.45);
 
-      // Sweeping across the silk-wrapped waist gradually unwinds more silk!
+      // Sweeping across the silk-wrapped waist gradually unwinds more silk
       const radialXZ = Math.hypot(wx, wz);
       if (wy >= -0.68 && wy <= 0.28 && radialXZ < 1.15 && speed > 0.22) {
-        const unwindBoost = speed * safeDt * (isDown ? 0.09 : 0.028) * lanternProx;
+        const unwindBoost = speed * safeDt * (isDown ? 0.075 : 0.022) * lanternProx;
         this.state.unravel = clamp(this.state.unravel + unwindBoost, 0.02, 1.0);
-        this.state.emberPulse = Math.min(1.6, this.state.emberPulse + unwindBoost * 1.4);
+        this.state.emberPulse = Math.min(1.4, this.state.emberPulse + unwindBoost * 1.1);
       }
     }
 
@@ -645,24 +645,40 @@ export class SilkLanternSimulation {
       let y: number;
       let rad: number;
 
-      if (i < 3) {
-        // Near bottom bamboo mouth hoop
-        ang = -0.55 + i * 0.68;
-        y = LANTERN_BOTTOM_Y - 0.06 - i * 0.09 + liftY;
-        rad = 0.18 + i * 0.13 * spreadScale;
-      } else if (i < 6) {
-        // Emerging from left & right waist silk loops
-        const isLeft = i === 3;
-        ang = isLeft ? Math.PI + 0.12 : -0.18 + (i - 4) * 0.55;
-        y = -0.34 + (i - 3) * 0.14 + liftY;
-        rad = (ovoidShellRadiusAtY(y - liftY) + 0.18 + bf.orbitSeed * 0.14) * spreadScale;
+      if (i < 2) {
+        // Two hero emerging butterflies poised right along the front-right bottom bamboo mouth rim (Macro!)
+        // Seated strictly outside r = 0.28 with clear breathing room so wings never clip the bamboo hoop
+        ang = 1.06 + i * 0.42;
+        y = LANTERN_BOTTOM_Y - 0.02 - i * 0.05 + liftY;
+        rad = LANTERN_MOUTH_RADIUS + 0.135 + i * 0.055 * spreadScale;
+      } else if (i === 2) {
+        // Emerging butterfly drifting just beneath the glowing mouth hoop (Hero bottom)
+        ang = 1.62;
+        y = LANTERN_BOTTOM_Y - 0.26 + liftY;
+        rad = 0.26 * spreadScale;
+      } else if (i === 3) {
+        // Left-flank butterfly skimming out of the billowing gossamer silk loops (Hero left!)
+        ang = Math.PI - 0.16;
+        y = -0.18 + liftY;
+        rad = (ovoidShellRadiusAtY(-0.18) + 0.42) * spreadScale;
+      } else if (i === 4) {
+        // Front-right hero butterfly crossing directly in front of the golden silk X-band (Hero match!)
+        ang = 0.92;
+        y = 0.04 + liftY;
+        rad = (ovoidShellRadiusAtY(0.04) + 0.22) * spreadScale;
+      } else if (i === 5) {
+        // Lower-right emerging butterfly near the waist silk wisps
+        ang = 0.24;
+        y = -0.26 + liftY;
+        rad = (ovoidShellRadiusAtY(-0.26) + 0.44) * spreadScale;
       } else {
-        // Spiraling up the right & upper flanks toward the crown (matches Hero render!)
+        // Airy, generously spaced ascending spiral up the right & upper crown (Hero right arc!)
         const slot = (i - 6) / Math.max(1, quota - 6);
-        ang = -0.42 + slot * 1.15 + (i % 2 === 0 ? 0.12 : -0.18);
-        y = -0.08 + slot * 1.05 + liftY;
+        const angleWave = (i % 2 === 0 ? 0.28 : -0.26);
+        ang = 0.18 - slot * 0.88 + angleWave;
+        y = 0.02 + slot * 1.16 + liftY;
         const shellR = ovoidShellRadiusAtY(y - liftY);
-        rad = Math.max(0.55, shellR + 0.24 + slot * 0.22) * spreadScale;
+        rad = Math.max(0.58, shellR + 0.34 + (i % 2) * 0.22 + slot * 0.18) * spreadScale;
       }
 
       this.bfOrbitAngle[i] = ang;
@@ -672,14 +688,15 @@ export class SilkLanternSimulation {
       bf.pos[0] = Math.cos(ang) * rad;
       bf.pos[1] = y;
       bf.pos[2] = Math.sin(ang) * rad;
-      bf.vel[0] = -Math.sin(ang) * 0.22 * this.bfOrbitDir[i];
-      bf.vel[1] = 0.16 + bf.orbitSeed * 0.12;
-      bf.vel[2] = Math.cos(ang) * 0.22 * this.bfOrbitDir[i];
-      bf.yaw = Math.atan2(bf.vel[0], bf.vel[2]);
-      bf.pitch = 0.26;
-      bf.roll = 0.12 * this.bfOrbitDir[i];
+      bf.vel[0] = -Math.sin(ang) * 0.18 * this.bfOrbitDir[i];
+      bf.vel[1] = 0.14 + bf.orbitSeed * 0.10;
+      bf.vel[2] = Math.cos(ang) * 0.18 * this.bfOrbitDir[i];
+      // Orient poised emerging butterflies outward/upward so their folded wings face the studio viewer
+      bf.yaw = i < 2 ? Math.atan2(bf.pos[0], bf.pos[2]) : Math.atan2(bf.vel[0], bf.vel[2]);
+      bf.pitch = i < 2 ? -1.12 : -0.78 - bf.orbitSeed * 0.24;
+      bf.roll = 0.14 * this.bfOrbitDir[i];
       bf.scale = this.bfBaseScale[i];
-      bf.warmTint = 0.35 + bf.orbitSeed * 0.62;
+      bf.warmTint = (i % 4) / 3;
       bf.emerged = true;
       bf.active = true;
       activeCount++;
@@ -717,10 +734,10 @@ export class SilkLanternSimulation {
     }
 
     bf.yaw = Math.atan2(bf.vel[0], bf.vel[2]);
-    bf.pitch = 0.28;
+    bf.pitch = -0.78;
     bf.roll = 0;
-    bf.scale = this.bfBaseScale[i] * 0.55;
-    bf.warmTint = 0.42 + bf.orbitSeed * 0.55;
+    bf.scale = this.bfBaseScale[i] * 0.58;
+    bf.warmTint = (i % 4) / 3;
     bf.emerged = true;
     bf.active = true;
     this.bfStartle[i] = boosted ? 1.2 : 0.45;
@@ -936,15 +953,15 @@ export class SilkLanternSimulation {
         }
       }
 
-      // Smooth flight orientation & climb-coupled wingbeat frequency
+      // Smooth flight orientation (negative X pitch tilts +Z anterior nose UP and twin tails DOWN!)
       const horizSpeed = Math.hypot(bf.vel[0], bf.vel[2]);
       if (horizSpeed > 0.015) {
         const desiredYaw = Math.atan2(bf.vel[0], bf.vel[2]);
         bf.yaw += angleDiff(desiredYaw, bf.yaw) * (1 - Math.exp(-dt * 7.2));
       }
-      const desiredPitch = clamp(0.18 + bf.vel[1] * 0.56, -0.45, 0.76);
+      const desiredPitch = clamp(-0.56 - bf.vel[1] * 0.62, -1.16, -0.22);
       bf.pitch += (desiredPitch - bf.pitch) * (1 - Math.exp(-dt * 6.0));
-      const desiredRoll = clamp(-bf.vel[0] * 0.48 + this.bfOrbitDir[i] * 0.16, -0.65, 0.65);
+      const desiredRoll = clamp(-bf.vel[0] * 0.44 + this.bfOrbitDir[i] * 0.14, -0.62, 0.62);
       bf.roll += (desiredRoll - bf.roll) * (1 - Math.exp(-dt * 6.0));
 
       const wingBoost = Math.max(0, bf.vel[1]) * 7.4 + horizSpeed * 3.2 + this.bfStartle[i] * 6.8;

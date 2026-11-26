@@ -40,6 +40,21 @@ function discoverMpaInputs(rootDir: string): Record<string, string> {
     }
   }
 
+  // Archived Standby Ideas & tangent MPA routes under standby/<slug>/index.html
+  const standbyRoot = path.resolve(rootDir, 'standby');
+  if (fs.existsSync(standbyRoot)) {
+    const standbyEntries = fs.readdirSync(standbyRoot, { withFileTypes: true });
+    for (const entry of standbyEntries) {
+      if (!entry.isDirectory()) continue;
+      if (/^[a-z0-9-]+$/.test(entry.name)) {
+        const htmlPath = path.resolve(standbyRoot, entry.name, 'index.html');
+        if (fs.existsSync(htmlPath)) {
+          inputs[`standby/${entry.name}`] = htmlPath;
+        }
+      }
+    }
+  }
+
   return inputs;
 }
 

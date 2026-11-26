@@ -8,32 +8,32 @@
     "drawerCount": 30
   },
   "telemetry": {
-    "frameCount": 402,
+    "frameCount": 383,
     "avgFrameMs": 8.33,
-    "p95FrameMs": 9,
+    "p95FrameMs": 9.3,
     "sceneState": {
       "day": 20,
       "slug": "20-cocoon",
       "headerLabel": "Day 20 - Cocoon",
-      "frameCount": 402,
+      "frameCount": 383,
       "cameraPos": [
-        0.18,
-        2.3799999999999994,
-        5.75
+        -2.190498392966986,
+        3.9996236473983062,
+        -0.2592535737019964
       ],
       "pointerWorld": [
-        0.4696106334017228,
-        -0.28972150905917093,
-        0.10219547600086365
+        -0.2663159282101861,
+        -0.12620389183473435,
+        0.3129006835599697
       ],
       "pointerSpeed": 0,
-      "pointerDwellSec": 1.9499,
+      "pointerDwellSec": 1.9578,
       "pointerImpulse": 0.0007
     }
   },
   "metrics": {
-    "specimenCoverageRatio": 0.0932,
-    "interactionMad": 4.783
+    "specimenCoverageRatio": 0.1523,
+    "interactionMad": 9.397
   },
   "gpuErrors": [],
   "gateFailures": [],
