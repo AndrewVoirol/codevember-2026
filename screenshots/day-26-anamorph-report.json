@@ -8,28 +8,28 @@
     "drawerCount": 30
   },
   "telemetry": {
-    "frameCount": 317,
-    "avgFrameMs": 13.81,
-    "p95FrameMs": 20.9,
+    "frameCount": 277,
+    "avgFrameMs": 13.04,
+    "p95FrameMs": 25.1,
     "sceneState": {
       "day": 26,
       "slug": "26-anamorph",
       "headerLabel": "Day 26 - Anamorph",
-      "frameCount": 317,
+      "frameCount": 277,
       "cameraPos": [
-        -0.6488206648783557,
-        5.351022806327955,
-        -0.005030169502843852
+        -1.097129746794415,
+        5.189855315797589,
+        0.4146285094376861
       ],
       "pointerWorld": [
-        -0.32305513230330973,
-        -0.038577613028983215,
-        0.4011455696669709
+        -0.15223315960909356,
+        -0.07040046116765275,
+        0.4834705984805526
       ],
       "pointerSpeed": 0.0002,
-      "pointerDwellSec": 2.2324,
-      "pointerImpulse": 0.0003,
-      "alignmentErrorDeg": 76.244,
+      "pointerDwellSec": 2.3042,
+      "pointerImpulse": 0.0002,
+      "alignmentErrorDeg": 74.967,
       "isLockedIn": false,
       "activeStencilIndex": 0,
       "projectionCount": 1,
@@ -41,8 +41,8 @@
     }
   },
   "metrics": {
-    "specimenCoverageRatio": 0.2951,
-    "interactionMad": 25.215
+    "specimenCoverageRatio": 0.2995,
+    "interactionMad": 27.657
   },
   "gpuErrors": [],
   "gateFailures": [],

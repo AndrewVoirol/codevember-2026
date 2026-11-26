@@ -36,6 +36,8 @@ export interface VantageBasis {
   readonly tanHalfFov: number;
   readonly distance: number;
   readonly stencilScale: number;
+  /** Exact [zNear, zFar] depth bounds of the 30-slab courtyard along `forward` for 3D depth-wave cast. */
+  readonly depthRange: readonly [number, number];
 }
 
 export interface ProjectiveUvResult {
@@ -108,11 +110,15 @@ export const DEFAULT_VANTAGE_POS: Vec3Tuple = sphericalToCartesian(
 );
 
 /**
- * Initial oblique architectural 3/4 view (~22.6 deg off the sweet spot) so frame 0
- * immediately reveals the fractured Felice Varini pigment bands splayed across
- * separated concrete planes alongside the hovering brass surveyor's sight-ring.
+ * Initial camera pose opens dead-locked at the optical sweet spot (0.000 deg) so the
+ * geometric figure initially reads as a seamless floating emblem across the concrete
+ * courtyard — then immediately cracks open into its 3D painted stonework reveal on
+ * even a subtle micro-oblique hover shift, drag, or close-up zoom.
  */
-export const INITIAL_CAMERA_POS: Vec3Tuple = sphericalToCartesian(
+export const INITIAL_CAMERA_POS: Vec3Tuple = [...DEFAULT_VANTAGE_POS];
+
+/** Canonical oblique reference pose (~22.6 deg off-axis) for tests and comparisons. */
+export const OBLIQUE_REFERENCE_CAMERA_POS: Vec3Tuple = sphericalToCartesian(
   VANTAGE_TARGET,
   5.42,
   DEFAULT_VANTAGE_AZIMUTH_RAD - 0.39,
@@ -133,10 +139,13 @@ export const OCCLUSION_SELF_BIAS = 0.018;
 export const OCCLUSION_MIN_T = 0.001;
 export const OCCLUSION_FRONT_DOT_MIN = 0.025;
 
-/** Magnetic sweet-spot detent & lock-in thresholds. */
-export const LOCK_IN_ANGULAR_DEG = 1.65;
-export const LOCK_IN_RADIAL_TOL = 0.18;
-export const DETENT_CAPTURE_DEG = 3.6;
+/** Magnetic sweet-spot detent, lock-in thresholds, hover sway & stencil settle timing. */
+export const LOCK_IN_ANGULAR_DEG = 1.35;
+export const LOCK_IN_RADIAL_TOL = 0.22;
+export const DETENT_CAPTURE_DEG = 2.2;
+export const HOVER_MAX_AZ_RAD = (6.8 * Math.PI) / 180;
+export const HOVER_MAX_EL_RAD = (3.6 * Math.PI) / 180;
+export const STAMP_WAVE_DURATION_SEC = 0.22;
 
 export const STENCIL_CONFIGS: readonly StencilDefinition[] = [
   {
@@ -488,6 +497,29 @@ export function computeVantageBasis(
   const tanHalfFov = Math.tan((fovDeg * Math.PI) / 360);
   const stencilScale = clamp(DEFAULT_VANTAGE_RADIUS / distance, 0.72, 1.45);
 
+  // Project the 8 outer bounding corners of the 30-slab courtyard onto `forward`
+  // so the 3D projector depth-wave always sweeps cleanly from nearest pier to rearmost wall
+  // from ANY 360-degree camera angle and zoom distance!
+  let zNear = Infinity;
+  let zFar = -Infinity;
+  const xs = [-1.24, 1.24];
+  const ys = [-0.70, 0.92];
+  const zs = [-1.12, 1.12];
+  for (let ix = 0; ix < 2; ix++) {
+    for (let iy = 0; iy < 2; iy++) {
+      for (let iz = 0; iz < 2; iz++) {
+        const zProj =
+          (xs[ix] - vantagePos[0]) * forward[0] +
+          (ys[iy] - vantagePos[1]) * forward[1] +
+          (zs[iz] - vantagePos[2]) * forward[2];
+        if (zProj < zNear) zNear = zProj;
+        if (zProj > zFar) zFar = zProj;
+      }
+    }
+  }
+  const clampedNear = Math.max(0.08, zNear);
+  const clampedFar = Math.max(clampedNear + 0.35, zFar);
+
   return {
     pos: [vantagePos[0], vantagePos[1], vantagePos[2]],
     target: [target[0], target[1], target[2]],
@@ -498,6 +530,7 @@ export function computeVantageBasis(
     tanHalfFov,
     distance,
     stencilScale,
+    depthRange: [clampedNear, clampedFar],
   };
 }
 
@@ -878,10 +911,24 @@ export function computeSightRingPose(basis: VantageBasis): {
   };
 }
 
+export function cartesianToSpherical(
+  pos: readonly [number, number, number],
+  target: readonly [number, number, number]
+): { radius: number; azimuthRad: number; elevationRad: number } {
+  const dx = pos[0] - target[0];
+  const dy = pos[1] - target[1];
+  const dz = pos[2] - target[2];
+  const radius = Math.max(0.25, Math.hypot(dx, dy, dz));
+  const elevationRad = Math.asin(clamp(dy / radius, -0.998, 0.998));
+  const azimuthRad = Math.atan2(dx, dz);
+  return { radius, azimuthRad, elevationRad };
+}
+
 /**
  * Pure deterministic controller for Day 26 - Anamorph:
- * manages projective vantage state, live re-projection history (for zero-latency click
- * + clean double-click rollback), magnetic detent cushion, lock-in glide, and scan flash.
+ * manages projective vantage state, subtle micro-oblique hover parallax reveal,
+ * live re-projection history (for zero-latency click + clean double-click rollback),
+ * magnetic detent cushion, lock-in glide, and scan flash.
  */
 export class AnamorphController {
   vantageBasis: VantageBasis;
@@ -897,15 +944,25 @@ export class AnamorphController {
 
   /** Optical scan-flash progress in [0, 1]; 1 = settled, < 1 = actively sweeping. */
   flashProgress = 1;
-  /** Visibility factor [0, 1] for the brass optical sight-ring (fades cleanly at lock-in). */
-  sightRingAlpha = 1;
+  /** Visibility factor [0, 1] for the brass optical sight-ring (hidden at lock-in & micro-oblique). */
+  sightRingAlpha = 0;
 
   isDragging = false;
   glideActive = false;
+
   private glideStartPos: Vec3Tuple = [...INITIAL_CAMERA_POS];
   private glideElapsedSec = 0;
   private readonly glideDurationSec = 0.72;
   private wheelSuppressSec = 0;
+
+  // Reversible subtle micro-oblique hover parallax (never fights OrbitControls drag or zoom!)
+  private hoverEnabled = false;
+  private hoverTargetAzRad = 0;
+  private hoverTargetElRad = 0;
+  private hoverAzRad = 0;
+  private hoverElRad = 0;
+  private appliedHoverAzRad = 0;
+  private appliedHoverElRad = 0;
 
   private prevProjection: ProjectionSnapshot | null = null;
   private lastProjectionTimeMs = -1e9;
@@ -924,15 +981,16 @@ export class AnamorphController {
     this.alignmentErrorDeg = m.angularErrorDeg;
     this.radialError = m.radialError;
     this.isLockedIn = m.isLockedIn;
-    // Brass sight-ring smoothly dissolves both as viewer enters the optical eyepiece
-    // AND when zooming in close inside the courtyard to inspect stone & stair micro-detail
+    // Brass sight-ring stays completely hidden at lock-in AND across the subtle micro-oblique
+    // hover window (< 5.8 deg), emerging smoothly once the viewer orbits deeper into 3D space
+    // and dissolving cleanly when zooming in close inside the courtyard.
     const camDist = Math.hypot(
       this.cameraPos[0] - this.vantageBasis.target[0],
       this.cameraPos[1] - this.vantageBasis.target[1],
       this.cameraPos[2] - this.vantageBasis.target[2]
     );
-    const angleFade = smoothstep(1.2, 7.5, m.angularErrorDeg);
-    const closeZoomFade = smoothstep(2.15, 2.75, camDist);
+    const angleFade = smoothstep(7.5, 14.0, m.angularErrorDeg);
+    const closeZoomFade = smoothstep(2.25, 2.85, camDist);
     this.sightRingAlpha = angleFade * closeZoomFade;
   }
 
@@ -943,9 +1001,34 @@ export class AnamorphController {
     this.syncAlignment();
   }
 
+  /**
+   * Feeds guarded viewport pointer NDC ([-1, 1]) to drive subtle micro-oblique
+   * parallax sway around the optical sweet spot.
+   */
+  setHoverNdc(ndcX: number, ndcY: number): void {
+    this.hoverEnabled = true;
+    const sx = clamp(ndcX, -1, 1);
+    const sy = clamp(ndcY, -1, 1);
+    // Gentle nonlinear response: sensitive right off center so even micro-moves crack the illusion!
+    this.hoverTargetAzRad = Math.tanh(sx * 1.15) * HOVER_MAX_AZ_RAD;
+    this.hoverTargetElRad = -Math.tanh(sy * 1.15) * HOVER_MAX_EL_RAD;
+  }
+
+  /** Smoothly relaxes subtle micro-oblique hover parallax back to exact 0.000 deg alignment. */
+  clearHover(): void {
+    this.hoverEnabled = false;
+    this.hoverTargetAzRad = 0;
+    this.hoverTargetElRad = 0;
+  }
+
   notifyDragStart(): void {
     this.isDragging = true;
     this.glideActive = false;
+    // Seamlessly absorb current visual micro-oblique offset into OrbitControls (zero camera pop!)
+    this.appliedHoverAzRad = 0;
+    this.appliedHoverElRad = 0;
+    this.hoverAzRad = 0;
+    this.hoverElRad = 0;
   }
 
   notifyDragEnd(): void {
@@ -959,7 +1042,8 @@ export class AnamorphController {
 
   /**
    * Projects and bakes a fresh Felice Varini mineral stencil from `fromCameraPos`,
-   * advancing to the next geometric stencil and triggering the optical projection scan-flash.
+   * advancing to the next geometric stencil and sweeping the 3D depth-wave optical cast
+   * from near piers to rear walls without moving the user's camera.
    */
   projectFromViewpoint(
     fromCameraPos: readonly [number, number, number],
@@ -982,6 +1066,13 @@ export class AnamorphController {
     this.vantageBasis = computeVantageBasis(fromCameraPos, this.cameraTarget, STAGE_FOV_DEG);
     this.flashProgress = 0;
     this.glideActive = false;
+    this.hoverEnabled = false;
+    this.hoverTargetAzRad = 0;
+    this.hoverTargetElRad = 0;
+    this.hoverAzRad = 0;
+    this.hoverElRad = 0;
+    this.appliedHoverAzRad = 0;
+    this.appliedHoverElRad = 0;
 
     this.cameraPos[0] = fromCameraPos[0];
     this.cameraPos[1] = fromCameraPos[1];
@@ -1020,11 +1111,19 @@ export class AnamorphController {
     this.glideElapsedSec = 0;
     this.glideActive = true;
     this.wheelSuppressSec = 0;
+    this.hoverEnabled = false;
+    this.hoverTargetAzRad = 0;
+    this.hoverTargetElRad = 0;
+    this.hoverAzRad = 0;
+    this.hoverElRad = 0;
+    this.appliedHoverAzRad = 0;
+    this.appliedHoverElRad = 0;
   }
 
   /**
-   * Advances scan-flash, smooth lock-in glide, and gentle magnetic detent cushioning.
-   * Returns `true` if `outCameraPos` was modified by glide or magnetic detent.
+   * Advances 3D depth-wave cast, smooth lock-in glide, gentle magnetic detent cushioning,
+   * and reversible subtle micro-oblique hover parallax.
+   * Returns `true` if `outCameraPos` was modified.
    */
   step(
     dtSec: number,
@@ -1033,7 +1132,7 @@ export class AnamorphController {
   ): boolean {
     const dt = Math.max(0, Math.min(0.1, dtSec));
     if (this.flashProgress < 1) {
-      this.flashProgress = Math.min(1, this.flashProgress + dt / 0.52);
+      this.flashProgress = Math.min(1, this.flashProgress + dt / STAMP_WAVE_DURATION_SEC);
     }
     if (this.wheelSuppressSec > 0) {
       this.wheelSuppressSec = Math.max(0, this.wheelSuppressSec - dt);
@@ -1043,7 +1142,6 @@ export class AnamorphController {
     if (this.glideActive) {
       this.glideElapsedSec += dt;
       const rawT = clamp(this.glideElapsedSec / this.glideDurationSec, 0, 1);
-      // Cubic ease-in-out for crisp optical glide without abrupt snap
       const ease = rawT < 0.5 ? 4 * rawT * rawT * rawT : 1 - Math.pow(-2 * rawT + 2, 3) / 2;
 
       const t = this.vantageBasis.target;
@@ -1059,8 +1157,7 @@ export class AnamorphController {
       const vRad = Math.max(0.25, Math.hypot(vx, vy, vz));
       const vDir = [vx / vRad, vy / vRad, vz / vRad];
 
-      // Spherical interpolation along unit sphere (with safe antipodal midpoint bias)
-      let dotP = clamp(sDir[0] * vDir[0] + sDir[1] * vDir[1] + sDir[2] * vDir[2], -1, 1);
+      const dotP = clamp(sDir[0] * vDir[0] + sDir[1] * vDir[1] + sDir[2] * vDir[2], -1, 1);
       let dx: number;
       let dy: number;
       let dz: number;
@@ -1069,7 +1166,6 @@ export class AnamorphController {
         dy = vDir[1];
         dz = vDir[2];
       } else if (dotP < -0.995) {
-        // Near-antipodal: arc gently over the right/upper side so we never pass through origin
         const midX = sDir[0] * (1 - ease) + vDir[0] * ease + Math.sin(ease * Math.PI) * 0.65;
         const midY = sDir[1] * (1 - ease) + vDir[1] * ease + Math.sin(ease * Math.PI) * 0.35;
         const midZ = sDir[2] * (1 - ease) + vDir[2] * ease;
@@ -1103,41 +1199,98 @@ export class AnamorphController {
       return true;
     }
 
-    this.setCameraPos(liveCameraPos[0], liveCameraPos[1], liveCameraPos[2]);
+    // While user is actively dragging, never fight OrbitControls
+    if (this.isDragging) {
+      this.setCameraPos(liveCameraPos[0], liveCameraPos[1], liveCameraPos[2]);
+      outCameraPos[0] = liveCameraPos[0];
+      outCameraPos[1] = liveCameraPos[1];
+      outCameraPos[2] = liveCameraPos[2];
+      return false;
+    }
 
-    // 2. Gentle magnetic optical detent when released inside DETENT_CAPTURE_DEG (never fights drag!)
+    const t = this.vantageBasis.target;
+    const liveSph = cartesianToSpherical(liveCameraPos, t);
+
+    // Strip previously applied hover offset to recover true user base orbit pose
+    let baseAz = liveSph.azimuthRad - this.appliedHoverAzRad;
+    let baseEl = clamp(liveSph.elevationRad - this.appliedHoverElRad, -1.42, 1.42);
+    let baseRad = liveSph.radius;
+    const basePos = sphericalToCartesian(t, baseRad, baseAz, baseEl);
+    const baseMetrics = computeAlignmentMetrics(basePos, this.vantageBasis.pos, t);
+    const vRad = this.vantageBasis.distance;
+
+    let modified = false;
+
+    // 2. Gentle magnetic optical detent strictly on `basePos` when released inside DETENT_CAPTURE_DEG
+    //    Never yanks user's zoomed-in macro inspection radius back out!
+    const nearVantageRadius = Math.abs(baseRad - vRad) < 0.42;
     if (
-      !this.isDragging &&
-      this.alignmentErrorDeg <= DETENT_CAPTURE_DEG &&
-      (this.alignmentErrorDeg > 0.008 || (this.wheelSuppressSec <= 0 && this.radialError > 0.004))
+      baseMetrics.angularErrorDeg <= DETENT_CAPTURE_DEG &&
+      (baseMetrics.angularErrorDeg > 0.006 || (nearVantageRadius && this.wheelSuppressSec <= 0 && baseMetrics.radialError > 0.004))
     ) {
       const pullStrength = 1 - Math.exp(-dt * 7.5);
-      const t = this.vantageBasis.target;
-      const cx = liveCameraPos[0] - t[0];
-      const cy = liveCameraPos[1] - t[1];
-      const cz = liveCameraPos[2] - t[2];
-      const cRad = Math.max(0.25, Math.hypot(cx, cy, cz));
+      const bx = basePos[0] - t[0];
+      const by = basePos[1] - t[1];
+      const bz = basePos[2] - t[2];
+      const bLen = Math.max(0.25, Math.hypot(bx, by, bz));
 
       const vx = this.vantageBasis.pos[0] - t[0];
       const vy = this.vantageBasis.pos[1] - t[1];
       const vz = this.vantageBasis.pos[2] - t[2];
-      const vRad = Math.max(0.25, Math.hypot(vx, vy, vz));
 
-      const nx = (cx / cRad) * (1 - pullStrength) + (vx / vRad) * pullStrength;
-      const ny = (cy / cRad) * (1 - pullStrength) + (vy / vRad) * pullStrength;
-      const nz = (cz / cRad) * (1 - pullStrength) + (vz / vRad) * pullStrength;
+      const nx = (bx / bLen) * (1 - pullStrength) + (vx / vRad) * pullStrength;
+      const ny = (by / bLen) * (1 - pullStrength) + (vy / vRad) * pullStrength;
+      const nz = (bz / bLen) * (1 - pullStrength) + (vz / vRad) * pullStrength;
       const nLen = Math.max(1e-6, Math.hypot(nx, ny, nz));
 
-      const targetRad =
-        this.wheelSuppressSec > 0 ? cRad : cRad + (vRad - cRad) * (1 - Math.exp(-dt * 5.0));
+      if (nearVantageRadius && this.wheelSuppressSec <= 0) {
+        baseRad = baseRad + (vRad - baseRad) * (1 - Math.exp(-dt * 5.0));
+      }
+      const pulledPos: Vec3Tuple = [
+        t[0] + (nx / nLen) * baseRad,
+        t[1] + (ny / nLen) * baseRad,
+        t[2] + (nz / nLen) * baseRad,
+      ];
+      const pulledSph = cartesianToSpherical(pulledPos, t);
+      baseAz = pulledSph.azimuthRad;
+      baseEl = pulledSph.elevationRad;
+      modified = true;
+    }
 
-      outCameraPos[0] = t[0] + (nx / nLen) * targetRad;
-      outCameraPos[1] = t[1] + (ny / nLen) * targetRad;
-      outCameraPos[2] = t[2] + (nz / nLen) * targetRad;
+    // 3. Reversible subtle micro-oblique hover parallax around sweet spot (instant tactile reveal!)
+    const hoverAngleEnv = 1 - smoothstep(4.5, 10.0, baseMetrics.angularErrorDeg);
+    const hoverZoomEnv = 0.25 + 0.75 * smoothstep(1.35, 3.6, baseRad);
+    const hoverGain = hoverAngleEnv * hoverZoomEnv;
+    const goalHoverAz = this.hoverEnabled ? this.hoverTargetAzRad * hoverGain : 0;
+    const goalHoverEl = this.hoverEnabled ? this.hoverTargetElRad * hoverGain : 0;
+
+    const hoverAlpha = 1 - Math.exp(-dt * 7.2);
+    this.hoverAzRad += (goalHoverAz - this.hoverAzRad) * hoverAlpha;
+    this.hoverElRad += (goalHoverEl - this.hoverElRad) * hoverAlpha;
+    if (Math.abs(this.hoverAzRad) < 1e-5 && Math.abs(goalHoverAz) < 1e-5) this.hoverAzRad = 0;
+    if (Math.abs(this.hoverElRad) < 1e-5 && Math.abs(goalHoverEl) < 1e-5) this.hoverElRad = 0;
+
+    const hoverChanged =
+      Math.abs(this.hoverAzRad - this.appliedHoverAzRad) > 1e-6 ||
+      Math.abs(this.hoverElRad - this.appliedHoverElRad) > 1e-6;
+
+    if (modified || hoverChanged) {
+      const finalPos = sphericalToCartesian(
+        t,
+        baseRad,
+        baseAz + this.hoverAzRad,
+        clamp(baseEl + this.hoverElRad, -1.42, 1.42)
+      );
+      this.appliedHoverAzRad = this.hoverAzRad;
+      this.appliedHoverElRad = this.hoverElRad;
+      outCameraPos[0] = finalPos[0];
+      outCameraPos[1] = finalPos[1];
+      outCameraPos[2] = finalPos[2];
       this.setCameraPos(outCameraPos[0], outCameraPos[1], outCameraPos[2]);
       return true;
     }
 
+    this.setCameraPos(liveCameraPos[0], liveCameraPos[1], liveCameraPos[2]);
     outCameraPos[0] = liveCameraPos[0];
     outCameraPos[1] = liveCameraPos[1];
     outCameraPos[2] = liveCameraPos[2];

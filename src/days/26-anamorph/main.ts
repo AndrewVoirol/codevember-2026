@@ -43,31 +43,31 @@ async function mountDay26Anamorph(): Promise<void> {
   });
 
   // Smooth 360-degree architectural turntable orbit + close-up macro inspection inside courtyard
-  stage.camera.near = 0.05;
+  stage.camera.near = 0.04;
   stage.camera.updateProjectionMatrix();
   stage.controls.target.set(VANTAGE_TARGET[0], VANTAGE_TARGET[1], VANTAGE_TARGET[2]);
-  stage.controls.minDistance = 1.45;
+  stage.controls.minDistance = 1.05;
   stage.controls.maxDistance = 8.8;
   stage.controls.minPolarAngle = 0.12;
   stage.controls.maxPolarAngle = Math.PI * 0.88;
   stage.controls.dampingFactor = 0.075;
   stage.controls.update();
 
-  // Calibrated museum-gallery softbox PMREM environment for satin brass & stone highlights
+  // Calibrated museum-gallery softbox PMREM environment for satin brass, honed travertine & paint sheen
   const studioEnv = createAnamorphStudioEnvironment(stage.renderer);
   stage.scene.environment = studioEnv.texture;
-  stage.scene.environmentIntensity = 0.86;
+  stage.scene.environmentIntensity = 0.90;
 
-  // Tune studio 3-point rig & tighten 4096x4096 soft PCF shadow frustum around the architectural model
+  // Tune studio 3-point raking rig & tighten 4096x4096 soft PCF shadow frustum around the architectural model
   let dirIdx = 0;
   for (const child of stage.scene.children) {
     if (child instanceof THREE.DirectionalLight) {
       if (dirIdx === 0) {
-        child.color.setHex(0xf8f2e6);
-        child.position.set(3.2, 5.1, 3.4);
-        child.intensity = 2.08;
-        child.shadow.mapSize.set(4096, 4096);
-        child.shadow.radius = 2.2;
+        child.color.setHex(0xf9f3e7);
+        child.position.set(3.7, 4.5, 2.7);
+        child.intensity = 2.28;
+        child.shadow.mapSize.set(2048, 2048);
+        child.shadow.radius = 2.0;
         const d = 1.68;
         child.shadow.camera.left = -d;
         child.shadow.camera.right = d;
@@ -79,17 +79,17 @@ async function mountDay26Anamorph(): Promise<void> {
         child.shadow.normalBias = 0.006;
         child.shadow.camera.updateProjectionMatrix();
       } else if (dirIdx === 1) {
-        child.color.setHex(0xc8d6e5);
-        child.position.set(-3.8, 1.4, 2.6);
-        child.intensity = 0.72;
+        child.color.setHex(0xc4d4e4);
+        child.position.set(-3.9, 1.3, 2.5);
+        child.intensity = 0.56;
       } else if (dirIdx === 2) {
         child.color.setHex(0xf3efe6);
         child.position.set(-1.6, 3.6, -4.1);
-        child.intensity = 1.25;
+        child.intensity = 1.38;
       }
       dirIdx++;
     } else if (child instanceof THREE.HemisphereLight) {
-      child.intensity = 0.56;
+      child.intensity = 0.44;
     }
   }
 
@@ -141,16 +141,29 @@ async function mountDay26Anamorph(): Promise<void> {
     };
   }
 
-  // Interactive controls: 360 orbit, click building to project fresh stencil,
-  // click brass ring or double-click / R to smoothly glide into exact optical lock-in.
+  // Interactive controls: opens dead-locked on the optical illusion, immediately reveals
+  // depth fracture & stone-bonded paint on intentional micro-oblique hover, drag, or zoom;
+  // click building (or Space) to project fresh stencil from any angle; click brass ring /
+  // double-click / R to glide smoothly back into exact lock-in.
   const canvas = stage.shell.canvas;
+  const bootTimeMs = performance.now();
+  let hasIntentionalHover = false;
+  let hoverAnchorX: number | null = null;
+  let hoverAnchorY: number | null = null;
   let pointerDownX = 0;
   let pointerDownY = 0;
   let pointerDownMs = 0;
   let isPointerDown = false;
   let hoveredTarget: 'none' | 'building' | 'ring' = 'none';
   let hasHoverHit = false;
-  let lockGlowSmoothed = 0;
+  let lockGlowSmoothed = 1.0;
+
+  function rearmHoverGuard(): void {
+    hasIntentionalHover = false;
+    hoverAnchorX = null;
+    hoverAnchorY = null;
+    controller.clearHover();
+  }
 
   function updateNdc(clientX: number, clientY: number): void {
     const rect = canvas.getBoundingClientRect();
@@ -183,11 +196,13 @@ async function mountDay26Anamorph(): Promise<void> {
     materials.syncVantageBasis(controller.vantageBasis);
     materials.syncStencil(controller.activeStencilIndex);
     syncSightRingTransform();
+    rearmHoverGuard();
   }
 
   function performLockInGlide(): void {
     const cam = stage.camera.position;
     controller.triggerLockInGlide([cam.x, cam.y, cam.z]);
+    rearmHoverGuard();
   }
 
   const onControlsStart = () => {
@@ -202,6 +217,7 @@ async function mountDay26Anamorph(): Promise<void> {
   const onPointerDown = (ev: PointerEvent) => {
     if (ev.button !== 0) return;
     isPointerDown = true;
+    hasIntentionalHover = true;
     pointerDownX = ev.clientX;
     pointerDownY = ev.clientY;
     pointerDownMs = performance.now();
@@ -214,7 +230,24 @@ async function mountDay26Anamorph(): Promise<void> {
       canvas.style.cursor = 'grabbing';
       return;
     }
+    // Initial-load cursor & window-activation parallax guard (AGENTS.md §3.6):
+    // keep Frame 0 locked at 0.000 deg until >= 8 px of intentional pointer travel after 350 ms settle.
+    if (!hasIntentionalHover) {
+      if (performance.now() - bootTimeMs < 350) {
+        hoverAnchorX = ev.clientX;
+        hoverAnchorY = ev.clientY;
+      } else if (hoverAnchorX === null || hoverAnchorY === null) {
+        hoverAnchorX = ev.clientX;
+        hoverAnchorY = ev.clientY;
+      } else if (Math.hypot(ev.clientX - hoverAnchorX, ev.clientY - hoverAnchorY) >= 8) {
+        hasIntentionalHover = true;
+      }
+    }
+
     const hit = raycastTarget(ev.clientX, ev.clientY);
+    if (hasIntentionalHover) {
+      controller.setHoverNdc(_ndc.x, _ndc.y);
+    }
     hoveredTarget = hit;
     hasHoverHit = hit === 'building';
     if (hit === 'ring') {
@@ -254,6 +287,7 @@ async function mountDay26Anamorph(): Promise<void> {
   const onPointerLeave = () => {
     hoveredTarget = 'none';
     hasHoverHit = false;
+    controller.clearHover();
   };
 
   const onDblClick = () => {
@@ -269,6 +303,7 @@ async function mountDay26Anamorph(): Promise<void> {
   };
 
   const onWheel = () => {
+    hasIntentionalHover = true;
     controller.notifyWheel();
   };
 

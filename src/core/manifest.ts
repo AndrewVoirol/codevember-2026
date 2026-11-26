@@ -324,8 +324,8 @@ export const DAYS_MANIFEST: readonly DayEntry[] = [
     'tsl',
     'cinnabarVermilion',
     'yellowOchre',
-    'Suspended 30-slab brutalist board-formed concrete and honed Roman travertine courtyard maquette—with freestanding portal archway, six cantilevered stair treads, offset baffle wall, recessed colonnade bays, overhead concrete sky-beams, and a hovering machined satin-brass surveyor sight-ring—carrying a real-time Felice Varini projective Kubelka-Munk mineral-pigment stencil with exact 30-slab analytical line-of-sight occlusion',
-    'Drag to orbit 360° around the brutalist courtyard maquette and align with the hovering brass surveyor sight-ring to cushion into razor-sharp optical lock-in where fractured pigment bands snap into a floating geometric figure; click the building (or press Space) from any angle to project and bake a fresh mineral-pigment stencil (Concentric Rings & Diamond, Impossible Penrose Tribar, Nested Isometric Cube, Architectural Squares) from your current camera viewpoint; click the brass sight-ring, double-click, or press R to glide smoothly into optical lock-in'
+    'Suspended 30-slab brutalist board-formed concrete, open-pore honed Roman travertine, and dressed volcanic basalt courtyard maquette—with freestanding portal archway, six cantilevered stair treads, offset baffle wall, recessed colonnade bays, overhead concrete sky-beams, and a hovering machined satin-brass surveyor sight-ring—carrying a real-time Felice Varini projective Kubelka-Munk mineral-pigment stencil bonded into concrete pores, travertine vugs, and cedar shuttering grain with exact 30-slab analytical line-of-sight occlusion',
+    'Opens dead-locked on the seamless geometric emblem; nudge the pointer for an immediate subtle micro-oblique parallax reveal that cracks the figure across 12+ concrete planes, drag to orbit 360° or scroll close to inspect the stonework and mineral paint, click the building (or press Space) from any angle to project a fresh stencil, and click the brass sight-ring, double-click, or press R to glide smoothly back into optical lock-in'
   ),
   createDay(
     27,

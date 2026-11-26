@@ -6,12 +6,14 @@ import {
   DEFAULT_VANTAGE_POS,
   DETENT_CAPTURE_DEG,
   INITIAL_CAMERA_POS,
+  OBLIQUE_REFERENCE_CAMERA_POS,
   OCCLUSION_OTHER_BIAS,
   OCCLUSION_SELF_BIAS,
   PENROSE_PRIMARY_SEGS,
   PENROSE_SECONDARY_SEGS,
   SLAB_COUNT,
   STAGE_FOV_DEG,
+  STAMP_WAVE_DURATION_SEC,
   STENCIL_CONFIGS,
   STENCIL_COUNT,
   VANTAGE_TARGET,
@@ -32,6 +34,11 @@ import {
   buildSurveyorSightRingGeometry,
 } from '../src/days/26-anamorph/architectureGeometry';
 import { createAnamorphMaterials } from '../src/days/26-anamorph/materials';
+import {
+  DETAIL_TEX_SIZE,
+  PETRO_VOLUME_SIZE,
+  createArchitecturalPetrographyTextures,
+} from '../src/days/26-anamorph/stonePetrography';
 import { MINERAL_PALETTE } from '../src/core/palette';
 
 function computeSignedVolumeAndOutwardDot(geo: THREE.BufferGeometry): {
@@ -321,9 +328,14 @@ describe('Day 26 - Anamorph (Felice Varini Brutalist Courtyard Maquette)', () =>
       }
     }
 
-    // Verify off-axis oblique INITIAL_CAMERA_POS dramatically fractures depth planes
+    // Verify off-axis oblique viewpoint dramatically fractures depth planes,
+    // while even a subtle 4 deg micro-oblique shift measurably cracks depth alignment open!
     const camOblique = new THREE.PerspectiveCamera(STAGE_FOV_DEG, 16 / 9, 0.1, 100);
-    camOblique.position.set(INITIAL_CAMERA_POS[0], INITIAL_CAMERA_POS[1], INITIAL_CAMERA_POS[2]);
+    camOblique.position.set(
+      OBLIQUE_REFERENCE_CAMERA_POS[0],
+      OBLIQUE_REFERENCE_CAMERA_POS[1],
+      OBLIQUE_REFERENCE_CAMERA_POS[2]
+    );
     camOblique.lookAt(VANTAGE_TARGET[0], VANTAGE_TARGET[1], VANTAGE_TARGET[2]);
     camOblique.updateMatrixWorld();
     camOblique.updateProjectionMatrix();
@@ -348,6 +360,17 @@ describe('Day 26 - Anamorph (Felice Varini Brutalist Courtyard Maquette)', () =>
     const ndcFar = new THREE.Vector3(...pFar).project(camOblique);
     const obliqueSeparation = Math.hypot(ndcNear.x - ndcFar.x, ndcNear.y - ndcFar.y);
     expect(obliqueSeparation).toBeGreaterThan(0.15);
+
+    // Subtle 4 deg micro-oblique shift from sweet spot visibly separates foreground vs background planes
+    const microPos = sphericalToCartesian(VANTAGE_TARGET, 5.35, 0.50 + (4 * Math.PI) / 180, 0.30);
+    const camMicro = new THREE.PerspectiveCamera(STAGE_FOV_DEG, 16 / 9, 0.1, 100);
+    camMicro.position.set(microPos[0], microPos[1], microPos[2]);
+    camMicro.lookAt(VANTAGE_TARGET[0], VANTAGE_TARGET[1], VANTAGE_TARGET[2]);
+    camMicro.updateMatrixWorld();
+    camMicro.updateProjectionMatrix();
+    const microNear = new THREE.Vector3(...pNear).project(camMicro);
+    const microFar = new THREE.Vector3(...pFar).project(camMicro);
+    expect(Math.hypot(microNear.x - microFar.x, microNear.y - microFar.y)).toBeGreaterThan(0.02);
   });
 
   it('rejects hidden occluded surfaces behind foreground pillars/walls and back-facing surfaces with zero paint', () => {
@@ -480,13 +503,54 @@ describe('Day 26 - Anamorph (Felice Varini Brutalist Courtyard Maquette)', () =>
   it('supports live re-projection from arbitrary new camera angles across all 4 stencils and preserves double-click rollback', () => {
     const ctrl = new AnamorphController();
 
-    // Initial state starts oblique (~20-26 deg off-axis, not locked in, sight-ring visible)
+    // Initial state boots dead-locked at exact optical sweet spot (0.000 deg, sight-ring hidden)
+    // so the unbroken emblem reads cleanly at first glance before micro-oblique interaction!
     const bootState = ctrl.getState();
-    expect(bootState.alignmentErrorDeg).toBeGreaterThan(18);
-    expect(bootState.alignmentErrorDeg).toBeLessThan(28);
-    expect(bootState.isLockedIn).toBe(false);
+    expect(bootState.alignmentErrorDeg).toBeLessThan(0.01);
+    expect(bootState.isLockedIn).toBe(true);
     expect(bootState.activeStencilIndex).toBe(0);
     expect(bootState.projectionCount).toBe(1);
+    expect(ctrl.sightRingAlpha).toBeLessThan(0.01);
+    expect(INITIAL_CAMERA_POS[0]).toBeCloseTo(DEFAULT_VANTAGE_POS[0], 5);
+
+    // Subtle micro-oblique hover parallax cracks the illusion open (~3-5 deg) with zero brass ring,
+    // then glides smoothly back to exact 0.000 deg on hover clear!
+    const hoverOut: Vec3Tuple = [...INITIAL_CAMERA_POS];
+    let curHover: Vec3Tuple = [...INITIAL_CAMERA_POS];
+    ctrl.setHoverNdc(0.85, -0.45);
+    for (let f = 0; f < 45; f++) {
+      ctrl.step(1 / 60, curHover, hoverOut);
+      curHover = [...hoverOut];
+    }
+    expect(ctrl.getState().alignmentErrorDeg).toBeGreaterThan(2.5);
+    expect(ctrl.getState().alignmentErrorDeg).toBeLessThan(7.5);
+    expect(ctrl.sightRingAlpha).toBeLessThan(0.02);
+
+    // Seamless drag handoff from micro-oblique hover never snaps/pops camera
+    const preDragPos: Vec3Tuple = [...curHover];
+    ctrl.notifyDragStart();
+    ctrl.step(1 / 60, curHover, hoverOut);
+    expect(hoverOut[0]).toBeCloseTo(preDragPos[0], 5);
+    expect(hoverOut[1]).toBeCloseTo(preDragPos[1], 5);
+    expect(hoverOut[2]).toBeCloseTo(preDragPos[2], 5);
+    ctrl.notifyDragEnd();
+
+    // Clearing hover & gliding back restores exact lock-in
+    ctrl.clearHover();
+    ctrl.triggerLockInGlide(curHover);
+    for (let f = 0; f < 55; f++) {
+      ctrl.step(1 / 60, curHover, hoverOut);
+      curHover = [...hoverOut];
+    }
+    expect(ctrl.getState().alignmentErrorDeg).toBeLessThan(0.01);
+
+    // Orbiting deeply off-axis (~22 deg) cleanly reveals the brass surveyor's sight-ring
+    ctrl.setCameraPos(
+      OBLIQUE_REFERENCE_CAMERA_POS[0],
+      OBLIQUE_REFERENCE_CAMERA_POS[1],
+      OBLIQUE_REFERENCE_CAMERA_POS[2]
+    );
+    expect(ctrl.getState().alignmentErrorDeg).toBeGreaterThan(18);
     expect(ctrl.sightRingAlpha).toBeGreaterThan(0.95);
 
     // Re-project from 4 arbitrary viewpoints (left-front, rear-3/4, high-elevation, close-up)
@@ -569,15 +633,44 @@ describe('Day 26 - Anamorph (Felice Varini Brutalist Courtyard Maquette)', () =>
     // Outside window returns false without mutating
     ctrl.projectFromViewpoint(strayPos, 10000);
     expect(ctrl.rollbackRecentProjectionIfWithin(11000, 360)).toBe(false);
+
+    // Verify clean stencil settle completes without moving the user's camera
+    const stampOrigin = sphericalToCartesian(VANTAGE_TARGET, 5.2, -0.55, 0.34);
+    ctrl.projectFromViewpoint(stampOrigin, 20000);
+
+    const outPos: Vec3Tuple = [...stampOrigin];
+    let curPos: Vec3Tuple = [...stampOrigin];
+
+    for (let f = 0; f < 6; f++) {
+      ctrl.step(1 / 60, curPos, outPos);
+      curPos = [...outPos];
+    }
+    expect(ctrl.flashProgress).toBeGreaterThan(0.2);
+    expect(ctrl.flashProgress).toBeLessThan(0.9);
+    expect(ctrl.getState().alignmentErrorDeg).toBeLessThan(0.01);
+    expect(ctrl.sightRingAlpha).toBe(0);
+
+    const settleSteps = Math.ceil((STAMP_WAVE_DURATION_SEC + 1.0) * 60);
+    for (let f = 0; f < settleSteps; f++) {
+      ctrl.step(1 / 60, curPos, outPos);
+      curPos = [...outPos];
+    }
+    expect(ctrl.flashProgress).toBe(1);
+    expect(ctrl.getState().alignmentErrorDeg).toBeLessThan(0.01);
+    expect(ctrl.getState().isLockedIn).toBe(true);
+    expect(ctrl.sightRingAlpha).toBe(0);
+    expect(curPos[0]).toBeCloseTo(stampOrigin[0], 5);
+    expect(curPos[1]).toBeCloseTo(stampOrigin[1], 5);
+    expect(curPos[2]).toBeCloseTo(stampOrigin[2], 5);
   });
 
   it('converges smoothly via lock-in glide (including antipodal) and magnetic detent without fighting active drags', () => {
     const ctrl = new AnamorphController();
     const out: Vec3Tuple = [0, 0, 0];
 
-    // 1. Lock-in glide from INITIAL_CAMERA_POS converges smoothly to exact vantagePos
-    ctrl.triggerLockInGlide(INITIAL_CAMERA_POS);
-    let cur: Vec3Tuple = [...INITIAL_CAMERA_POS];
+    // 1. Lock-in glide from oblique angle converges smoothly to exact vantagePos
+    ctrl.triggerLockInGlide(OBLIQUE_REFERENCE_CAMERA_POS);
+    let cur: Vec3Tuple = [...OBLIQUE_REFERENCE_CAMERA_POS];
     for (let f = 0; f < 60; f++) {
       ctrl.step(1 / 60, cur, out);
       cur = [...out];
@@ -611,13 +704,13 @@ describe('Day 26 - Anamorph (Felice Varini Brutalist Courtyard Maquette)', () =>
     // 3. Magnetic detent never fights while dragging, and cushions smoothly on release inside DETENT_CAPTURE_DEG
     const nearPos = sphericalToCartesian(
       VANTAGE_TARGET,
-      4.92,
-      0.50 + 0.035, // ~2.0 deg off-axis (< DETENT_CAPTURE_DEG)
+      5.12,
+      0.50 + 0.028, // ~1.6 deg off-axis (< DETENT_CAPTURE_DEG = 2.2)
       0.30
     );
     const mNear = computeAlignmentMetrics(nearPos, DEFAULT_VANTAGE_POS, VANTAGE_TARGET);
     expect(mNear.angularErrorDeg).toBeLessThan(DETENT_CAPTURE_DEG);
-    expect(mNear.angularErrorDeg).toBeGreaterThan(1.5);
+    expect(mNear.angularErrorDeg).toBeGreaterThan(1.2);
 
     // While dragging, step must NOT modify camera position
     ctrl.notifyDragStart();
@@ -635,10 +728,52 @@ describe('Day 26 - Anamorph (Felice Varini Brutalist Courtyard Maquette)', () =>
     expect(ctrl.getState().alignmentErrorDeg).toBeLessThan(0.05);
     expect(ctrl.getState().isLockedIn).toBe(true);
 
-    // 3b. Sight-ring fades out smoothly when zoomed close inside the courtyard (camDist < 2.2)
+    // 3a. Zooming in close along the optical axis is NEVER yanked back out by magnetic detent!
+    const zoomedNearPos = sphericalToCartesian(VANTAGE_TARGET, 1.55, 0.50 + 0.015, 0.30);
+    cur = [...zoomedNearPos];
+    for (let f = 0; f < 120; f++) {
+      ctrl.step(1 / 60, cur, out);
+      cur = [...out];
+    }
+    const finalZoomRad = Math.hypot(
+      cur[0] - VANTAGE_TARGET[0],
+      cur[1] - VANTAGE_TARGET[1],
+      cur[2] - VANTAGE_TARGET[2]
+    );
+    expect(finalZoomRad).toBeCloseTo(1.55, 2);
+
+    // 3b. Sight-ring fades out smoothly when zoomed close inside the courtyard (camDist < 2.25)
     const closeZoomPos = sphericalToCartesian(VANTAGE_TARGET, 1.8, -0.45, 0.35);
     ctrl.setCameraPos(closeZoomPos[0], closeZoomPos[1], closeZoomPos[2]);
     expect(ctrl.sightRingAlpha).toBeLessThan(0.01);
+
+    // 5. Procedural petrography & mineral-paint textures generate deterministically with rich channel variance
+    const petro = createArchitecturalPetrographyTextures();
+    expect(petro.stoneVolumeTex.image.width).toBe(PETRO_VOLUME_SIZE);
+    expect(petro.concreteDetailTex.image.width).toBe(DETAIL_TEX_SIZE);
+    expect(petro.travertineDetailTex.image.width).toBe(DETAIL_TEX_SIZE);
+    expect(petro.paintStippleTex.image.width).toBe(DETAIL_TEX_SIZE);
+    expect(petro.concreteDetailTex.generateMipmaps).toBe(true);
+    expect(petro.travertineDetailTex.generateMipmaps).toBe(true);
+    expect(petro.paintStippleTex.generateMipmaps).toBe(true);
+
+    const checkChannelRange = (data: Uint8Array, label: string) => {
+      for (let ch = 0; ch < 4; ch++) {
+        let minV = 255;
+        let maxV = 0;
+        for (let i = ch; i < data.length; i += 16) {
+          const v = data[i];
+          if (v < minV) minV = v;
+          if (v > maxV) maxV = v;
+        }
+        expect(maxV - minV, `${label} ch${ch} dynamic range`).toBeGreaterThan(60);
+      }
+    };
+    checkChannelRange(petro.stoneVolumeTex.image.data as Uint8Array, 'stoneVolumeTex');
+    checkChannelRange(petro.concreteDetailTex.image.data as Uint8Array, 'concreteDetailTex');
+    checkChannelRange(petro.travertineDetailTex.image.data as Uint8Array, 'travertineDetailTex');
+    checkChannelRange(petro.paintStippleTex.image.data as Uint8Array, 'paintStippleTex');
+    petro.dispose();
 
     // 4. All 4 stencils produce clean non-overlapping primary & secondary masks in [0, 1]
     for (let sIdx = 0; sIdx < STENCIL_COUNT; sIdx++) {
